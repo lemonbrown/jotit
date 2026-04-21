@@ -26,9 +26,10 @@
             ],
             "patterns": [
                 "ghp_[A-Za-z0-9]{20,}",
-                "sk-[A-Za-z0-9]{10,}",
+                "sk-[A-Za-z0-9_-]{10,}",
                 "AKIA[0-9A-Z]{16}",
-                "-----BEGIN PRIVATE KEY-----"
+                "-----BEGIN PRIVATE KEY-----",
+                "[A-Z][A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|PASS|API|AUTH|CREDENTIAL)[A-Z0-9_]*\\s*="
             ]
         },
         {
@@ -54,7 +55,11 @@
                 "json response",
                 "webhook"
             ],
-            "patterns": []
+            "patterns": [
+                "https?://",
+                "curl\\s",
+                "fetch\\("
+            ]
         },
         {
             "id": "encoding_decoding",
@@ -205,6 +210,35 @@
                 "join"
             ],
             "patterns": []
+        },
+        {
+            "id": "env_config",
+            "name": "Env / Config",
+            "description": "Environment variables, .env files, configuration values, or deployment settings.",
+            "priority": 85,
+            "keywords": [
+                "env",
+                "environment variable",
+                ".env",
+                "dotenv",
+                "config",
+                "configuration",
+                "setting",
+                "variable",
+                "deployment",
+                "production",
+                "staging",
+                "development"
+            ],
+            "patterns": [
+                "^[A-Z][A-Z0-9_]+=",
+                "VITE_",
+                "NEXT_PUBLIC_",
+                "REACT_APP_",
+                "NODE_ENV",
+                "DATABASE_URL",
+                "PORT="
+            ]
         },
         {
             "id": "ai_embeddings",

@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 
-export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNote, searchQuery }) {
+export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNote, searchQuery, diffActive }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
   const activeIdRef = useRef(activeNoteId)
@@ -52,9 +52,9 @@ export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNo
       className="w-[420px] shrink-0 overflow-y-auto overflow-x-hidden border-r border-zinc-800 p-2"
       style={{ cursor: 'default' }}
     >
-      {/* Wheel hint */}
-      <div className="text-[10px] text-zinc-700 text-center mb-2 select-none">
-        scroll to navigate · click to select
+      {/* Hint */}
+      <div className={`text-[10px] text-center mb-2 select-none transition-colors ${diffActive ? 'text-sky-700' : 'text-zinc-700'}`}>
+        {diffActive ? '± click a note to load into diff' : 'scroll to navigate · click to select'}
       </div>
 
       <div className="card-grid">

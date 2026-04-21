@@ -1,10 +1,16 @@
 import { useState } from 'react'
 import { testConnection } from '../utils/openai'
 
-export default function Settings({ settings, onSave, onClose, onExportDB }) {
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$|^[a-z0-9]{2,40}$/
+
+export default function Settings({ settings, onSave, onClose, onExportDB, onPublish, publicNoteCount }) {
   const [apiKey, setApiKey] = useState(settings.openaiApiKey ?? '')
+  const [serverProxy, setServerProxy] = useState(settings.serverProxy ?? false)
+  const [bucketName, setBucketName] = useState(settings.bucketName ?? '')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null) // null | 'ok' | 'fail'
+  const [publishing, setPublishing] = useState(false)
+  const [publishResult, setPublishResult] = useState(null) // null | { ok, url, count } | { error }
 
   const handleTest = async () => {
     setTesting(true)
@@ -18,7 +24,20 @@ export default function Settings({ settings, onSave, onClose, onExportDB }) {
   }
 
   const handleSave = () => {
-    onSave({ ...settings, openaiApiKey: apiKey.trim() })
+    onSave({ ...settings, openaiApiKey: apiKey.trim(), serverProxy, bucketName: bucketName.trim() })
+  }
+
+  const handlePublish = async () => {
+    const slug = bucketName.trim()
+    if (!SLUG_RE.test(slug)) return
+    setPublishing(true)
+    setPublishResult(null)
+    try {
+      const result = await onPublish(slug)
+      setPublishResult(result)
+    } finally {
+      setPublishing(false)
+    }
   }
 
   return (
@@ -58,6 +77,66 @@ export default function Settings({ settings, onSave, onClose, onExportDB }) {
             <p>• Auto-tags notes (token, config, github, etc.) after you stop typing</p>
             <p>• Generates embeddings for semantic search</p>
             <p>• Lets you search "github token" and find relevant notes even without exact words</p>
+          </div>
+
+          <div className="pt-1 border-t border-zinc-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="block text-xs font-medium text-zinc-400">Route requests via local server</label>
+                <p className="text-[11px] text-zinc-600 mt-0.5">
+                  Bypasses CORS by proxying HTTP requests through a local server. Requires <code className="font-mono">npm run server</code> or <code className="font-mono">npm run dev:full</code>.
+                </p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={serverProxy}
+                onClick={() => setServerProxy(v => !v)}
+                className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${serverProxy ? 'bg-blue-600 border-blue-500' : 'bg-zinc-700 border-zinc-600'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${serverProxy ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
+          </div>
+
+          <div className="pt-1 border-t border-zinc-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-medium text-zinc-400">Public Bucket</label>
+              {publicNoteCount > 0 ? (
+                <span className="text-[11px] text-emerald-500">{publicNoteCount} public note{publicNoteCount !== 1 ? 's' : ''}</span>
+              ) : (
+                <span className="text-[11px] text-zinc-600">no public notes — toggle notes to make them public</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={bucketName}
+                onChange={e => { setBucketName(e.target.value.toLowerCase()); setPublishResult(null) }}
+                placeholder="your-bucket-name"
+                spellCheck={false}
+                className="flex-1 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+              />
+              <button
+                onClick={handlePublish}
+                disabled={publishing || !SLUG_RE.test(bucketName.trim()) || publicNoteCount === 0}
+                className="px-3 py-2 text-xs bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md transition-colors font-medium whitespace-nowrap"
+              >
+                {publishing ? 'Publishing…' : 'Publish'}
+              </button>
+            </div>
+            {!SLUG_RE.test(bucketName.trim()) && bucketName.trim().length > 0 && (
+              <p className="text-[11px] text-red-400">Use 2–40 lowercase letters, numbers, or hyphens</p>
+            )}
+            {publishResult?.ok && (
+              <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                Published {publishResult.count} note{publishResult.count !== 1 ? 's' : ''} →{' '}
+                <span className="font-mono text-emerald-300">/b/{bucketName.trim()}</span>
+              </p>
+            )}
+            {publishResult?.error && (
+              <p className="text-[11px] text-red-400">{publishResult.error}</p>
+            )}
           </div>
 
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">

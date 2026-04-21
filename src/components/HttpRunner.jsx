@@ -3,6 +3,7 @@ import hljs from 'highlight.js/lib/core'
 import json from 'highlight.js/lib/languages/json'
 import xml from 'highlight.js/lib/languages/xml'
 import { parseRequests } from '../utils/httpParser'
+import { loadSettings } from '../utils/storage'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('xml', xml)
@@ -100,29 +101,49 @@ function RequestPane({ req, idx, total }) {
     setRespTab('body')
     abortRef.current = new AbortController()
     const t0 = performance.now()
+    const { serverProxy } = loadSettings()
     try {
-      const fetchOpts = {
-        method: req.method,
-        headers: req.headers,
-        signal: abortRef.current.signal,
+      let status, statusText, respHeaders, bodyText, contentType, elapsed
+
+      if (serverProxy) {
+        const proxyRes = await fetch('/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: req.url, method: req.method, headers: req.headers, body: req.body }),
+          signal: abortRef.current.signal,
+        })
+        const data = await proxyRes.json()
+        if (!proxyRes.ok && data.error) throw new Error(data.error)
+        elapsed = data.elapsed ?? Math.round(performance.now() - t0)
+        ;({ status, statusText, headers: respHeaders, body: bodyText } = data)
+        contentType = respHeaders?.['content-type'] ?? ''
+      } else {
+        const fetchOpts = {
+          method: req.method,
+          headers: req.headers,
+          signal: abortRef.current.signal,
+        }
+        if (req.body && req.method !== 'GET' && req.method !== 'HEAD') {
+          fetchOpts.body = req.body
+        }
+        const res = await fetch(req.url, fetchOpts)
+        elapsed = Math.round(performance.now() - t0)
+        contentType = res.headers.get('content-type') ?? ''
+        bodyText = await res.text()
+        status = res.status
+        statusText = res.statusText
+        respHeaders = {}
+        res.headers.forEach((v, k) => { respHeaders[k] = v })
       }
-      if (req.body && req.method !== 'GET' && req.method !== 'HEAD') {
-        fetchOpts.body = req.body
-      }
-      const res = await fetch(req.url, fetchOpts)
-      const elapsed = Math.round(performance.now() - t0)
-      const contentType = res.headers.get('content-type') ?? ''
-      const bodyText = await res.text()
+
       const size = new Blob([bodyText]).size
-      const respHeaders = {}
-      res.headers.forEach((v, k) => { respHeaders[k] = v })
-      setResponse({ status: res.status, statusText: res.statusText, headers: respHeaders, body: bodyText, contentType, elapsed, size })
+      setResponse({ status, statusText, headers: respHeaders, body: bodyText, contentType, elapsed, size })
     } catch (e) {
       if (e.name === 'AbortError') return
       const elapsed = Math.round(performance.now() - t0)
       let msg = e.message ?? String(e)
       if (msg === 'Failed to fetch') {
-        msg = 'Request failed — likely a CORS restriction or network error. The target server must allow requests from this origin.'
+        msg = 'Request failed — likely a CORS restriction or network error. Enable "Route via server" in Settings to bypass CORS.'
       }
       setNetError({ msg, elapsed })
     } finally {

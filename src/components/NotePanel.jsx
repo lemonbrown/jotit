@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { marked } from 'marked'
 import hljs from 'highlight.js/lib/core'
 import json from 'highlight.js/lib/languages/json'
@@ -20,6 +20,7 @@ import { detectRequestType } from '../utils/httpParser'
 import CategoryBadge from './CategoryBadge'
 import RegexTester from './RegexTester'
 import HttpRunner from './HttpRunner'
+import DiffViewer from './DiffViewer'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -56,7 +57,7 @@ function isValidJson(text) {
   try { JSON.parse(t); return true } catch { return false }
 }
 
-export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete }) {
+export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete, txExpanded, onTxExpandedChange, notes, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -67,10 +68,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [sel, setSel] = useState({ start: 0, end: 0, text: '' })
   const [txResult, setTxResult] = useState(null) // { opName, text, error } | null
   const [txCopied, setTxCopied] = useState(false)
+  const [interactiveTx, setInteractiveTx] = useState(null) // { id, opName, param } | null
+  const [guidCopied, setGuidCopied] = useState(false)
+  const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
+  const [diffInstance, setDiffInstance] = useState(0)
+  const [diffPendingNote, setDiffPendingNote] = useState(null)
+  const showMoreTx = txExpanded
+  const setShowMoreTx = onTxExpandedChange
 
   const textareaRef = useRef(null)
+  const interactiveInputRef = useRef(null)
   const capturedSelectionRef = useRef('')
   const capturedHttpSelRef = useRef('')
+  const capturedDiffARef = useRef('')
+  const capturedDiffBRef = useRef('')
   const [httpInstance, setHttpInstance] = useState(0)
   const charCount = content.length
   const lineCount = content.split('\n').length
@@ -80,8 +91,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setConfirmDelete(false)
     setSel({ start: 0, end: 0, text: '' })
     setTxResult(null)
-    if (!note.content) setTimeout(() => textareaRef.current?.focus(), 50)
+    setInteractiveTx(null)
   }, [note.id])
+
+  // Register/unregister diff note loader with parent
+  useEffect(() => {
+    if (mode === 'diff') {
+      onDiffModeChange?.((note) => setDiffPendingNote(note))
+    } else {
+      onDiffModeChange?.(null)
+    }
+    return () => onDiffModeChange?.(null)
+  }, [mode])
 
   // ── Selection tracking ──────────────────────────────────────────────────────
   const updateSel = () => {
@@ -99,17 +120,56 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     if (ta.selectionStart === ta.selectionEnd) {
       setSel({ start: 0, end: 0, text: '' })
       setTxResult(null)
+      setInteractiveTx(null)
     }
   }
 
   // ── Transforms ──────────────────────────────────────────────────────────────
-  const runTransform = (id, opName) => {
+  const runTransform = (id, opName, param = '') => {
     try {
-      const result = applyTransform(id, sel.text)
+      const result = applyTransform(id, sel.text, param)
       setTxResult({ opName, text: result, error: null })
     } catch (e) {
       setTxResult({ opName, text: '', error: e.message })
     }
+  }
+
+  const startInteractive = (id, opName) => {
+    setInteractiveTx({ id, opName, param: '' })
+    setTxResult(null)
+    requestAnimationFrame(() => interactiveInputRef.current?.focus())
+  }
+
+  const updateInteractiveParam = (param) => {
+    setInteractiveTx(prev => ({ ...prev, param }))
+    try {
+      const result = applyTransform(interactiveTx.id, sel.text, param)
+      setTxResult({ opName: interactiveTx.opName, text: result, error: null })
+    } catch (e) {
+      setTxResult({ opName: interactiveTx.opName, text: '', error: e.message })
+    }
+  }
+
+  const dismissInteractive = () => {
+    setInteractiveTx(null)
+    setTxResult(null)
+  }
+
+  const insertGuid = () => {
+    const guid = crypto.randomUUID()
+    const ta = textareaRef.current
+    if (!ta) return
+    const start = ta.selectionStart
+    const end = ta.selectionEnd
+    const next = content.slice(0, start) + guid + content.slice(end)
+    setContent(next)
+    onUpdate({ content: next })
+    requestAnimationFrame(() => {
+      ta.selectionStart = ta.selectionEnd = start + guid.length
+      ta.focus()
+    })
+    setGuidCopied(true)
+    setTimeout(() => setGuidCopied(false), 1500)
   }
 
   const applyTxResult = () => {
@@ -165,25 +225,30 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000) }
   }
 
-  const handleRegexMouseDown = () => {
-    if (mode === 'regex') return
+  // Capture selection for panel mode switches
+  const captureSelForModeSwitch = () => {
     const ta = textareaRef.current
-    if (ta && ta.selectionStart !== ta.selectionEnd) {
-      capturedSelectionRef.current = ta.value.slice(ta.selectionStart, ta.selectionEnd)
-    } else {
-      capturedSelectionRef.current = ''
-    }
+    const text = (ta && ta.selectionStart !== ta.selectionEnd)
+      ? ta.value.slice(ta.selectionStart, ta.selectionEnd)
+      : ''
+    capturedSelectionRef.current = text
+    capturedHttpSelRef.current = text
+    capturedDiffARef.current = text
+    capturedDiffBRef.current = ''
   }
 
-  const handleHttpMouseDown = () => {
-    if (mode === 'http') return
-    const ta = textareaRef.current
-    if (ta && ta.selectionStart !== ta.selectionEnd) {
-      capturedHttpSelRef.current = ta.value.slice(ta.selectionStart, ta.selectionEnd)
-    } else {
-      capturedHttpSelRef.current = ''
-    }
+  const openDiffWithCaptures = () => {
+    setDiffInstance(i => i + 1)
+    switchMode('diff')
   }
+
+  const switchMode = useCallback((next) => {
+    if (next === 'regex' && mode !== 'regex') setRegexInstance(i => i + 1)
+    if (next === 'http'  && mode !== 'http')  setHttpInstance(i => i + 1)
+    if (next === 'diff'  && mode !== 'diff')  setDiffInstance(i => i + 1)
+    setMode(prev => prev === next ? 'edit' : next)
+  }, [mode])
+
 
   // ── Highlight.js ────────────────────────────────────────────────────────────
   const { highlighted, language } = useMemo(() => {
@@ -206,7 +271,36 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [content])
 
   const jsonValid = isValidJson(content)
-  const showTransformStrip = mode === 'edit' && sel.text.length > 0
+  const hasSelection = sel.text.length > 0
+
+  // Score each transform against the selected text for contextual ordering
+  const scoredTransforms = useMemo(() => {
+    const t = sel.text.trim()
+    if (!t) return TRANSFORMS.map(tx => ({ ...tx, score: 0 }))
+    const score = (id) => {
+      const bare = t.replace(/[{}\-()\s]/g, '')
+      if (id === 'jwt')      return t.split('.').length === 3 && /^[A-Za-z0-9_-]{10,}$/.test(t.split('.')[0]) ? 10 : 0
+      if (id === 'json')     return (t[0] === '{' || t[0] === '[') ? 9 : 0
+      if (id === 'jsonpath') return (t[0] === '{' || t[0] === '[') ? 8 : 0
+      if (id === 'qs')       return (t.includes('=') && (t.includes('&') || t.includes('?'))) ? 9 : 0
+      if (id === 'urld')     return t.includes('%') ? 8 : 0
+      if (id === 'base64d')  return /^[A-Za-z0-9+/=_-]{16,}$/.test(t.replace(/\s/g,'')) ? 6 : 0
+      if (id === 'htmld')    return (t.includes('&amp;') || t.includes('&#') || t.includes('&lt;')) ? 8 : 0
+      if (id === 'unicode')  return (t.includes('\\u') || t.includes('&#x')) ? 8 : 0
+      if (id === 'hex2asc')  return /^([0-9a-fA-F]{2}[\s:])+[0-9a-fA-F]{2}$/.test(t) ? 9 : /^[0-9a-fA-F]{8,}$/.test(t) ? 6 : 0
+      if (id === 'csv2json') return (t.includes(',') && t.includes('\n')) ? 8 : 0
+      if (id === 'logfmt')   return /\d{4}-\d{2}-\d{2}/.test(t) || /\w+=\S+/.test(t) ? 7 : 0
+      if (id === 'guidval')  return /^[0-9a-fA-F-]{32,36}$/.test(bare) ? 10 : 0
+      if (id === 'guidstrip')return /^[0-9a-fA-F-]{32,36}$/.test(bare) && t.includes('-') ? 8 : 0
+      if (id === 'guidfmt')  return /^[0-9a-fA-F]{32}$/.test(bare) && !t.includes('-') ? 8 : 0
+      if (id === 'toSnake')  return (/[a-z][A-Z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
+      if (id === 'toCamel')  return (/_[a-z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
+      if (id === 'toPascal') return (/_[a-z]/.test(t) || /[a-z][A-Z]/.test(t) || /[-\s][a-zA-Z]/.test(t)) ? 4 : 0
+      return 0
+    }
+    return TRANSFORMS.map(tx => ({ ...tx, score: score(tx.id) }))
+  }, [sel.text])
+
 
   return (
     <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -224,7 +318,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           </button>
         )}
         <button
-          onClick={() => setMode(m => m === 'preview' ? 'edit' : 'preview')}
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('preview')}
           title="Syntax highlighting preview"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
             mode === 'preview'
@@ -236,11 +331,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {mode === 'preview' ? 'Edit' : 'Preview'}
         </button>
         <button
-          onMouseDown={handleRegexMouseDown}
-          onClick={() => {
-            if (mode !== 'regex') setRegexInstance(i => i + 1)
-            setMode(m => m === 'regex' ? 'edit' : 'regex')
-          }}
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('regex')}
           title="Test regex"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
             mode === 'regex'
@@ -252,7 +344,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {mode === 'regex' ? 'Edit' : 'Regex'}
         </button>
         <button
-          onClick={() => setMode(m => m === 'markdown' ? 'edit' : 'markdown')}
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('markdown')}
           title="Markdown preview"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
             mode === 'markdown'
@@ -264,11 +357,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {mode === 'markdown' ? 'Edit' : 'Preview'}
         </button>
         <button
-          onMouseDown={handleHttpMouseDown}
-          onClick={() => {
-            if (mode !== 'http') setHttpInstance(i => i + 1)
-            setMode(m => m === 'http' ? 'edit' : 'http')
-          }}
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('http')}
           title="HTTP / curl runner — select text first to use only that selection"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
             mode === 'http'
@@ -282,11 +372,51 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {mode === 'http' ? 'Edit' : 'HTTP'}
         </button>
         <button
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('diff')}
+          title="Diff two texts or notes"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'diff'
+              ? 'text-sky-300 bg-sky-950/50 border-sky-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          <span className="text-[12px]">±</span>
+          {mode === 'diff' ? 'Edit' : 'Diff'}
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={insertGuid}
+          title="Insert UUID v4 at cursor"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            guidCopied
+              ? 'text-green-300 border-green-800 bg-green-950/30'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          {guidCopied ? '✓ inserted' : 'GUID'}
+        </button>
+        <button
           onClick={copyToClipboard}
           title="Copy to clipboard"
           className="flex items-center gap-1 px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-600 rounded transition-colors"
         >
           {copied ? '✓ Copied' : '📋 Copy'}
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => onUpdate({ isPublic: !note.isPublic })}
+          title={note.isPublic ? 'Public — click to make private' : 'Private — click to make public'}
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            note.isPublic
+              ? 'text-emerald-300 bg-emerald-950/40 border-emerald-800 hover:bg-emerald-950/60'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM4.332 8.027a6.012 6.012 0 011.912-2.706C6.512 5.73 6.974 6 7.5 6A1.5 1.5 0 019 7.5V8a2 2 0 004 0 2 2 0 011.523-1.943A5.977 5.977 0 0116 10c0 .34-.028.675-.083 1H15a2 2 0 00-2 2v2.197A5.973 5.973 0 0110 16v-2a2 2 0 00-2-2 2 2 0 01-2-2 2 2 0 00-1.668-1.973z" clipRule="evenodd" />
+          </svg>
+          {note.isPublic ? 'Public' : 'Private'}
         </button>
         <div className="ml-auto flex items-center gap-3">
           {aiProcessing && (
@@ -308,23 +438,116 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       </div>
 
-      {/* ── Transform strip (appears on text selection) ── */}
-      {showTransformStrip && (
-        <div className="flex items-center gap-1 px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 overflow-x-auto shrink-0">
-          <span className="text-[10px] text-zinc-600 font-mono shrink-0 mr-0.5">
-            {sel.text.length}c →
-          </span>
-          {TRANSFORMS.map(t => (
+      {/* ── Transform strip ── */}
+      {mode === 'edit' && !interactiveTx && (
+        <div className={`px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 ${showMoreTx ? 'flex flex-wrap gap-1' : 'flex items-center gap-1 overflow-hidden'}`}>
+          {hasSelection ? (
+            <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">
+              {sel.text.length}c
+            </span>
+          ) : (
+            <span className="text-[10px] text-zinc-700 font-mono shrink-0 self-center mr-0.5">
+              select to transform
+            </span>
+          )}
+
+          {/* Suggested transforms (score > 0), or all when expanded */}
+          {(showMoreTx ? scoredTransforms : scoredTransforms.filter(t => t.score > 0).sort((a, b) => b.score - a.score).slice(0, 5))
+            .map(t => (
+              <button
+                key={t.id}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => hasSelection && (t.interactive ? startInteractive(t.id, t.title) : runTransform(t.id, t.title))}
+                title={hasSelection ? t.title : 'Select text first'}
+                className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                  !hasSelection
+                    ? 'text-zinc-700 border-zinc-800 cursor-default'
+                    : t.score > 0
+                      ? 'text-zinc-300 hover:text-zinc-100 border-zinc-600 hover:border-zinc-400 bg-zinc-800/80 hover:bg-zinc-700'
+                      : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600 bg-transparent hover:bg-zinc-800/40'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))
+          }
+
+          {/* Diff capture buttons */}
+          {hasSelection && !diffCapture && (
             <button
-              key={t.id}
-              onMouseDown={e => e.preventDefault()} // keep textarea selection
-              onClick={() => runTransform(t.id, t.title)}
-              title={t.title}
-              className="px-2 py-0.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-400 rounded bg-zinc-900 hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => setDiffCapture(sel.text)}
+              title="Capture as diff side A"
+              className="px-2 py-0.5 text-[11px] font-mono text-sky-500 hover:text-sky-300 border border-sky-900 hover:border-sky-700 rounded bg-sky-950/20 hover:bg-sky-950/40 transition-colors whitespace-nowrap shrink-0"
             >
-              {t.label}
+              Diff A
             </button>
-          ))}
+          )}
+          {hasSelection && diffCapture && (
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                capturedDiffARef.current = diffCapture
+                capturedDiffBRef.current = sel.text
+                setDiffCapture(null)
+                openDiffWithCaptures()
+              }}
+              title={`Compare with captured A (${diffCapture.length}c)`}
+              className="px-2 py-0.5 text-[11px] font-mono text-sky-300 border border-sky-600 bg-sky-900/40 hover:bg-sky-900/70 rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              vs A
+            </button>
+          )}
+          {diffCapture && (
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => setDiffCapture(null)}
+              title="Clear captured A"
+              className="px-1.5 py-0.5 text-[10px] font-mono text-sky-700 hover:text-sky-500 border border-sky-900 rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              A ✕
+            </button>
+          )}
+
+          {/* Show all / collapse toggle */}
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => setShowMoreTx(v => !v)}
+            title={showMoreTx ? 'Collapse' : 'Show all transforms'}
+            className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors shrink-0 ${showMoreTx ? 'ml-0' : 'ml-auto'} ${
+              showMoreTx
+                ? 'text-zinc-400 border-zinc-600 bg-zinc-800 hover:text-zinc-200'
+                : 'text-zinc-600 border-zinc-800 hover:text-zinc-400 hover:border-zinc-600'
+            }`}
+          >
+            {showMoreTx ? '↑ less' : '···'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Interactive transform input (e.g. JSON path) ── */}
+      {mode === 'edit' && interactiveTx && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0">
+            {interactiveTx.opName}
+          </span>
+          <input
+            ref={interactiveInputRef}
+            value={interactiveTx.param}
+            onChange={e => updateInteractiveParam(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Escape') dismissInteractive() }}
+            placeholder=".data.items[].title"
+            spellCheck={false}
+            className="flex-1 bg-zinc-800 border border-zinc-700 focus:border-zinc-500 rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700"
+          />
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={dismissInteractive}
+            className="text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
+            title="Cancel (Esc)"
+          >
+            ✕
+          </button>
         </div>
       )}
 
@@ -378,7 +601,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           initialText={capturedHttpSelRef.current}
         />
       )}
-
+      {mode === 'diff' && (
+        <DiffViewer
+          key={`${note.id}-${diffInstance}`}
+          noteContent={content}
+          initialA={capturedDiffARef.current}
+          initialB={capturedDiffBRef.current}
+          notes={notes}
+          currentNoteId={note.id}
+          pendingNote={diffPendingNote}
+          onPendingNoteConsumed={() => setDiffPendingNote(null)}
+        />
+      )}
       {/* ── Transform result panel ── */}
       {txResult && mode === 'edit' && (
         <div className="border-t border-zinc-700 bg-zinc-900/80 shrink-0 flex flex-col max-h-56">
@@ -418,7 +652,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       )}
 
       {/* ── Footer ── */}
-      {mode !== 'regex' && mode !== 'http' && (
+      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
           {note.categories.length > 0
             ? note.categories.map(c => <CategoryBadge key={c} category={c} />)

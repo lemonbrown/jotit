@@ -35,6 +35,9 @@ export default function NoteCard({ note, isActive, isProcessing, onSelect, searc
       {isProcessing && (
         <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
       )}
+      {note.isPublic && !isProcessing && (
+        <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-emerald-500" title="Public" />
+      )}
 
       {/* First line as heading */}
       <div className={`note-content text-[12px] font-medium truncate mb-1 ${firstLine ? 'text-zinc-200' : 'text-zinc-700 italic'}`}>

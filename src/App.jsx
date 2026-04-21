@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
 import { initDB, getAllNotes, upsertNoteSync, deleteNoteSync, schedulePersist, exportSQLite } from './utils/db'
-import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, initCategoryEmbeddings, categorizeByEmbedding, areCategoryEmbeddingsReady } from './utils/openai'
+import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, initCategoryEmbeddings, categorize } from './utils/openai'
 import { generateId, SAMPLE_NOTES } from './utils/helpers'
 import NoteGrid from './components/NoteGrid'
 import NotePanel from './components/NotePanel'
@@ -25,6 +25,9 @@ export default function App() {
   const searchRef = useRef(null)
   const [isSearching, setIsSearching] = useState(false)
   const [aiProcessing, setAiProcessing] = useState(new Set())
+  const [txExpanded, setTxExpanded] = useState(false)
+  const diffLoaderRef = useRef(null) // set by NotePanel when diff mode is active
+  const [diffActive, setDiffActive] = useState(false)
 
   const notesRef = useRef(notes)
   useEffect(() => { notesRef.current = notes }, [notes])
@@ -66,9 +69,10 @@ export default function App() {
       setTimeout(async () => {
         const embed = await getEmbedding(note.content)
         if (embed) {
-          const categories = areCategoryEmbeddingsReady() ? categorizeByEmbedding(embed) : []
+          await initCategoryEmbeddings()
+          const categories = categorize(note.content, embed)
           setNotes(prev => {
-            const updated = { ...note, embedding: embed, ...(categories.length ? { categories } : {}) }
+            const updated = { ...note, embedding: embed, categories }
             const next = prev.map(n => n.id === note.id ? updated : n)
             upsertNoteSync(updated)
             schedulePersist()
@@ -87,6 +91,7 @@ export default function App() {
       content: '',
       categories: [],
       embedding: null,
+      isPublic: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
@@ -120,13 +125,14 @@ export default function App() {
         try {
           // Embedding first — categorization is derived from it, no extra API call
           const embedding = await getEmbedding(note.content)
-          const categories = (embedding && areCategoryEmbeddingsReady())
-            ? categorizeByEmbedding(embedding)
-            : []
+          console.log('[JotIt] embedding result:', embedding ? `vector[${embedding.length}]` : null)
+          await initCategoryEmbeddings()
+          const categories = categorize(note.content, embedding ?? null)
+          console.log('[JotIt] categories:', categories)
           setNotes(prev => {
             const next = prev.map(n => {
               if (n.id !== id) return n
-              const updated = { ...n, embedding, ...(categories.length ? { categories } : {}) }
+              const updated = { ...n, embedding, categories }
               upsertNoteSync(updated)
               return updated
             })
@@ -179,6 +185,22 @@ export default function App() {
     setShowSettings(false)
   }, [])
 
+  const handlePublish = useCallback(async (bucketName) => {
+    const publicNotes = notesRef.current.filter(n => n.isPublic)
+    try {
+      const res = await fetch('/api/bucket/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bucketName, notes: publicNotes }),
+      })
+      const data = await res.json()
+      if (!res.ok) return { error: data.error ?? 'Publish failed' }
+      return { ok: true, count: data.count, url: data.url }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [])
+
   // ── Drag & drop ─────────────────────────────────────────────────────────────
   const handleDragEnter = useCallback((e) => {
     e.preventDefault()
@@ -229,11 +251,11 @@ export default function App() {
         getEmbedding(note.content)
           .then(embedding => {
             if (!embedding) return
-            const categories = areCategoryEmbeddingsReady() ? categorizeByEmbedding(embedding) : []
+            const categories = categorize(note.content, embedding)
             setNotes(prev => {
               const next = prev.map(n => {
                 if (n.id !== note.id) return n
-                const updated = { ...n, embedding, ...(categories.length ? { categories } : {}) }
+                const updated = { ...n, embedding, categories }
                 upsertNoteSync(updated)
                 return updated
               })
@@ -273,6 +295,7 @@ export default function App() {
   const displayedNotes = searchResults ?? notes
   const activeNote = notes.find(n => n.id === activeNoteId) ?? null
   const aiEnabled = isOpenAIReady()
+  const publicNoteCount = notes.filter(n => n.isPublic).length
 
   // ── Render ──────────────────────────────────────────────────────────────────
   if (!dbReady) {
@@ -358,8 +381,16 @@ export default function App() {
           notes={displayedNotes}
           activeNoteId={activeNoteId}
           aiProcessing={aiProcessing}
-          onSelectNote={setActiveNoteId}
+          onSelectNote={(id) => {
+            if (diffLoaderRef.current) {
+              const note = notes.find(n => n.id === id)
+              if (note) diffLoaderRef.current(note)
+            } else {
+              setActiveNoteId(id)
+            }
+          }}
           searchQuery={searchQuery}
+          diffActive={diffActive}
         />
         {activeNote ? (
           <NotePanel
@@ -369,6 +400,13 @@ export default function App() {
             aiEnabled={aiEnabled}
             onUpdate={(updates) => updateNote(activeNote.id, updates)}
             onDelete={() => deleteNote(activeNote.id)}
+            txExpanded={txExpanded}
+            onTxExpandedChange={setTxExpanded}
+            notes={notes}
+            onDiffModeChange={(loader) => {
+              diffLoaderRef.current = loader
+              setDiffActive(!!loader)
+            }}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-zinc-700">
@@ -384,7 +422,7 @@ export default function App() {
       </div>
 
       {showSettings && (
-        <Settings settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} onExportDB={exportSQLite} />
+        <Settings settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} onExportDB={exportSQLite} onPublish={handlePublish} publicNoteCount={publicNoteCount} />
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
     </div>

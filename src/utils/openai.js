@@ -149,6 +149,31 @@ export function categorizeByEmbedding(noteEmbedding, threshold = 0.35, maxTags =
     .map(x => x.name)
 }
 
+/** Pattern-based categorization using regex patterns from embedding_keywords.json */
+export function categorizeByPatterns(content) {
+  const matched = []
+  for (const cat of KEYWORD_DATA.categories) {
+    if (!cat.patterns?.length) continue
+    for (const pattern of cat.patterns) {
+      const hit = new RegExp(pattern).test(content)
+      console.log(`[JotIt] pattern "${pattern}" vs content[0:40]="${content.slice(0,40)}" → ${hit}`)
+      if (hit) {
+        matched.push(cat.name)
+        break
+      }
+    }
+  }
+  return matched
+}
+
+/** Combine pattern + embedding results, pattern matches take priority */
+export function categorize(content, noteEmbedding, { threshold = 0.35, maxTags = 4 } = {}) {
+  const patternMatches = categorizeByPatterns(content)
+  const embedMatches = categorizeByEmbedding(noteEmbedding, threshold, maxTags)
+  const merged = [...new Set([...patternMatches, ...embedMatches])]
+  return merged.slice(0, maxTags)
+}
+
 function cosineSimilarity(a, b) {
   let dot = 0, na = 0, nb = 0
   for (let i = 0; i < a.length; i++) {

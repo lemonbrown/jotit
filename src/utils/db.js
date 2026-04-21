@@ -53,7 +53,8 @@ const SCHEMA = `
     categories  TEXT    NOT NULL DEFAULT '[]',
     embedding   TEXT,
     created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    updated_at  INTEGER NOT NULL,
+    is_public   INTEGER NOT NULL DEFAULT 0
   );
 `
 
@@ -63,6 +64,8 @@ export async function initDB() {
 
   db = saved ? new SQL.Database(saved) : new SQL.Database()
   db.run(SCHEMA)
+  // Migrate: add is_public if missing (safe to run on existing DBs)
+  try { db.run('ALTER TABLE notes ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
 
   // Migrate from localStorage if SQLite is empty and localStorage has data
   const count = db.exec('SELECT COUNT(*) as n FROM notes')[0]?.values[0][0] ?? 0
@@ -132,8 +135,8 @@ export function getAllNotes() {
 export function upsertNoteSync(note) {
   if (!db) return
   db.run(
-    `INSERT OR REPLACE INTO notes (id, content, categories, embedding, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO notes (id, content, categories, embedding, created_at, updated_at, is_public)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       note.id,
       note.content,
@@ -141,6 +144,7 @@ export function upsertNoteSync(note) {
       note.embedding ? JSON.stringify(note.embedding) : null,
       note.createdAt,
       note.updatedAt,
+      note.isPublic ? 1 : 0,
     ]
   )
 }
@@ -173,5 +177,6 @@ function deserialize(row) {
     embedding:  row.embedding ? JSON.parse(row.embedding) : null,
     createdAt:  row.created_at,
     updatedAt:  row.updated_at,
+    isPublic:   row.is_public === 1,
   }
 }
