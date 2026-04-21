@@ -1,0 +1,229 @@
+{
+    "categories": [
+        {
+            "id": "secrets_credentials",
+            "name": "Secrets / Credentials",
+            "description": "Contains authentication credentials, API keys, tokens, passwords, or private keys.",
+            "priority": 100,
+            "keywords": [
+                "api key",
+                "secret",
+                "token",
+                "access token",
+                "bearer token",
+                "auth",
+                "authentication",
+                "credential",
+                "password",
+                "private key",
+                "public key",
+                "ssh key",
+                "jwt",
+                "refresh token",
+                "session token",
+                "client secret",
+                "api secret"
+            ],
+            "patterns": [
+                "ghp_[A-Za-z0-9]{20,}",
+                "sk-[A-Za-z0-9]{10,}",
+                "AKIA[0-9A-Z]{16}",
+                "-----BEGIN PRIVATE KEY-----"
+            ]
+        },
+        {
+            "id": "http_api",
+            "name": "HTTP / API Requests",
+            "description": "Notes involving API calls, HTTP requests, endpoints, or web service interactions.",
+            "priority": 80,
+            "keywords": [
+                "http",
+                "https",
+                "request",
+                "response",
+                "endpoint",
+                "api",
+                "curl",
+                "get",
+                "post",
+                "put",
+                "delete",
+                "patch",
+                "headers",
+                "payload",
+                "json response",
+                "webhook"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "encoding_decoding",
+            "name": "Encoding / Decoding",
+            "description": "Data transformation operations such as base64, URL encoding, JWT decoding, or hex conversions.",
+            "priority": 90,
+            "keywords": [
+                "decode",
+                "encode",
+                "base64",
+                "url decode",
+                "url encode",
+                "percent encoding",
+                "jwt decode",
+                "hex",
+                "ascii",
+                "unicode",
+                "escape",
+                "unescape",
+                "parse"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "data_transformation",
+            "name": "Data Transformation / Parsing",
+            "description": "Structuring, cleaning, or converting data formats.",
+            "priority": 70,
+            "keywords": [
+                "transform",
+                "convert",
+                "format",
+                "parse",
+                "extract",
+                "normalize",
+                "clean",
+                "sanitize",
+                "mapping",
+                "schema",
+                "flatten",
+                "serialize",
+                "deserialize"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "debugging_logs",
+            "name": "Debugging / Logs",
+            "description": "Errors, logs, stack traces, or runtime failure analysis.",
+            "priority": 85,
+            "keywords": [
+                "error",
+                "exception",
+                "stack trace",
+                "log",
+                "debug",
+                "crash",
+                "fail",
+                "timeout",
+                "null reference",
+                "status code",
+                "500",
+                "404",
+                "retry"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "web_scraping",
+            "name": "Web Scraping / Extraction",
+            "description": "Scraping, crawling, HTML parsing, or content extraction workflows.",
+            "priority": 75,
+            "keywords": [
+                "scrape",
+                "crawler",
+                "html",
+                "dom",
+                "selector",
+                "cheerio",
+                "puppeteer",
+                "playwright",
+                "extract",
+                "rss",
+                "feed",
+                "regex extract",
+                "parse html"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "workflow_automation",
+            "name": "Workflow / Automation",
+            "description": "Multi-step processes, automation pipelines, scheduled jobs, or execution flows.",
+            "priority": 80,
+            "keywords": [
+                "workflow",
+                "pipeline",
+                "step",
+                "chain",
+                "automation",
+                "trigger",
+                "schedule",
+                "cron",
+                "job",
+                "task",
+                "batch",
+                "process",
+                "execute"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "ideas_planning",
+            "name": "Ideas / Planning",
+            "description": "Unstructured thoughts, brainstorming, concepts, or design notes.",
+            "priority": 40,
+            "keywords": [
+                "idea",
+                "thought",
+                "plan",
+                "concept",
+                "design",
+                "architecture",
+                "proposal",
+                "notes",
+                "brainstorming",
+                "outline"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "database_storage",
+            "name": "Database / Storage",
+            "description": "Database schemas, queries, migrations, or storage logic.",
+            "priority": 75,
+            "keywords": [
+                "sqlite",
+                "sql",
+                "database",
+                "table",
+                "schema",
+                "migration",
+                "index",
+                "query",
+                "select",
+                "insert",
+                "update",
+                "join"
+            ],
+            "patterns": []
+        },
+        {
+            "id": "ai_embeddings",
+            "name": "AI / Embeddings / Search",
+            "description": "Semantic search, embeddings, vector similarity, or LLM-related systems.",
+            "priority": 60,
+            "keywords": [
+                "embedding",
+                "vector",
+                "similarity",
+                "cosine",
+                "semantic search",
+                "ranking",
+                "relevance",
+                "llm",
+                "openai",
+                "classification"
+            ],
+            "patterns": []
+        }
+    ]
+}

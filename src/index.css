@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #09090b;
+  color: #e4e4e7;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+textarea, input { font-family: inherit; }
+
+.note-content {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Markdown preview prose styles */
+.md-prose {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #d4d4d8;
+}
+.md-prose h1, .md-prose h2, .md-prose h3,
+.md-prose h4, .md-prose h5, .md-prose h6 {
+  color: #f4f4f5;
+  font-weight: 600;
+  margin: 1.25em 0 0.5em;
+  line-height: 1.3;
+}
+.md-prose h1 { font-size: 1.6em; border-bottom: 1px solid #3f3f46; padding-bottom: 0.3em; }
+.md-prose h2 { font-size: 1.3em; border-bottom: 1px solid #27272a; padding-bottom: 0.2em; }
+.md-prose h3 { font-size: 1.1em; }
+.md-prose h4 { font-size: 1em; }
+.md-prose p { margin: 0.75em 0; }
+.md-prose a { color: #60a5fa; text-decoration: underline; }
+.md-prose a:hover { color: #93c5fd; }
+.md-prose strong { color: #f4f4f5; font-weight: 600; }
+.md-prose em { color: #d4d4d8; }
+.md-prose ul, .md-prose ol { margin: 0.5em 0 0.75em 1.5em; padding: 0; }
+.md-prose li { margin: 0.25em 0; }
+.md-prose blockquote {
+  border-left: 3px solid #52525b;
+  margin: 0.75em 0;
+  padding: 0.25em 0.75em;
+  color: #a1a1aa;
+}
+.md-prose code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 0.85em;
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+  color: #e2c08d;
+}
+.md-prose pre {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 1em;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+.md-prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #e2e8f0;
+  font-size: 0.85em;
+}
+.md-prose table { border-collapse: collapse; width: 100%; margin: 0.75em 0; }
+.md-prose th { background: #27272a; color: #f4f4f5; font-weight: 600; }
+.md-prose th, .md-prose td { border: 1px solid #3f3f46; padding: 0.4em 0.75em; text-align: left; }
+.md-prose tr:nth-child(even) td { background: #18181b; }
+.md-prose hr { border: none; border-top: 1px solid #3f3f46; margin: 1.25em 0; }
+.md-prose img { max-width: 100%; border-radius: 4px; }
+
+.rx-match {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fde68a;
+  border-radius: 2px;
+  outline: 1px solid rgba(251, 191, 36, 0.35);
+  padding: 0 1px;
+}
