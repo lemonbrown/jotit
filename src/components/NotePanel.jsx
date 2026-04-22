@@ -91,6 +91,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const capturedDiffARef = useRef('')
   const capturedDiffBRef = useRef('')
   const [httpInstance, setHttpInstance] = useState(0)
+  const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
+  const lineNumsRef = useRef(null)
   const charCount = content.length
   const lineCount = content.split('\n').length
 
@@ -544,6 +546,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {guidCopied ? '✓ inserted' : 'GUID'}
         </button>
         <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => setShowLineNumbers(v => { const next = !v; localStorage.setItem('jotit_lnums', String(next)); return next })}
+          title={showLineNumbers ? 'Hide line numbers' : 'Show line numbers'}
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            showLineNumbers
+              ? 'text-zinc-300 bg-zinc-800/60 border-zinc-600'
+              : 'text-zinc-600 hover:text-zinc-400 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          #
+        </button>
+        <button
           onClick={copyToClipboard}
           title="Copy to clipboard"
           className="flex items-center gap-1 px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-600 rounded transition-colors"
@@ -700,19 +714,39 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
       {/* ── Content area ── */}
       {mode === 'edit' && (
-        <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={handleContent}
-          onKeyDown={handleKeyDown}
-          onSelect={updateSel}
-          onMouseUp={updateSel}
-          onKeyUp={updateSel}
-          onClick={clearSelIfEmpty}
-          placeholder="Start typing…"
-          spellCheck={false}
-          className="flex-1 bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
-        />
+        <div className="flex flex-1 overflow-hidden">
+          {showLineNumbers && (
+            <div
+              ref={lineNumsRef}
+              className="select-none shrink-0 overflow-y-hidden pt-4 pb-4 pr-3 pl-2 text-right border-r border-zinc-800/60"
+              style={{
+                fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace",
+                fontSize: '13px',
+                lineHeight: '1.6',
+                color: '#3f3f46',
+                width: `${Math.max(String(lineCount).length + 2, 4)}ch`,
+              }}
+            >
+              {Array.from({ length: lineCount }, (_, i) => (
+                <div key={i + 1}>{i + 1}</div>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={textareaRef}
+            value={content}
+            onChange={handleContent}
+            onKeyDown={handleKeyDown}
+            onSelect={updateSel}
+            onMouseUp={updateSel}
+            onKeyUp={updateSel}
+            onClick={clearSelIfEmpty}
+            onScroll={showLineNumbers ? e => { if (lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop } : undefined}
+            placeholder="Start typing…"
+            spellCheck={false}
+            className="flex-1 bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
+          />
+        </div>
       )}
 
       {mode === 'code' && (

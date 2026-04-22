@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 
-export default function AuthScreen() {
+export default function AuthScreen({ onClose }) {
   const { login, register } = useAuth()
   const [mode, setMode] = useState('login') // 'login' | 'register'
   const [email, setEmail] = useState('')
@@ -24,6 +24,7 @@ export default function AuthScreen() {
       } else {
         await register(email, password)
       }
+      onClose?.()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -39,9 +40,11 @@ export default function AuthScreen() {
   }
 
   return (
-    <div className="h-screen bg-zinc-950 flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        {/* Logo */}
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-zinc-950/80 backdrop-blur-sm"
+      onClick={e => { if (e.target === e.currentTarget) onClose?.() }}
+    >
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 w-full max-w-sm">
         <div className="text-center mb-8">
           <span className="text-2xl font-bold tracking-tight text-zinc-100">JotIt</span>
           <p className="text-zinc-500 text-sm mt-1">
@@ -50,7 +53,6 @@ export default function AuthScreen() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Email */}
           <div>
             <label className="block text-xs font-medium text-zinc-400 mb-1.5" htmlFor="email">
               Email
@@ -64,11 +66,10 @@ export default function AuthScreen() {
               autoFocus
               autoComplete="email"
               placeholder="you@example.com"
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
             />
           </div>
 
-          {/* Password */}
           <div>
             <label className="block text-xs font-medium text-zinc-400 mb-1.5" htmlFor="password">
               Password
@@ -81,11 +82,10 @@ export default function AuthScreen() {
               required
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               placeholder={mode === 'register' ? 'At least 8 characters' : ''}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
             />
           </div>
 
-          {/* Confirm password (register only) */}
           {mode === 'register' && (
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1.5" htmlFor="confirm">
@@ -98,19 +98,17 @@ export default function AuthScreen() {
                 onChange={e => setConfirm(e.target.value)}
                 required
                 autoComplete="new-password"
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors"
               />
             </div>
           )}
 
-          {/* Error */}
           {error && (
             <p className="text-red-400 text-xs bg-red-950/40 border border-red-900/50 rounded-lg px-3 py-2">
               {error}
             </p>
           )}
 
-          {/* Submit */}
           <button
             type="submit"
             disabled={loading}
@@ -122,7 +120,6 @@ export default function AuthScreen() {
           </button>
         </form>
 
-        {/* Switch mode */}
         <p className="text-center text-xs text-zinc-500 mt-6">
           {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
           <button
@@ -132,6 +129,14 @@ export default function AuthScreen() {
             {mode === 'login' ? 'Sign up' : 'Sign in'}
           </button>
         </p>
+
+        {onClose && (
+          <p className="text-center text-xs text-zinc-600 mt-3">
+            <button onClick={onClose} className="hover:text-zinc-400 transition-colors">
+              Continue without signing in
+            </button>
+          </p>
+        )}
       </div>
     </div>
   )

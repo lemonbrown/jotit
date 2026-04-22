@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
-import { initDB, getAllNotes, upsertNoteSync, deleteNoteSync, schedulePersist, exportSQLite } from './utils/db'
-import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, initCategoryEmbeddings, categorize } from './utils/openai'
+import { initDB, getAllNotes, upsertNoteSync, deleteNoteSync, markPendingDelete, schedulePersist, exportSQLite } from './utils/db'
+import { syncAll, syncPull, scheduleSyncPush } from './utils/sync'
+import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, initCategoryEmbeddings, categorize, categorizeByPatterns } from './utils/openai'
 import { generateId, SAMPLE_NOTES } from './utils/helpers'
+import { csvToNotes } from './utils/csv'
 import NoteGrid from './components/NoteGrid'
 import NotePanel from './components/NotePanel'
 import SearchBar from './components/SearchBar'
@@ -27,8 +29,6 @@ export default function App() {
     )
   }
 
-  if (!user) return <AuthScreen />
-
   return <AppShell user={user} logout={logout} />
 }
 
@@ -49,6 +49,7 @@ function AppShell({ user, logout }) {
   const [txExpanded, setTxExpanded] = useState(false)
   const diffLoaderRef = useRef(null) // set by NotePanel when diff mode is active
   const [diffActive, setDiffActive] = useState(false)
+  const [showAuth, setShowAuth] = useState(false)
 
   const notesRef = useRef(notes)
   useEffect(() => { notesRef.current = notes }, [notes])
@@ -74,6 +75,40 @@ function AppShell({ user, logout }) {
     })
   }, [])
 
+  // ── Pattern categorization sweep (no API key needed) ───────────────────────
+  useEffect(() => {
+    if (!dbReady) return
+    const uncategorized = notesRef.current.filter(n => !n.categories.length && n.content.trim())
+    if (!uncategorized.length) return
+    const changes = []
+    for (const note of uncategorized) {
+      const categories = categorizeByPatterns(note.content)
+      if (!categories.length) continue
+      const updated = { ...note, categories }
+      upsertNoteSync(updated)
+      changes.push(updated)
+    }
+    if (!changes.length) return
+    const byId = Object.fromEntries(changes.map(n => [n.id, n]))
+    setNotes(prev => prev.map(n => byId[n.id] ?? n))
+    schedulePersist()
+    scheduleSyncPush()
+  }, [dbReady])
+
+  // ── Sync: on login or after DB ready ───────────────────────────────────────
+  useEffect(() => {
+    if (!dbReady || !user) return
+    syncAll().then(() => setNotes(getAllNotes()))
+  }, [user, dbReady])
+
+  // ── Sync: pull on window focus ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return
+    const onFocus = () => syncPull().then(() => setNotes(getAllNotes()))
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [user])
+
   // ── OpenAI ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     initOpenAI(settings.openaiApiKey)
@@ -97,6 +132,7 @@ function AppShell({ user, logout }) {
             const next = prev.map(n => n.id === note.id ? updated : n)
             upsertNoteSync(updated)
             schedulePersist()
+            scheduleSyncPush()
             return next
           })
         }
@@ -118,6 +154,7 @@ function AppShell({ user, logout }) {
     }
     upsertNoteSync(note)
     schedulePersist()
+    scheduleSyncPush()
     setNotes(prev => [note, ...prev])
     setActiveNoteId(note.id)
     setSearchQuery('')
@@ -133,6 +170,7 @@ function AppShell({ user, logout }) {
         return updated
       })
       schedulePersist()
+      scheduleSyncPush()
       return next
     })
 
@@ -158,6 +196,7 @@ function AppShell({ user, logout }) {
               return updated
             })
             schedulePersist()
+            scheduleSyncPush()
             return next
           })
         } finally {
@@ -168,7 +207,12 @@ function AppShell({ user, logout }) {
   }, [])
 
   const deleteNote = useCallback((id) => {
-    deleteNoteSync(id)
+    if (user) {
+      markPendingDelete(id)
+      scheduleSyncPush()
+    } else {
+      deleteNoteSync(id)
+    }
     schedulePersist()
     setNotes(prev => {
       const idx = prev.findIndex(n => n.id === id)
@@ -176,7 +220,7 @@ function AppShell({ user, logout }) {
       setActiveNoteId(next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null)
       return next
     })
-  }, [])
+  }, [user])
 
   // ── Search ──────────────────────────────────────────────────────────────────
   const handleSearch = useCallback(async (query) => {
@@ -249,13 +293,24 @@ function AppShell({ user, logout }) {
     const files = Array.from(e.dataTransfer.files)
     if (!files.length) return
 
-    const firstId = await Promise.all(files.map(async (file) => {
-      if (file.size > MAX_FILE_SIZE) return null
+    const results = await Promise.all(files.map(async (file) => {
+      if (file.size > MAX_FILE_SIZE) return []
       let text
-      try { text = await file.text() } catch { return null }
+      try { text = await file.text() } catch { return [] }
       // Skip files that look binary (many null bytes in first 1KB)
-      if ((text.slice(0, 1024).match(/\0/g) ?? []).length > 10) return null
+      if ((text.slice(0, 1024).match(/\0/g) ?? []).length > 10) return []
 
+      // CSV → many notes
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        const notes = csvToNotes(text).map(note => ({
+          ...note,
+          categories: note.categories.length ? note.categories : categorizeByPatterns(note.content),
+        }))
+        for (const note of notes) upsertNoteSync(note)
+        return notes
+      }
+
+      // Any other text file → single note
       const note = {
         id: generateId(),
         content: `${file.name}\n${text}`,
@@ -281,16 +336,17 @@ function AppShell({ user, logout }) {
                 return updated
               })
               schedulePersist()
+              scheduleSyncPush()
               return next
             })
           })
           .finally(() => setAiProcessing(prev => { const s = new Set(prev); s.delete(note.id); return s }))
       }
 
-      return note
+      return [note]
     }))
 
-    const created = firstId.filter(Boolean)
+    const created = results.flat()
     if (!created.length) return
 
     setNotes(prev => [...created, ...prev])
@@ -298,6 +354,7 @@ function AppShell({ user, logout }) {
     setSearchQuery('')
     setSearchResults(null)
     schedulePersist()
+    scheduleSyncPush()
   }, [])
 
   // ── Keyboard shortcuts ──────────────────────────────────────────────────────
@@ -344,8 +401,8 @@ function AppShell({ user, logout }) {
           <div className="absolute inset-2 rounded-xl border-2 border-dashed border-blue-500 bg-zinc-950/90" />
           <div className="relative text-center space-y-3">
             <div className="text-5xl">📄</div>
-            <p className="text-blue-400 text-base font-medium">Drop files to create notes</p>
-            <p className="text-zinc-500 text-sm">Each file becomes a new note · 5 MB max</p>
+            <p className="text-blue-400 text-base font-medium">Drop files to import</p>
+            <p className="text-zinc-500 text-sm">CSV imports each row as a note · other files become a single note · 5 MB max</p>
           </div>
         </div>
       )}
@@ -393,19 +450,30 @@ function AppShell({ user, logout }) {
               <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
             </svg>
           </button>
-          <div className="w-px h-4 bg-zinc-800" />
-          <span className="text-[11px] text-zinc-600 hidden sm:inline truncate max-w-[120px]" title={user.email}>
-            {user.email}
-          </span>
-          <button
-            onClick={logout}
-            title="Sign out"
-            className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 001 1h7a1 1 0 000-2H4V5h6a1 1 0 000-2H3zm11.293 4.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L15.586 12H9a1 1 0 010-2h6.586l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" />
-            </svg>
-          </button>
+          {user ? (
+            <>
+              <div className="w-px h-4 bg-zinc-800" />
+              <span className="text-[11px] text-zinc-600 hidden sm:inline truncate max-w-[120px]" title={user.email}>
+                {user.email}
+              </span>
+              <button
+                onClick={logout}
+                title="Sign out"
+                className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 001 1h7a1 1 0 000-2H4V5h6a1 1 0 000-2H3zm11.293 4.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L15.586 12H9a1 1 0 010-2h6.586l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setShowAuth(true)}
+              className="px-2.5 py-1 text-xs font-medium text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+            >
+              Sign in
+            </button>
+          )}
         </div>
       </header>
 
@@ -459,6 +527,7 @@ function AppShell({ user, logout }) {
         <Settings settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} onExportDB={exportSQLite} onPublish={handlePublish} publicNoteCount={publicNoteCount} />
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      {showAuth && <AuthScreen onClose={() => setShowAuth(false)} />}
     </div>
   )
 }

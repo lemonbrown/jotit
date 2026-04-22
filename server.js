@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import express from 'express'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -6,12 +7,41 @@ import { marked } from 'marked'
 import Database from 'better-sqlite3'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import pg from 'pg'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = process.env.PORT ?? 3001
 const BUCKETS_FILE = join(__dirname, 'buckets.json')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'jotit-dev-secret-change-in-prod'
+
+// ── Postgres ─────────────────────────────────────────────────────────────────
+
+const { Pool } = pg
+let pgPool = null
+
+if (process.env.DATABASE_URL) {
+  pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
+  pgPool.query(`
+    CREATE TABLE IF NOT EXISTS notes (
+      id          TEXT    NOT NULL,
+      user_id     INTEGER NOT NULL,
+      content     TEXT    NOT NULL DEFAULT '',
+      categories  TEXT    NOT NULL DEFAULT '[]',
+      embedding   TEXT,
+      created_at  BIGINT  NOT NULL,
+      updated_at  BIGINT  NOT NULL,
+      is_public   INTEGER NOT NULL DEFAULT 0,
+      deleted_at  BIGINT,
+      PRIMARY KEY (id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS notes_user_updated ON notes (user_id, updated_at);
+    CREATE INDEX IF NOT EXISTS notes_user_deleted ON notes (user_id, deleted_at);
+  `).then(() => console.log('[JotIt] Postgres ready'))
+    .catch(err => console.error('[JotIt] Postgres init failed:', err.message))
+} else {
+  console.log('[JotIt] DATABASE_URL not set — sync disabled')
+}
 
 app.use(express.json({ limit: '10mb' }))
 app.use(express.static(join(__dirname, 'dist')))
@@ -250,6 +280,67 @@ app.get('/b/:name', (req, res) => {
     <body><div><h1>Bucket not found</h1><p>/b/${esc(req.params.name)} doesn't exist or hasn't been published yet.</p></div></body></html>`)
   }
   res.send(renderPage(req.params.name, bucket))
+})
+
+// ── Sync API ─────────────────────────────────────────────────────────────────
+
+app.post('/api/sync/push', requireAuth, async (req, res) => {
+  if (!pgPool) return res.status(503).json({ error: 'Sync not configured' })
+  const { notes } = req.body ?? {}
+  if (!Array.isArray(notes)) return res.status(400).json({ error: 'notes must be an array' })
+  const userId = req.user.userId
+  try {
+    for (const n of notes) {
+      if (!n.id || typeof n.id !== 'string') continue
+      if (n.deleted) {
+        await pgPool.query(
+          `INSERT INTO notes (id, user_id, content, categories, embedding, created_at, updated_at, is_public, deleted_at)
+           VALUES ($1, $2, '', '[]', NULL, $3, $3, 0, $3)
+           ON CONFLICT (id, user_id) DO UPDATE SET deleted_at = $3, updated_at = $3`,
+          [n.id, userId, Date.now()]
+        )
+      } else {
+        await pgPool.query(
+          `INSERT INTO notes (id, user_id, content, categories, embedding, created_at, updated_at, is_public)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (id, user_id) DO UPDATE SET
+             content    = EXCLUDED.content,
+             categories = EXCLUDED.categories,
+             embedding  = EXCLUDED.embedding,
+             updated_at = EXCLUDED.updated_at,
+             is_public  = EXCLUDED.is_public,
+             deleted_at = NULL
+           WHERE notes.updated_at < EXCLUDED.updated_at`,
+          [n.id, userId,
+           n.content ?? '', n.categories ?? '[]', n.embedding ?? null,
+           n.created_at ?? Date.now(), n.updated_at ?? Date.now(), n.is_public ? 1 : 0]
+        )
+      }
+    }
+    res.json({ ok: true, pushed: notes.length })
+  } catch (e) {
+    console.error('[JotIt] Sync push error:', e.message)
+    res.status(500).json({ error: 'Sync failed' })
+  }
+})
+
+app.get('/api/sync/pull', requireAuth, async (req, res) => {
+  if (!pgPool) return res.status(503).json({ error: 'Sync not configured' })
+  const userId = req.user.userId
+  const since = Math.max(0, parseInt(req.query.since ?? '0', 10) || 0)
+  const serverTime = Date.now()
+  try {
+    const { rows } = await pgPool.query(
+      `SELECT * FROM notes
+       WHERE user_id = $1
+         AND (updated_at > $2 OR (deleted_at IS NOT NULL AND deleted_at > $2))`,
+      [userId, since]
+    )
+    res.json({ notes: rows, serverTime })
+  } catch (e) {
+    console.error('[JotIt] Sync pull error:', e.message)
+    res.status(500).json({ error: 'Sync failed' })
+  }
 })
 
 // ── HTTP proxy ───────────────────────────────────────────────────────────────

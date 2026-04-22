@@ -64,8 +64,10 @@ export async function initDB() {
 
   db = saved ? new SQL.Database(saved) : new SQL.Database()
   db.run(SCHEMA)
-  // Migrate: add is_public if missing (safe to run on existing DBs)
+  // Migrate: add columns if missing (safe to run on existing DBs)
   try { db.run('ALTER TABLE notes ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN dirty INTEGER NOT NULL DEFAULT 1') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN pending_delete INTEGER NOT NULL DEFAULT 0') } catch {}
 
   // Migrate from localStorage if SQLite is empty and localStorage has data
   const count = db.exec('SELECT COUNT(*) as n FROM notes')[0]?.values[0][0] ?? 0
@@ -122,7 +124,7 @@ export async function persist() {
 
 export function getAllNotes() {
   if (!db) return []
-  const result = db.exec('SELECT * FROM notes ORDER BY updated_at DESC')
+  const result = db.exec('SELECT * FROM notes WHERE pending_delete = 0 ORDER BY updated_at DESC')
   if (!result.length) return []
   const { columns, values } = result[0]
   return values.map(row => {
@@ -132,11 +134,12 @@ export function getAllNotes() {
   })
 }
 
-export function upsertNoteSync(note) {
+export function upsertNoteSync(note, dirty = 1) {
   if (!db) return
   db.run(
-    `INSERT OR REPLACE INTO notes (id, content, categories, embedding, created_at, updated_at, is_public)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO notes
+       (id, content, categories, embedding, created_at, updated_at, is_public, dirty, pending_delete)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     [
       note.id,
       note.content,
@@ -145,8 +148,48 @@ export function upsertNoteSync(note) {
       note.createdAt,
       note.updatedAt,
       note.isPublic ? 1 : 0,
+      dirty,
     ]
   )
+}
+
+export function markPendingDelete(id) {
+  if (!db) return
+  db.run('UPDATE notes SET pending_delete = 1, dirty = 1 WHERE id = ?', [id])
+}
+
+export function cleanupPendingDeletes() {
+  if (!db) return
+  db.run('DELETE FROM notes WHERE pending_delete = 1')
+}
+
+export function getNote(id) {
+  if (!db) return null
+  const result = db.exec('SELECT * FROM notes WHERE id = ?', [id])
+  if (!result.length || !result[0].values.length) return null
+  const { columns, values } = result[0]
+  const row = {}
+  columns.forEach((col, i) => { row[col] = values[0][i] })
+  return deserialize(row)
+}
+
+export function getDirtyNotes() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM notes WHERE dirty = 1')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const note = {}
+    columns.forEach((col, i) => { note[col] = row[i] })
+    return deserialize(note)
+  })
+}
+
+export function markSynced(ids) {
+  if (!db || !ids.length) return
+  const stmt = db.prepare('UPDATE notes SET dirty = 0 WHERE id = ?')
+  for (const id of ids) stmt.run([id])
+  stmt.free()
 }
 
 export function deleteNoteSync(id) {
@@ -171,12 +214,14 @@ export function exportSQLite() {
 
 function deserialize(row) {
   return {
-    id:         row.id,
-    content:    row.content,
-    categories: JSON.parse(row.categories ?? '[]'),
-    embedding:  row.embedding ? JSON.parse(row.embedding) : null,
-    createdAt:  row.created_at,
-    updatedAt:  row.updated_at,
-    isPublic:   row.is_public === 1,
+    id:            row.id,
+    content:       row.content,
+    categories:    JSON.parse(row.categories ?? '[]'),
+    embedding:     row.embedding ? JSON.parse(row.embedding) : null,
+    createdAt:     row.created_at,
+    updatedAt:     row.updated_at,
+    isPublic:      row.is_public === 1,
+    dirty:         row.dirty,
+    pendingDelete: row.pending_delete === 1,
   }
 }
