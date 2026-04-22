@@ -73,11 +73,19 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
   const [diffInstance, setDiffInstance] = useState(0)
   const [diffPendingNote, setDiffPendingNote] = useState(null)
+  const [codeBefore, setCodeBefore] = useState('')
+  const [codeAfter, setCodeAfter] = useState('')
+  const [codeContent, setCodeContent] = useState('')
   const showMoreTx = txExpanded
   const setShowMoreTx = onTxExpandedChange
 
   const textareaRef = useRef(null)
+  const codeEditRef = useRef(null)
+  const codePreRef = useRef(null)
   const interactiveInputRef = useRef(null)
+  const historyRef = useRef([note.content])
+  const historyIdxRef = useRef(0)
+  const historyTimerRef = useRef(null)
   const capturedSelectionRef = useRef('')
   const capturedHttpSelRef = useRef('')
   const capturedDiffARef = useRef('')
@@ -92,6 +100,9 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setSel({ start: 0, end: 0, text: '' })
     setTxResult(null)
     setInteractiveTx(null)
+    clearTimeout(historyTimerRef.current)
+    historyRef.current = [note.content]
+    historyIdxRef.current = 0
   }, [note.id])
 
   // Register/unregister diff note loader with parent
@@ -121,6 +132,59 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       setSel({ start: 0, end: 0, text: '' })
       setTxResult(null)
       setInteractiveTx(null)
+    }
+  }
+
+  // ── Undo / redo ─────────────────────────────────────────────────────────────
+  const pushHistory = (text) => {
+    clearTimeout(historyTimerRef.current)
+    historyTimerRef.current = setTimeout(() => {
+      const idx = historyIdxRef.current
+      if (historyRef.current[idx] === text) return
+      const next = historyRef.current.slice(0, idx + 1)
+      next.push(text)
+      if (next.length > 200) next.splice(0, next.length - 200)
+      historyRef.current = next
+      historyIdxRef.current = next.length - 1
+    }, 300)
+  }
+
+  const pushHistoryNow = (text) => {
+    clearTimeout(historyTimerRef.current)
+    const idx = historyIdxRef.current
+    if (historyRef.current[idx] === text) return
+    const next = historyRef.current.slice(0, idx + 1)
+    next.push(text)
+    if (next.length > 200) next.splice(0, next.length - 200)
+    historyRef.current = next
+    historyIdxRef.current = next.length - 1
+  }
+
+  const undo = () => {
+    clearTimeout(historyTimerRef.current)
+    const idx = historyIdxRef.current
+    if (idx <= 0) return
+    historyIdxRef.current = idx - 1
+    const prev = historyRef.current[idx - 1]
+    setContent(prev)
+    onUpdate({ content: prev })
+    if (mode === 'code') {
+      const newCode = codeAfter.length > 0 ? prev.slice(codeBefore.length, -codeAfter.length) : prev.slice(codeBefore.length)
+      setCodeContent(newCode)
+    }
+  }
+
+  const redo = () => {
+    clearTimeout(historyTimerRef.current)
+    const idx = historyIdxRef.current
+    if (idx >= historyRef.current.length - 1) return
+    historyIdxRef.current = idx + 1
+    const next = historyRef.current[idx + 1]
+    setContent(next)
+    onUpdate({ content: next })
+    if (mode === 'code') {
+      const newCode = codeAfter.length > 0 ? next.slice(codeBefore.length, -codeAfter.length) : next.slice(codeBefore.length)
+      setCodeContent(newCode)
     }
   }
 
@@ -162,6 +226,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     const start = ta.selectionStart
     const end = ta.selectionEnd
     const next = content.slice(0, start) + guid + content.slice(end)
+    pushHistoryNow(next)
     setContent(next)
     onUpdate({ content: next })
     requestAnimationFrame(() => {
@@ -174,6 +239,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   const applyTxResult = () => {
     const newContent = content.slice(0, sel.start) + txResult.text + content.slice(sel.end)
+    pushHistoryNow(newContent)
     setContent(newContent)
     onUpdate({ content: newContent })
     setTxResult(null)
@@ -191,9 +257,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const handleContent = (e) => {
     setContent(e.target.value)
     onUpdate({ content: e.target.value })
+    pushHistory(e.target.value)
   }
 
   const handleKeyDown = (e) => {
+    if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      e.preventDefault()
+      undo()
+      return
+    }
+    if ((e.key === 'y' && (e.ctrlKey || e.metaKey)) || (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) {
+      e.preventDefault()
+      redo()
+      return
+    }
     if (e.key === 'Tab') {
       e.preventDefault()
       const ta = textareaRef.current
@@ -202,6 +279,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       const newVal = content.slice(0, start) + '  ' + content.slice(end)
       setContent(newVal)
       onUpdate({ content: newVal })
+      pushHistoryNow(newVal)
       requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
     }
   }
@@ -209,9 +287,78 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const prettifyJson = () => {
     try {
       const pretty = JSON.stringify(JSON.parse(content), null, 2)
+      pushHistoryNow(content)
       setContent(pretty)
       onUpdate({ content: pretty })
+      pushHistoryNow(pretty)
     } catch {}
+  }
+
+  const enterCodeMode = () => {
+    if (mode === 'code') {
+      setMode('edit')
+      requestAnimationFrame(() => textareaRef.current?.focus())
+      return
+    }
+    const ta = textareaRef.current
+    const hasTextSel = ta && ta.selectionStart !== ta.selectionEnd
+    if (hasTextSel) {
+      setCodeBefore(content.slice(0, ta.selectionStart))
+      setCodeContent(content.slice(ta.selectionStart, ta.selectionEnd))
+      setCodeAfter(content.slice(ta.selectionEnd))
+    } else {
+      setCodeBefore('')
+      setCodeContent(content)
+      setCodeAfter('')
+    }
+    setMode('code')
+    requestAnimationFrame(() => codeEditRef.current?.focus())
+  }
+
+  const handleCodeEdit = (e) => {
+    const newCode = e.target.value
+    setCodeContent(newCode)
+    const full = codeBefore + newCode + codeAfter
+    setContent(full)
+    onUpdate({ content: full })
+    pushHistory(full)
+  }
+
+  const handleCodeKeyDown = (e) => {
+    if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      e.preventDefault()
+      undo()
+      return
+    }
+    if ((e.key === 'y' && (e.ctrlKey || e.metaKey)) || (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) {
+      e.preventDefault()
+      redo()
+      return
+    }
+    if (e.key === 'Escape') {
+      setMode('edit')
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      const ta = e.target
+      const start = ta.selectionStart
+      const end = ta.selectionEnd
+      const newVal = codeContent.slice(0, start) + '  ' + codeContent.slice(end)
+      setCodeContent(newVal)
+      const full = codeBefore + newVal + codeAfter
+      setContent(full)
+      onUpdate({ content: full })
+      pushHistoryNow(full)
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+    }
+  }
+
+  const syncCodeScroll = (e) => {
+    if (codePreRef.current) {
+      codePreRef.current.scrollTop = e.target.scrollTop
+      codePreRef.current.scrollLeft = e.target.scrollLeft
+    }
   }
 
   const copyToClipboard = async () => {
@@ -250,16 +397,16 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [mode])
 
 
-  // ── Highlight.js ────────────────────────────────────────────────────────────
-  const { highlighted, language } = useMemo(() => {
-    if (!content.trim()) return { highlighted: '', language: '' }
+  const { codeHighlighted, codeLanguage } = useMemo(() => {
+    if (mode !== 'code') return { codeHighlighted: '', codeLanguage: '' }
+    if (!codeContent.trim()) return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
     try {
-      const result = hljs.highlightAuto(content, HINT_LANGS)
-      return { highlighted: result.value, language: result.language ?? '' }
+      const result = hljs.highlightAuto(codeContent, HINT_LANGS)
+      return { codeHighlighted: result.value, codeLanguage: result.language ?? '' }
     } catch {
-      return { highlighted: hljs.escapeHTML(content), language: '' }
+      return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
     }
-  }, [content])
+  }, [codeContent, mode])
 
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
@@ -318,17 +465,17 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           </button>
         )}
         <button
-          onMouseDown={captureSelForModeSwitch}
-          onClick={() => switchMode('preview')}
-          title="Syntax highlighting preview"
+          onMouseDown={e => e.preventDefault()}
+          onClick={enterCodeMode}
+          title={mode === 'code' ? 'Exit code editor' : 'Editable syntax-highlighted view — select text first for a region'}
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
-            mode === 'preview'
+            mode === 'code'
               ? 'text-blue-300 bg-blue-950/50 border-blue-800'
               : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
           }`}
         >
           <span className="text-[12px]">&lt;/&gt;</span>
-          {mode === 'preview' ? 'Edit' : 'Preview'}
+          {mode === 'code' ? 'Edit' : 'Code'}
         </button>
         <button
           onMouseDown={captureSelForModeSwitch}
@@ -567,14 +714,37 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           className="flex-1 bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
         />
       )}
-      {mode === 'preview' && (
-        <div className="flex-1 overflow-auto p-4">
-          {content.trim() ? (
-            <pre className="hljs rounded-lg p-4 text-[13px] leading-relaxed overflow-x-auto" style={{ background: '#0d1117', margin: 0 }}>
-              <code className={`hljs language-${language}`} dangerouslySetInnerHTML={{ __html: highlighted }} />
-            </pre>
-          ) : (
-            <span className="text-zinc-700 note-content text-sm">empty</span>
+
+      {mode === 'code' && (
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {codeBefore.length > 0 && (
+            <div className="px-4 py-2 border-b border-zinc-800 text-zinc-600 note-content text-[13px] leading-relaxed max-h-28 overflow-hidden shrink-0 select-none">
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{codeBefore}</pre>
+            </div>
+          )}
+          <div className="relative flex-1 overflow-hidden" style={{ background: '#0d1117' }}>
+            <pre
+              ref={codePreRef}
+              aria-hidden="true"
+              className="hljs absolute inset-0 m-0 p-4 overflow-auto pointer-events-none text-[13px] leading-relaxed"
+              style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace" }}
+              dangerouslySetInnerHTML={{ __html: codeHighlighted + '\n' }}
+            />
+            <textarea
+              ref={codeEditRef}
+              value={codeContent}
+              onChange={handleCodeEdit}
+              onKeyDown={handleCodeKeyDown}
+              onScroll={syncCodeScroll}
+              spellCheck={false}
+              className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px] leading-relaxed"
+              style={{ color: 'transparent', caretColor: '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+            />
+          </div>
+          {codeAfter.length > 0 && (
+            <div className="px-4 py-2 border-t border-zinc-800 text-zinc-600 note-content text-[13px] leading-relaxed max-h-28 overflow-hidden shrink-0 select-none">
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{codeAfter}</pre>
+            </div>
           )}
         </div>
       )}
@@ -651,15 +821,25 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
+      {/* ── Code mode footer ── */}
+      {mode === 'code' && (
+        <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]" style={{ background: '#0d1117' }}>
+          <span className="text-[11px] text-zinc-600 font-mono">Esc to exit · Tab for indent</span>
+          <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-600 shrink-0 font-mono">
+            {codeLanguage && <span className="text-zinc-400">{codeLanguage}</span>}
+            <span>{codeContent.split('\n').length}L · {codeContent.length}C</span>
+            <span>{timeAgo(note.updatedAt)}</span>
+          </div>
+        </div>
+      )}
       {/* ── Footer ── */}
-      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && (
+      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'code' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
           {note.categories.length > 0
             ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
             : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'AI will tag when you stop typing…' : 'Add OpenAI key in ⚙ for auto-tagging'}</span>
           }
           <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-700 shrink-0">
-            {mode === 'preview' && language && <span className="text-zinc-500 font-mono">{language}</span>}
             {mode === 'markdown' && <span className="text-emerald-700 font-mono">markdown</span>}
             <span>{lineCount}L · {charCount}C</span>
             <span>{timeAgo(note.updatedAt)}</span>

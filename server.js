@@ -3,14 +3,80 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { marked } from 'marked'
+import Database from 'better-sqlite3'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = process.env.PORT ?? 3001
 const BUCKETS_FILE = join(__dirname, 'buckets.json')
+const JWT_SECRET = process.env.JWT_SECRET ?? 'jotit-dev-secret-change-in-prod'
 
 app.use(express.json({ limit: '10mb' }))
 app.use(express.static(join(__dirname, 'dist')))
+
+// ── User DB ──────────────────────────────────────────────────────────────────
+
+const userDb = new Database(join(__dirname, 'users.db'))
+userDb.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )
+`)
+
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization ?? ''
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    req.user = jwt.verify(token, JWT_SECRET)
+    next()
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' })
+  }
+}
+
+// ── Auth API ─────────────────────────────────────────────────────────────────
+
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password } = req.body ?? {}
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' })
+  if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address' })
+  }
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' })
+  }
+  try {
+    const hash = await bcrypt.hash(password, 10)
+    const stmt = userDb.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)')
+    const result = stmt.run(email.toLowerCase().trim(), hash)
+    const token = jwt.sign({ userId: result.lastInsertRowid, email }, JWT_SECRET, { expiresIn: '30d' })
+    res.json({ token, user: { id: result.lastInsertRowid, email } })
+  } catch (e) {
+    if (e.message?.includes('UNIQUE')) return res.status(409).json({ error: 'An account with that email already exists' })
+    res.status(500).json({ error: 'Registration failed' })
+  }
+})
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body ?? {}
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' })
+  const user = userDb.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase().trim())
+  if (!user) return res.status(401).json({ error: 'Invalid email or password' })
+  const valid = await bcrypt.compare(password, user.password_hash)
+  if (!valid) return res.status(401).json({ error: 'Invalid email or password' })
+  const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' })
+  res.json({ token, user: { id: user.id, email: user.email } })
+})
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: { id: req.user.userId, email: req.user.email } })
+})
 
 // ── Bucket store ─────────────────────────────────────────────────────────────
 
