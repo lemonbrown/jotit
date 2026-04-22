@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import KEYWORD_DATA from '../embedding_keywords.json'
+import { looksLikeCsvTable } from './csvTable.js'
 
 let client = null
 let categoryEmbeddings = null // Array<{ id, name, vector }> — loaded once per session
@@ -33,7 +34,7 @@ export async function categorizeNote(content) {
           role: 'system',
           content: `Categorize this note. Return a JSON array of 3-8 lowercase tag strings.
 Tag types to consider:
-- Content type: password, token, api-key, credentials, config, snippet, command, url, error-log, sql
+- Content type: password, token, api-key, credentials, config, snippet, command, url, error-log, sql, csv, table, spreadsheet
 - Technology: github, aws, docker, postgres, nginx, npm, python, node, openai, etc.
 - Purpose: authentication, deployment, debugging, reference
 Return ONLY valid JSON array, no explanation.`,
@@ -152,7 +153,9 @@ export function categorizeByEmbedding(noteEmbedding, threshold = 0.35, maxTags =
 /** Pattern-based categorization using regex patterns from embedding_keywords.json */
 export function categorizeByPatterns(content) {
   const matched = []
+  if (looksLikeCsvTable(content)) matched.push('CSV / Tables')
   for (const cat of KEYWORD_DATA.categories) {
+    if (matched.includes(cat.name)) continue
     if (!cat.patterns?.length) continue
     for (const pattern of cat.patterns) {
       const hit = new RegExp(pattern).test(content)

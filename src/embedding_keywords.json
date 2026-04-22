@@ -106,6 +106,33 @@
             "patterns": []
         },
         {
+            "id": "csv_tables",
+            "name": "CSV / Tables",
+            "description": "Comma-separated values, tabular data, spreadsheet-like rows and columns, table editing, sorting, filtering, and column summaries.",
+            "priority": 78,
+            "keywords": [
+                "csv",
+                "comma separated values",
+                "table",
+                "spreadsheet",
+                "excel",
+                "rows",
+                "columns",
+                "headers",
+                "tabular data",
+                "sort",
+                "filter",
+                "sum column",
+                "data grid",
+                "delimiter",
+                "quoted fields"
+            ],
+            "patterns": [
+                "^[^\\n,]+,[^\\n,]+\\r?\\n[^\\n,]+,[^\\n,]+",
+                "^[A-Za-z0-9_ -]+(?:,[A-Za-z0-9_ -]+){1,}\\r?\\n(?:[^\\n,]*,){1,}[^\\n,]*"
+            ]
+        },
+        {
             "id": "debugging_logs",
             "name": "Debugging / Logs",
             "description": "Errors, logs, stack traces, or runtime failure analysis.",
@@ -170,6 +197,29 @@
                 "execute"
             ],
             "patterns": []
+        },
+        {
+            "id": "diagrams_flowcharts",
+            "name": "Diagrams / Flowcharts",
+            "description": "Lightweight diagrams, flowcharts, boxes, linked shapes, nodes, arrows, and visual process maps.",
+            "priority": 65,
+            "keywords": [
+                "diagram",
+                "flowchart",
+                "box",
+                "shape",
+                "node",
+                "edge",
+                "arrow",
+                "link",
+                "connector",
+                "process map",
+                "visual map",
+                "architecture diagram"
+            ],
+            "patterns": [
+                "```jotit-diagram"
+            ]
         },
         {
             "id": "ideas_planning",

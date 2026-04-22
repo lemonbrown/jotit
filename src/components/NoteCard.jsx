@@ -1,10 +1,10 @@
 import { timeAgo } from '../utils/helpers'
 import CategoryBadge from './CategoryBadge'
 
-export default function NoteCard({ note, isActive, isProcessing, onSelect, searchQuery }) {
+export default function NoteCard({ note, isActive, isProcessing, onSelect, searchQuery, expanded = false }) {
   const lines = note.content.split('\n').filter(l => l.trim())
   const firstLine = lines[0] ?? ''
-  const rest = lines.slice(1, 4).join('\n')
+  const rest = lines.slice(1, expanded ? 10 : 4).join('\n')
   const badges = note.categories.slice(0, 3)
 
   const highlight = (text, query) => {
@@ -23,10 +23,11 @@ export default function NoteCard({ note, isActive, isProcessing, onSelect, searc
   return (
     <div
       id={`note-card-${note.id}`}
-      onClick={() => onSelect(note.id)}
+      onClick={(e) => onSelect(note.id, { newPane: e.ctrlKey || e.metaKey })}
       className={[
         'relative flex flex-col p-3 rounded-lg border cursor-pointer select-none',
-        'transition-all duration-100 h-[148px] overflow-hidden',
+        'transition-all duration-150 overflow-hidden',
+        expanded ? 'h-[230px]' : 'h-[148px]',
         isActive
           ? 'bg-slate-900 border-blue-500 shadow-lg shadow-blue-950/50 ring-1 ring-blue-500/30'
           : 'bg-zinc-900 border-zinc-800 hover:border-zinc-600 hover:bg-zinc-800/80',
@@ -45,7 +46,7 @@ export default function NoteCard({ note, isActive, isProcessing, onSelect, searc
       </div>
 
       {/* Remaining lines as preview */}
-      <div className="note-content text-[11px] text-zinc-500 line-clamp-3 flex-1 leading-relaxed">
+      <div className={`note-content text-[11px] text-zinc-500 flex-1 leading-relaxed ${expanded ? 'line-clamp-8' : 'line-clamp-3'}`}>
         {rest ? highlight(rest, searchQuery) : null}
       </div>
 

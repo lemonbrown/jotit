@@ -49,7 +49,12 @@ export default function HelpModal({ onClose }) {
 
           <Section title="Navigation" rows={[
             [['Mouse wheel'],        'Navigate between notes in the grid'],
+            [['Shift+Mouse wheel'],  'Pop out the note grid and browse expanded note previews'],
+            [['Alt+Mouse wheel'],    'Pan through the note grid with coasting'],
+            [['Alt+Left'],           'Back through note locations'],
+            [['Alt+Right'],          'Forward through note locations'],
             [['Click'],              'Select a note'],
+            [['Ctrl+Click'],         'Open note in another editor pane'],
             [['Alt+N'],              'Create a new note'],
             [['Ctrl+F'],             'Focus the search bar'],
             [['Esc'],                'Clear search / close modals'],
@@ -57,6 +62,11 @@ export default function HelpModal({ onClose }) {
 
           <Section title="Editor" rows={[
             [['Tab'],                'Insert 2 spaces'],
+            [['Ctrl+G'],             'Go to line'],
+            [['Ctrl+='],             'Calculate selection or current line'],
+            [['Ctrl+Enter'],         'Preview calculation insert; Enter accepts it'],
+            [['Alt+Mouse wheel'],    'Velocity scroll through the editor'],
+            [['Share'],              'Publish current note and copy a public link'],
             [['📋 Copy'],            'Copy entire note content to clipboard'],
             [['delete'],             'Delete note (requires confirm)'],
           ]} />
@@ -64,6 +74,9 @@ export default function HelpModal({ onClose }) {
           <Section title="Toolbar modes" rows={[
             [['</> Preview'],        'Render with syntax highlighting (auto-detects language)'],
             [['MD Preview'],         'Render note as formatted Markdown (GFM + tables + code blocks)'],
+            [['Table'],              'Open selected CSV or whole-note CSV as an editable table'],
+            [['Cron'],               'Build Unix or Azure cron expressions and preview next runs'],
+            [['Diagram'],            'Create boxes, shapes, and linked lightweight diagrams'],
             [['.* Regex'],           'Open regex tester — select text first to pre-fill test string'],
             [['{} Prettify'],        'Reformat selected note as JSON (shown when valid JSON detected)'],
             [['⚡ HTTP'],            'Execute HTTP request written in the note — glows amber when a request is detected'],

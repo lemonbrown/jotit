@@ -16,11 +16,17 @@ import 'highlight.js/styles/github-dark.css'
 
 import { timeAgo } from '../utils/helpers'
 import { TRANSFORMS, applyTransform } from '../utils/transforms'
+import { analyzeCalculation } from '../utils/calculator'
+import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
+import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
 import { detectRequestType } from '../utils/httpParser'
 import CategoryBadge from './CategoryBadge'
 import RegexTester from './RegexTester'
 import HttpRunner from './HttpRunner'
 import DiffViewer from './DiffViewer'
+import TableViewer from './TableViewer'
+import CronBuilder from './CronBuilder'
+import DiagramEditor from './DiagramEditor'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -57,17 +63,22 @@ function isValidJson(text) {
   try { JSON.parse(t); return true } catch { return false }
 }
 
-export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete, txExpanded, onTxExpandedChange, notes, onDiffModeChange }) {
+export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete, onPublishNote, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [shareState, setShareState] = useState(null)
+  const [sharing, setSharing] = useState(false)
   const [regexInstance, setRegexInstance] = useState(0)
 
   // Selection + transform state
   const [sel, setSel] = useState({ start: 0, end: 0, text: '' })
   const [txResult, setTxResult] = useState(null) // { opName, text, error } | null
   const [txCopied, setTxCopied] = useState(false)
+  const [calcResult, setCalcResult] = useState(null)
+  const [pendingCalc, setPendingCalc] = useState(null)
+  const [calcCopied, setCalcCopied] = useState(false)
   const [interactiveTx, setInteractiveTx] = useState(null) // { id, opName, param } | null
   const [guidCopied, setGuidCopied] = useState(false)
   const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
@@ -76,13 +87,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [codeBefore, setCodeBefore] = useState('')
   const [codeAfter, setCodeAfter] = useState('')
   const [codeContent, setCodeContent] = useState('')
-  const showMoreTx = txExpanded
-  const setShowMoreTx = onTxExpandedChange
+  const [gotoOpen, setGotoOpen] = useState(false)
+  const [gotoLine, setGotoLine] = useState('')
+  const [gotoError, setGotoError] = useState(false)
+  const [tableSession, setTableSession] = useState(null)
+  const [cronSession, setCronSession] = useState(null)
+  const [diagramSession, setDiagramSession] = useState(null)
+  const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
   const textareaRef = useRef(null)
   const codeEditRef = useRef(null)
   const codePreRef = useRef(null)
   const interactiveInputRef = useRef(null)
+  const gotoInputRef = useRef(null)
+  const editorScrollCoastRef = useRef({ velocity: 0, direction: 1, rafId: null })
   const historyRef = useRef([note.content])
   const historyIdxRef = useRef(0)
   const historyTimerRef = useRef(null)
@@ -96,16 +114,158 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const charCount = content.length
   const lineCount = content.split('\n').length
 
+  const pendingCalcInline = useMemo(() => {
+    if (!pendingCalc) return null
+    const ta = textareaRef.current
+    const startText = content.slice(0, Math.min(pendingCalc.end, content.length))
+    const lineIndex = startText.split('\n').length - 1
+    const lineStart = startText.lastIndexOf('\n') + 1
+    const column = startText.length - lineStart
+    const lineHeight = ta ? (parseFloat(getComputedStyle(ta).lineHeight) || 20.8) : 20.8
+    const charWidth = 7.8
+    const top = 16 + lineIndex * lineHeight - (ta?.scrollTop ?? 0)
+    const left = 16 + column * charWidth - (ta?.scrollLeft ?? 0)
+    const visible = !ta || (top > -lineHeight && top < ta.clientHeight + lineHeight)
+    return { top, left, visible }
+  }, [content, pendingCalc])
+
+  const reportCurrentLocation = useCallback((target = textareaRef.current) => {
+    if (!target) return
+    onLocationChange?.({
+      noteId: note.id,
+      cursorStart: target.selectionStart ?? 0,
+      cursorEnd: target.selectionEnd ?? target.selectionStart ?? 0,
+      scrollTop: target.scrollTop ?? 0,
+    })
+  }, [note.id, onLocationChange])
+
+  const focusEditorLine = useCallback((lineNumber) => {
+    const ta = textareaRef.current
+    if (!ta) return
+
+    const clampedLine = Math.min(Math.max(lineNumber, 1), lineCount)
+    let pos = 0
+    for (let line = 1; line < clampedLine; line++) {
+      const nextBreak = content.indexOf('\n', pos)
+      if (nextBreak === -1) break
+      pos = nextBreak + 1
+    }
+
+    ta.focus()
+    ta.selectionStart = ta.selectionEnd = pos
+
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20
+    const targetTop = Math.max(0, (clampedLine - 1) * lineHeight - ta.clientHeight * 0.35)
+    ta.scrollTop = targetTop
+    if (lineNumsRef.current) lineNumsRef.current.scrollTop = targetTop
+    reportCurrentLocation(ta)
+  }, [content, lineCount, reportCurrentLocation])
+
+  const openGotoLine = useCallback(() => {
+    setMode('edit')
+    setGotoOpen(true)
+    setGotoLine('')
+    setGotoError(false)
+    requestAnimationFrame(() => gotoInputRef.current?.focus())
+  }, [])
+
+  const submitGotoLine = useCallback(() => {
+    const nextLine = Number.parseInt(gotoLine, 10)
+    if (!Number.isFinite(nextLine) || nextLine < 1) {
+      setGotoError(true)
+      return
+    }
+    setGotoOpen(false)
+    setGotoError(false)
+    requestAnimationFrame(() => focusEditorLine(nextLine))
+  }, [focusEditorLine, gotoLine])
+
   useEffect(() => {
     setContent(note.content)
     setConfirmDelete(false)
+    setShareState(null)
     setSel({ start: 0, end: 0, text: '' })
     setTxResult(null)
+    setCalcResult(null)
+    setPendingCalc(null)
+    setTableSession(null)
+    setCronSession(null)
+    setDiagramSession(null)
     setInteractiveTx(null)
+    setDisplayHint(null)
     clearTimeout(historyTimerRef.current)
     historyRef.current = [note.content]
     historyIdxRef.current = 0
   }, [note.id])
+
+  useEffect(() => {
+    if (!focusNonce || mode !== 'edit') return
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }, [focusNonce, mode])
+
+  useEffect(() => {
+    if (!restoreLocation || restoreLocation.noteId !== note.id) return
+    if (mode !== 'edit') {
+      setMode('edit')
+      return
+    }
+
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
+      const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)
+      ta.focus()
+      ta.selectionStart = cursorStart
+      ta.selectionEnd = cursorEnd
+      ta.scrollTop = restoreLocation.scrollTop ?? 0
+      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+    })
+  }, [restoreLocation, note.id, mode])
+
+  useEffect(() => {
+    if (mode !== 'edit') return
+    const ta = textareaRef.current
+    if (!ta) return
+
+    const syncLineNumbers = () => {
+      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+    }
+
+    const handler = (e) => {
+      if (!e.altKey) return
+      e.preventDefault()
+
+      const sc = editorScrollCoastRef.current
+      const dir = e.deltaY > 0 ? 1 : -1
+
+      if (dir !== sc.direction) sc.velocity = 0
+      sc.direction = dir
+
+      const scrollScale = Math.max(1, ta.scrollHeight / (ta.clientHeight * 3))
+      sc.velocity = Math.min(sc.velocity + Math.abs(e.deltaY) * 0.5 * scrollScale, 80 * scrollScale)
+
+      if (!sc.rafId) {
+        const coast = () => {
+          sc.velocity *= 0.88
+          ta.scrollTop += sc.velocity * sc.direction
+          syncLineNumbers()
+          reportCurrentLocation(ta)
+          if (sc.velocity < 0.5) { sc.rafId = null; return }
+          sc.rafId = requestAnimationFrame(coast)
+        }
+        sc.rafId = requestAnimationFrame(coast)
+      }
+    }
+
+    ta.addEventListener('wheel', handler, { passive: false })
+    return () => {
+      ta.removeEventListener('wheel', handler)
+      const sc = editorScrollCoastRef.current
+      if (sc.rafId) { cancelAnimationFrame(sc.rafId); sc.rafId = null }
+      sc.velocity = 0
+    }
+  }, [mode, reportCurrentLocation])
 
   // Register/unregister diff note loader with parent
   useEffect(() => {
@@ -125,6 +285,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     if (end > start) {
       setSel({ start, end, text: ta.value.slice(start, end) })
     }
+    reportCurrentLocation(ta)
   }
 
   const clearSelIfEmpty = () => {
@@ -135,6 +296,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       setTxResult(null)
       setInteractiveTx(null)
     }
+    reportCurrentLocation(ta)
   }
 
   // ── Undo / redo ─────────────────────────────────────────────────────────────
@@ -195,8 +357,10 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     try {
       const result = applyTransform(id, sel.text, param)
       setTxResult({ opName, text: result, error: null })
+      setCalcResult(null)
     } catch (e) {
       setTxResult({ opName, text: '', error: e.message })
+      setCalcResult(null)
     }
   }
 
@@ -219,6 +383,194 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const dismissInteractive = () => {
     setInteractiveTx(null)
     setTxResult(null)
+  }
+
+  const getCurrentLineRange = () => {
+    const ta = textareaRef.current
+    if (!ta) return { start: 0, end: 0, text: '' }
+    const pos = ta.selectionStart
+    const lineStart = content.lastIndexOf('\n', Math.max(0, pos - 1)) + 1
+    const nextBreak = content.indexOf('\n', pos)
+    const lineEnd = nextBreak === -1 ? content.length : nextBreak
+    return { start: lineStart, end: lineEnd, text: content.slice(lineStart, lineEnd) }
+  }
+
+  const getCalcRange = () => {
+    const ta = textareaRef.current
+    if (!ta) return { start: 0, end: 0, text: '' }
+    if (ta.selectionStart !== ta.selectionEnd) {
+      return {
+        start: ta.selectionStart,
+        end: ta.selectionEnd,
+        text: ta.value.slice(ta.selectionStart, ta.selectionEnd),
+      }
+    }
+    return getCurrentLineRange()
+  }
+
+  const replaceRange = (start, end, text) => {
+    const next = content.slice(0, start) + text + content.slice(end)
+    pushHistoryNow(next)
+    setContent(next)
+    onUpdate({ content: next })
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const cursor = start + text.length
+      ta.focus()
+      ta.selectionStart = ta.selectionEnd = cursor
+      reportCurrentLocation(ta)
+    })
+  }
+
+  const openTableMode = () => {
+    const ta = textareaRef.current
+    const hasSelection = ta && ta.selectionStart !== ta.selectionEnd
+    const start = hasSelection ? ta.selectionStart : 0
+    const end = hasSelection ? ta.selectionEnd : content.length
+    const text = content.slice(start, end)
+
+    try {
+      parseCsvTable(text)
+      setTableSession({ start, end, text })
+      setTxResult(null)
+      setCalcResult(null)
+      setPendingCalc(null)
+      setMode('table')
+    } catch (e) {
+      setTxResult({ opName: 'Table', text: '', error: e.message })
+      setMode('edit')
+    }
+  }
+
+  const applyTableSession = (csv) => {
+    if (!tableSession) return
+    replaceRange(tableSession.start, tableSession.end, csv)
+    setTableSession(null)
+    setDisplayHint('table')
+    setMode('edit')
+  }
+
+  const openCronMode = () => {
+    const ta = textareaRef.current
+    const hasSelection = ta && ta.selectionStart !== ta.selectionEnd
+    const range = hasSelection
+      ? { start: ta.selectionStart, end: ta.selectionEnd, text: ta.value.slice(ta.selectionStart, ta.selectionEnd) }
+      : getCurrentLineRange()
+    const text = range.text.trim()
+    const useLine = /^\S+(?:\s+\S+){4,5}$/.test(text)
+    const session = useLine || hasSelection
+      ? range
+      : { start: ta?.selectionStart ?? content.length, end: ta?.selectionEnd ?? content.length, text: '' }
+    setCronSession(session)
+    setTxResult(null)
+    setCalcResult(null)
+    setPendingCalc(null)
+    setMode('cron')
+  }
+
+  const applyCronSession = (expression) => {
+    if (!cronSession) return
+    replaceRange(cronSession.start, cronSession.end, expression)
+    setCronSession(null)
+    setMode('edit')
+  }
+
+  const openDiagramMode = () => {
+    const ta = textareaRef.current
+    const start = ta?.selectionStart ?? 0
+    const end = ta?.selectionEnd ?? 0
+    try {
+      const session = diagramSessionFromText(content, start, end)
+      setDiagramSession(session)
+      setTxResult(null)
+      setCalcResult(null)
+      setPendingCalc(null)
+      setMode('diagram')
+    } catch (e) {
+      setTxResult({ opName: 'Diagram', text: '', error: e.message })
+      setMode('edit')
+    }
+  }
+
+  const applyDiagramSession = (diagram) => {
+    if (!diagramSession) return
+    replaceRange(diagramSession.start, diagramSession.end, serializeDiagramBlock(diagram))
+    setDiagramSession(null)
+    setMode('edit')
+  }
+
+  const runCalculation = ({ complete = false } = {}) => {
+    const range = getCalcRange()
+    try {
+      const result = analyzeCalculation(range.text)
+      setTxResult(null)
+      const nextCalc = { ...result, start: range.start, end: range.end, sourceText: range.text, error: null }
+      setCalcResult(nextCalc)
+
+      if (complete) {
+        const replacement = result.mode === 'equals-lines'
+          ? result.replacementText
+          : `${range.text.replace(/\s*$/, '')}${result.appendText ?? ` = ${result.resultText}`}`
+        setPendingCalc({
+          ...nextCalc,
+          replacementText: replacement,
+          previewText: result.mode === 'equals-lines'
+            ? replacement
+            : result.appendText ?? ` = ${result.resultText}`,
+        })
+      }
+    } catch (e) {
+      setTxResult(null)
+      setPendingCalc(null)
+      setCalcResult({
+        title: 'calculation failed',
+        expression: range.text,
+        resultText: '',
+        replacementText: '',
+        appendText: null,
+        start: range.start,
+        end: range.end,
+        sourceText: range.text,
+        error: e.message,
+      })
+    }
+  }
+
+  const replaceWithCalcResult = () => {
+    if (!calcResult || calcResult.error) return
+    replaceRange(calcResult.start, calcResult.end, calcResult.replacementText)
+    setCalcResult(null)
+  }
+
+  const appendCalcResult = () => {
+    if (!calcResult || calcResult.error) return
+    const addition = calcResult.appendText ?? ` = ${calcResult.resultText}`
+    setPendingCalc({
+      ...calcResult,
+      replacementText: `${calcResult.sourceText.replace(/\s*$/, '')}${addition}`,
+      previewText: addition,
+    })
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  const copyCalcResult = async () => {
+    if (!calcResult || calcResult.error) return
+    await navigator.clipboard.writeText(calcResult.resultText)
+    setCalcCopied(true)
+    setTimeout(() => setCalcCopied(false), 1500)
+  }
+
+  const acceptPendingCalc = () => {
+    if (!pendingCalc) return
+    replaceRange(pendingCalc.start, pendingCalc.end, pendingCalc.replacementText)
+    setPendingCalc(null)
+    setCalcResult(null)
+  }
+
+  const cancelPendingCalc = () => {
+    setPendingCalc(null)
+    requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
   const insertGuid = () => {
@@ -245,6 +597,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setContent(newContent)
     onUpdate({ content: newContent })
     setTxResult(null)
+    setCalcResult(null)
     setSel({ start: 0, end: 0, text: '' })
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
@@ -257,12 +610,39 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   // ── Editor actions ──────────────────────────────────────────────────────────
   const handleContent = (e) => {
+    setPendingCalc(null)
     setContent(e.target.value)
     onUpdate({ content: e.target.value })
     pushHistory(e.target.value)
+    reportCurrentLocation(e.target)
   }
 
   const handleKeyDown = (e) => {
+    if (pendingCalc && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      acceptPendingCalc()
+      return
+    }
+    if (pendingCalc && e.key === 'Escape') {
+      e.preventDefault()
+      cancelPendingCalc()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+      e.preventDefault()
+      openGotoLine()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+      e.preventDefault()
+      runCalculation()
+      return
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault()
+      runCalculation({ complete: true })
+      return
+    }
     if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
       e.preventDefault()
       undo()
@@ -369,6 +749,25 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setTimeout(() => setCopied(false), 1500)
   }
 
+  const sharePublicNote = async () => {
+    if (!onPublishNote || sharing) return
+    setSharing(true)
+    setShareState(null)
+    try {
+      const publishMode = mode !== 'edit' ? mode : displayHint
+      const result = await onPublishNote(publishMode)
+      if (result?.ok) {
+        const absolute = `${window.location.origin}${result.url}`
+        try { await navigator.clipboard.writeText(absolute) } catch {}
+        setShareState({ ok: true, url: result.url, copied: true })
+      } else {
+        setShareState({ error: result?.error ?? 'Publish failed' })
+      }
+    } finally {
+      setSharing(false)
+    }
+  }
+
   const handleDelete = () => {
     if (confirmDelete) { onDelete() }
     else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000) }
@@ -419,6 +818,14 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     return detectRequestType(content) !== null
   }, [content])
 
+  const looksLikeTable = useMemo(() => {
+    const ta = textareaRef.current
+    const selected = ta && ta.selectionStart !== ta.selectionEnd
+      ? content.slice(ta.selectionStart, ta.selectionEnd)
+      : content
+    return looksLikeCsvTable(selected)
+  }, [content, sel.text])
+
   const jsonValid = isValidJson(content)
   const hasSelection = sel.text.length > 0
 
@@ -445,6 +852,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       if (id === 'toSnake')  return (/[a-z][A-Z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
       if (id === 'toCamel')  return (/_[a-z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
       if (id === 'toPascal') return (/_[a-z]/.test(t) || /[a-z][A-Z]/.test(t) || /[-\s][a-zA-Z]/.test(t)) ? 4 : 0
+      if (id === 'oneliner') return /\\\n/.test(t) ? 10 : 0
       return 0
     }
     return TRANSFORMS.map(tx => ({ ...tx, score: score(tx.id) }))
@@ -535,6 +943,44 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </button>
         <button
           onMouseDown={e => e.preventDefault()}
+          onClick={openTableMode}
+          title="Open selected CSV or whole note as a table"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'table'
+              ? 'text-cyan-300 bg-cyan-950/50 border-cyan-800'
+              : looksLikeTable
+                ? 'text-cyan-400 hover:text-cyan-200 bg-cyan-950/20 border-cyan-900 hover:border-cyan-700'
+                : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Table
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={openCronMode}
+          title="Build a Unix or Azure cron expression"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'cron'
+              ? 'text-lime-300 bg-lime-950/50 border-lime-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Cron
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={openDiagramMode}
+          title="Create or edit a lightweight diagram"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'diagram'
+              ? 'text-fuchsia-300 bg-fuchsia-950/50 border-fuchsia-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Diagram
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
           onClick={insertGuid}
           title="Insert UUID v4 at cursor"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
@@ -558,6 +1004,30 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           #
         </button>
         <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={openGotoLine}
+          title="Go to line (Ctrl+G)"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            gotoOpen
+              ? 'text-blue-300 bg-blue-950/50 border-blue-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Go
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => runCalculation()}
+          title="Calculate selection or current line (Ctrl+=)"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            calcResult
+              ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Calc
+        </button>
+        <button
           onClick={copyToClipboard}
           title="Copy to clipboard"
           className="flex items-center gap-1 px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:border-zinc-600 rounded transition-colors"
@@ -579,7 +1049,34 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           </svg>
           {note.isPublic ? 'Public' : 'Private'}
         </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={sharePublicNote}
+          disabled={sharing || !content.trim()}
+          title="Publish this note and copy a public link"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            shareState?.ok
+              ? 'text-emerald-300 bg-emerald-950/40 border-emerald-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600 disabled:text-zinc-800 disabled:hover:border-zinc-800'
+          }`}
+        >
+          {sharing ? 'Sharing…' : shareState?.ok ? 'Link copied' : 'Share'}
+        </button>
         <div className="ml-auto flex items-center gap-3">
+          {shareState?.ok && (
+            <a
+              href={shareState.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-emerald-400 hover:text-emerald-300 font-mono"
+              onMouseDown={e => e.stopPropagation()}
+            >
+              {shareState.url}
+            </a>
+          )}
+          {shareState?.error && (
+            <span className="text-[11px] text-red-400 font-mono">{shareState.error}</span>
+          )}
           {aiProcessing && (
             <span className="text-[11px] text-blue-400 animate-pulse flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse inline-block" />
@@ -601,7 +1098,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
       {/* ── Transform strip ── */}
       {mode === 'edit' && !interactiveTx && (
-        <div className={`px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 ${showMoreTx ? 'flex flex-wrap gap-1' : 'flex items-center gap-1 overflow-hidden'}`}>
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 flex flex-wrap gap-1">
           {hasSelection ? (
             <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">
               {sel.text.length}c
@@ -612,8 +1109,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             </span>
           )}
 
-          {/* Suggested transforms (score > 0), or all when expanded */}
-          {(showMoreTx ? scoredTransforms : scoredTransforms.filter(t => t.score > 0).sort((a, b) => b.score - a.score).slice(0, 5))
+          {/* All transforms stay visible; scores only affect emphasis. */}
+          {scoredTransforms
             .map(t => (
               <button
                 key={t.id}
@@ -669,19 +1166,51 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               A ✕
             </button>
           )}
+        </div>
+      )}
 
-          {/* Show all / collapse toggle */}
+      {mode === 'edit' && gotoOpen && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0">
+            go to line
+          </span>
+          <input
+            ref={gotoInputRef}
+            value={gotoLine}
+            onChange={e => { setGotoLine(e.target.value); setGotoError(false) }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') submitGotoLine()
+              if (e.key === 'Escape') {
+                setGotoOpen(false)
+                requestAnimationFrame(() => textareaRef.current?.focus())
+              }
+            }}
+            inputMode="numeric"
+            placeholder={`1-${lineCount}`}
+            className={`w-24 bg-zinc-800 border rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700 ${
+              gotoError ? 'border-red-700 focus:border-red-500' : 'border-zinc-700 focus:border-zinc-500'
+            }`}
+          />
           <button
             onMouseDown={e => e.preventDefault()}
-            onClick={() => setShowMoreTx(v => !v)}
-            title={showMoreTx ? 'Collapse' : 'Show all transforms'}
-            className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors shrink-0 ${showMoreTx ? 'ml-0' : 'ml-auto'} ${
-              showMoreTx
-                ? 'text-zinc-400 border-zinc-600 bg-zinc-800 hover:text-zinc-200'
-                : 'text-zinc-600 border-zinc-800 hover:text-zinc-400 hover:border-zinc-600'
-            }`}
+            onClick={submitGotoLine}
+            className="px-2 py-1 text-[11px] font-mono text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800 transition-colors"
           >
-            {showMoreTx ? '↑ less' : '···'}
+            go
+          </button>
+          <span className="text-[11px] text-zinc-700 font-mono">
+            {lineCount} lines
+          </span>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => {
+              setGotoOpen(false)
+              requestAnimationFrame(() => textareaRef.current?.focus())
+            }}
+            className="ml-auto text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none"
+            title="Cancel (Esc)"
+          >
+            ✕
           </button>
         </div>
       )}
@@ -732,20 +1261,42 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               ))}
             </div>
           )}
-          <textarea
-            ref={textareaRef}
-            value={content}
-            onChange={handleContent}
-            onKeyDown={handleKeyDown}
-            onSelect={updateSel}
-            onMouseUp={updateSel}
-            onKeyUp={updateSel}
-            onClick={clearSelIfEmpty}
-            onScroll={showLineNumbers ? e => { if (lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop } : undefined}
-            placeholder="Start typing…"
-            spellCheck={false}
-            className="flex-1 bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
-          />
+          <div className="relative flex-1 min-w-0 overflow-hidden">
+            <textarea
+              ref={textareaRef}
+              value={content}
+              onChange={handleContent}
+              onKeyDown={handleKeyDown}
+              onSelect={updateSel}
+              onMouseUp={updateSel}
+              onKeyUp={updateSel}
+              onClick={clearSelIfEmpty}
+              onScroll={e => {
+                if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
+                reportCurrentLocation(e.target)
+              }}
+              placeholder="Start typing…"
+              spellCheck={false}
+              className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
+            />
+            {pendingCalc && pendingCalcInline?.visible && (
+              <div
+                className="absolute z-10 pointer-events-none flex items-start gap-2"
+                style={{
+                  top: `${pendingCalcInline.top}px`,
+                  left: `${Math.max(16, pendingCalcInline.left)}px`,
+                  maxWidth: 'calc(100% - 32px)',
+                }}
+              >
+                <pre className="note-content text-[13px] text-emerald-200 bg-emerald-950/80 border border-emerald-800/70 rounded px-1.5 py-0.5 whitespace-pre-wrap m-0 shadow-lg shadow-black/30">
+                  {pendingCalc.previewText}
+                </pre>
+                <span className="mt-0.5 shrink-0 text-[10px] font-mono text-emerald-500 bg-zinc-950/90 border border-emerald-900/70 rounded px-1.5 py-0.5">
+                  Enter accept · Esc cancel
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -790,6 +1341,27 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             <span className="text-zinc-700 note-content text-sm">empty</span>
           )}
         </div>
+      )}
+      {mode === 'table' && tableSession && (
+        <TableViewer
+          csvText={tableSession.text}
+          onApply={applyTableSession}
+          onCancel={() => { setTableSession(null); setMode('edit') }}
+        />
+      )}
+      {mode === 'cron' && cronSession && (
+        <CronBuilder
+          initialExpression={cronSession.text}
+          onApply={applyCronSession}
+          onCancel={() => { setCronSession(null); setMode('edit') }}
+        />
+      )}
+      {mode === 'diagram' && diagramSession && (
+        <DiagramEditor
+          initialDiagram={diagramSession.diagram}
+          onApply={applyDiagramSession}
+          onCancel={() => { setDiagramSession(null); setMode('edit') }}
+        />
       )}
       {mode === 'regex' && (
         <RegexTester
@@ -855,6 +1427,59 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
+      {/* ── Calculation result panel ── */}
+      {calcResult && mode === 'edit' && (
+        <div className="border-t border-zinc-700 bg-zinc-900/80 shrink-0 flex flex-col max-h-64">
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800">
+            <span className="text-[11px] text-zinc-500 font-mono">Calc</span>
+            <span className={`text-[11px] font-mono ${calcResult.error ? 'text-red-400' : 'text-emerald-500'}`}>
+              {calcResult.error ? calcResult.error : calcResult.title}
+            </span>
+            {!calcResult.error && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={copyCalcResult}
+                  className="px-2 py-0.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800 transition-colors"
+                >
+                  {calcCopied ? '✓ copied' : 'copy'}
+                </button>
+                <button
+                  onClick={replaceWithCalcResult}
+                  className="px-2 py-0.5 text-[11px] font-mono text-green-400 hover:text-green-300 border border-green-900 hover:border-green-700 rounded bg-green-950/40 transition-colors"
+                >
+                  {calcResult.mode === 'equals-lines' ? 'complete lines' : 'replace'}
+                </button>
+                {calcResult.mode !== 'equals-lines' && (
+                  <button
+                    onClick={appendCalcResult}
+                    className="px-2 py-0.5 text-[11px] font-mono text-sky-400 hover:text-sky-300 border border-sky-900 hover:border-sky-700 rounded bg-sky-950/40 transition-colors"
+                  >
+                    append
+                  </button>
+                )}
+              </div>
+            )}
+            <button
+              onClick={() => setCalcResult(null)}
+              className="ml-auto text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none"
+            >
+              ✕
+            </button>
+          </div>
+          {!calcResult.error && (
+            <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-3 p-3 overflow-auto">
+              <pre className="note-content text-[12px] text-zinc-500 whitespace-pre-wrap overflow-auto m-0">
+                {calcResult.expression}
+              </pre>
+              <span className="text-zinc-700 font-mono text-xs pt-1">=</span>
+              <pre className="note-content text-[12px] text-zinc-200 whitespace-pre-wrap overflow-auto m-0">
+                {calcResult.resultText}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Code mode footer ── */}
       {mode === 'code' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]" style={{ background: '#0d1117' }}>
@@ -867,7 +1492,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
       {/* ── Footer ── */}
-      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'code' && (
+      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'code' && mode !== 'table' && mode !== 'cron' && mode !== 'diagram' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
           {note.categories.length > 0
             ? note.categories.map(c => <CategoryBadge key={c} category={c} />)

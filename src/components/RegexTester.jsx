@@ -53,6 +53,7 @@ export default function RegexTester({ noteContent, initialTestString = '' }) {
     return { error: null, matches, html }
   }, [pattern, flags, testStr])
 
+  const safeResult = result ?? { error: null, matches: [], html: '' }
   const matchCount = result?.matches?.length ?? null
   const hasError = result?.error
 
@@ -128,16 +129,16 @@ export default function RegexTester({ noteContent, initialTestString = '' }) {
                 <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Highlighted</div>
                 <pre
                   className="note-content text-[13px] text-zinc-400 leading-relaxed whitespace-pre-wrap break-words"
-                  dangerouslySetInnerHTML={{ __html: result.html || esc(testStr) }}
+                  dangerouslySetInnerHTML={{ __html: safeResult.html || esc(testStr) }}
                 />
               </div>
 
               {/* Match details */}
-              {result.matches.length > 0 && (
+              {safeResult.matches.length > 0 && (
                 <div>
                   <div className="text-[10px] text-zinc-600 uppercase tracking-widest mb-2">Matches</div>
                   <div className="space-y-1.5">
-                    {result.matches.map(m => (
+                    {safeResult.matches.map(m => (
                       <div key={m.i} className="text-[12px] font-mono bg-zinc-900 border border-zinc-800 rounded px-3 py-2 flex flex-wrap gap-x-3 gap-y-1 items-baseline">
                         <span className="text-zinc-600 shrink-0">[{m.i}]</span>
                         <span className="text-amber-300">"{m.full}"</span>
@@ -160,7 +161,7 @@ export default function RegexTester({ noteContent, initialTestString = '' }) {
                 </div>
               )}
 
-              {result.matches.length === 0 && testStr && pattern && (
+              {safeResult.matches.length === 0 && testStr && pattern && (
                 <div className="text-[12px] text-zinc-600 font-mono">no matches</div>
               )}
             </>

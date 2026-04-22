@@ -18,6 +18,7 @@ export const TRANSFORMS = [
   { id: 'guidstrip', label: 'GUID bare',   title: 'GUID Strip Formatting (→ bare hex)' },
   { id: 'guidfmt',   label: 'GUID fmt',    title: 'GUID Format (add dashes)' },
   { id: 'jsonpath',  label: 'JSON→',       title: 'Extract JSON path', interactive: true },
+  { id: 'oneliner',  label: '1-liner',     title: 'Collapse to one line (join \\ continuations)' },
 ]
 
 function parsePathSegments(path) {
@@ -307,6 +308,14 @@ export function applyTransform(id, input, param = '') {
       const values = walkPath(parsed, segments)
       const out = values.length === 1 ? values[0] : values
       return typeof out === 'string' ? out : JSON.stringify(out, null, 2)
+    }
+
+    case 'oneliner': {
+      return input
+        .replace(/[ \t]*\\[ \t]*\r?\n[ \t]*/g, ' ')
+        .replace(/\r?\n/g, ' ')
+        .replace(/  +/g, ' ')
+        .trim()
     }
 
     default:

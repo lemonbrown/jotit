@@ -8,6 +8,7 @@ export default defineConfig({
       '/proxy': 'http://localhost:3001',
       '/api':   'http://localhost:3001',
       '/b':     'http://localhost:3001',
+      '/n/':    'http://localhost:3001',
     },
   },
 })

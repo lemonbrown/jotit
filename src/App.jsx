@@ -36,6 +36,8 @@ function AppShell({ user, logout }) {
   const [dbReady, setDbReady] = useState(false)
   const [notes, setNotes] = useState([])
   const [activeNoteId, setActiveNoteId] = useState(null)
+  const [editorPanes, setEditorPanes] = useState([])
+  const [activePaneId, setActivePaneId] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const dragCounter = useRef(0)
   const [searchQuery, setSearchQuery] = useState('')
@@ -46,15 +48,106 @@ function AppShell({ user, logout }) {
   const searchRef = useRef(null)
   const [isSearching, setIsSearching] = useState(false)
   const [aiProcessing, setAiProcessing] = useState(new Set())
-  const [txExpanded, setTxExpanded] = useState(false)
   const diffLoaderRef = useRef(null) // set by NotePanel when diff mode is active
   const [diffActive, setDiffActive] = useState(false)
   const [showAuth, setShowAuth] = useState(false)
+  const [notePeekOpen, setNotePeekOpen] = useState(false)
+  const [editorFocusNonce, setEditorFocusNonce] = useState(0)
+  const [restoreLocation, setRestoreLocation] = useState(null)
+  const [locationHistory, setLocationHistory] = useState([])
+  const [locationHistoryIndex, setLocationHistoryIndex] = useState(-1)
 
   const notesRef = useRef(notes)
   useEffect(() => { notesRef.current = notes }, [notes])
+  const locationHistoryRef = useRef(locationHistory)
+  const locationHistoryIndexRef = useRef(locationHistoryIndex)
+  const suppressLocationCaptureRef = useRef(false)
 
   const categTimers = useRef({})
+
+  const commitLocationHistory = useCallback((next, nextIndex) => {
+    locationHistoryRef.current = next
+    locationHistoryIndexRef.current = nextIndex
+    setLocationHistory(next)
+    setLocationHistoryIndex(nextIndex)
+  }, [])
+
+  const recordLocation = useCallback((location, { replaceCurrent = false } = {}) => {
+    if (suppressLocationCaptureRef.current || !location?.noteId) return
+
+    const now = Date.now()
+    const nextLocation = {
+      noteId: location.noteId,
+      cursorStart: location.cursorStart ?? 0,
+      cursorEnd: location.cursorEnd ?? location.cursorStart ?? 0,
+      scrollTop: location.scrollTop ?? 0,
+      at: now,
+    }
+
+    const index = locationHistoryIndexRef.current
+    const existing = locationHistoryRef.current
+    const base = index < existing.length - 1 ? existing.slice(0, index + 1) : existing.slice()
+    const current = base[base.length - 1]
+
+    if (current && current.noteId === nextLocation.noteId && now - current.at < 120) {
+      const next = [...base.slice(0, -1), nextLocation]
+      locationHistoryRef.current = next
+      locationHistoryIndexRef.current = next.length - 1
+      return
+    }
+
+    if (
+      current &&
+      current.noteId === nextLocation.noteId &&
+      current.cursorStart === nextLocation.cursorStart &&
+      current.cursorEnd === nextLocation.cursorEnd &&
+      Math.abs(current.scrollTop - nextLocation.scrollTop) < 16
+    ) {
+      return
+    }
+
+    const shouldReplace =
+      replaceCurrent ||
+      (current && current.noteId === nextLocation.noteId && now - current.at < 900)
+
+    const next = shouldReplace && base.length
+      ? [...base.slice(0, -1), nextLocation]
+      : [...base, nextLocation]
+    const trimmed = next.slice(-100)
+    commitLocationHistory(trimmed, trimmed.length - 1)
+  }, [commitLocationHistory])
+
+  const navigateLocationHistory = useCallback((direction) => {
+    const history = locationHistoryRef.current
+    const index = locationHistoryIndexRef.current
+    const nextIndex = index + direction
+    if (nextIndex < 0 || nextIndex >= history.length) return
+
+    const location = history[nextIndex]
+    suppressLocationCaptureRef.current = true
+    locationHistoryIndexRef.current = nextIndex
+    setLocationHistoryIndex(nextIndex)
+    setActiveNoteId(location.noteId)
+    setEditorPanes(prev => {
+      const existing = prev.find(p => p.noteId === location.noteId)
+      if (existing) {
+        setActivePaneId(existing.id)
+        return prev
+      }
+      if (!prev.length) {
+        const paneId = generateId()
+        setActivePaneId(paneId)
+        return [{ id: paneId, noteId: location.noteId }]
+      }
+      const paneId = activePaneId && prev.some(p => p.id === activePaneId)
+        ? activePaneId
+        : prev[0].id
+      setActivePaneId(paneId)
+      return prev.map(p => p.id === paneId ? { ...p, noteId: location.noteId } : p)
+    })
+    setRestoreLocation({ ...location, token: Date.now() })
+    window.setTimeout(() => { suppressLocationCaptureRef.current = false }, 250)
+  }, [activePaneId])
 
   // ── Boot: init SQLite ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -68,6 +161,11 @@ function AppShell({ user, logout }) {
       }
       setNotes(loaded)
       setActiveNoteId(loaded[0]?.id ?? null)
+      if (loaded[0]) {
+        const paneId = generateId()
+        setEditorPanes([{ id: paneId, noteId: loaded[0].id }])
+        setActivePaneId(paneId)
+      }
       setDbReady(true)
     }).catch(err => {
       console.error('[JotIt] DB init failed:', err)
@@ -157,9 +255,14 @@ function AppShell({ user, logout }) {
     scheduleSyncPush()
     setNotes(prev => [note, ...prev])
     setActiveNoteId(note.id)
+    const paneId = generateId()
+    setEditorPanes([{ id: paneId, noteId: note.id }])
+    setActivePaneId(paneId)
+    recordLocation({ noteId: note.id }, { replaceCurrent: false })
+    setEditorFocusNonce(n => n + 1)
     setSearchQuery('')
     setSearchResults(null)
-  }, [])
+  }, [recordLocation])
 
   const updateNote = useCallback((id, updates) => {
     setNotes(prev => {
@@ -217,20 +320,96 @@ function AppShell({ user, logout }) {
     setNotes(prev => {
       const idx = prev.findIndex(n => n.id === id)
       const next = prev.filter(n => n.id !== id)
-      setActiveNoteId(next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null)
+      const fallbackId = next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null
+      setEditorPanes(prevPanes => {
+        const remaining = prevPanes.filter(p => p.noteId !== id)
+        if (remaining.length) {
+          if (!remaining.some(p => p.id === activePaneId)) setActivePaneId(remaining[0].id)
+          return remaining
+        }
+        if (!fallbackId) {
+          setActivePaneId(null)
+          return []
+        }
+        const paneId = generateId()
+        setActivePaneId(paneId)
+        return [{ id: paneId, noteId: fallbackId }]
+      })
+      setActiveNoteId(fallbackId)
       return next
     })
-  }, [user])
+  }, [activePaneId, user])
+
+  const openNoteInPane = useCallback((id, { newPane = false } = {}) => {
+    recordLocation({ noteId: id }, { replaceCurrent: false })
+    setActiveNoteId(id)
+
+    setEditorPanes(prev => {
+      if (newPane) {
+        const existing = prev.find(p => p.noteId === id)
+        if (existing) {
+          setActivePaneId(existing.id)
+          return prev
+        }
+        const paneId = generateId()
+        setActivePaneId(paneId)
+        return [...prev, { id: paneId, noteId: id }]
+      }
+
+      if (!prev.length) {
+        const paneId = generateId()
+        setActivePaneId(paneId)
+        return [{ id: paneId, noteId: id }]
+      }
+
+      const paneId = activePaneId && prev.some(p => p.id === activePaneId)
+        ? activePaneId
+        : prev[0].id
+      setActivePaneId(paneId)
+      return prev.map(p => p.id === paneId ? { ...p, noteId: id } : p)
+    })
+  }, [activePaneId, recordLocation])
+
+  const closeEditorPane = useCallback((paneId) => {
+    setEditorPanes(prev => {
+      const idx = prev.findIndex(p => p.id === paneId)
+      const next = prev.filter(p => p.id !== paneId)
+      if (!next.length) {
+        setActivePaneId(null)
+        setActiveNoteId(null)
+        return []
+      }
+      if (activePaneId === paneId) {
+        const replacement = next[Math.max(0, idx - 1)] ?? next[0]
+        setActivePaneId(replacement.id)
+        setActiveNoteId(replacement.noteId)
+      }
+      return next
+    })
+  }, [activePaneId])
 
   // ── Search ──────────────────────────────────────────────────────────────────
   const handleSearch = useCallback(async (query) => {
     setSearchQuery(query)
     if (!query.trim()) { setSearchResults(null); return }
     const q = query.toLowerCase()
-    const local = notesRef.current.filter(n =>
-      n.content.toLowerCase().includes(q) ||
-      n.categories.some(c => c.includes(q))
-    )
+    const local = notesRef.current
+      .map((n, index) => {
+        const content = n.content.toLowerCase()
+        const categories = n.categories.map(c => String(c).toLowerCase())
+        const exactCategory = categories.some(c => c === q)
+        const categoryHit = categories.some(c => c.includes(q))
+        const contentHit = content.includes(q)
+        if (!exactCategory && !categoryHit && !contentHit) return null
+        return {
+          note: n,
+          score: (exactCategory ? 100 : 0) + (categoryHit ? 80 : 0) + (contentHit ? 10 : 0),
+          index,
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .map(x => x.note)
     setSearchResults(local)
     if (isOpenAIReady()) {
       setIsSearching(true)
@@ -261,6 +440,21 @@ function AppShell({ user, logout }) {
       const data = await res.json()
       if (!res.ok) return { error: data.error ?? 'Publish failed' }
       return { ok: true, count: data.count, url: data.url }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [])
+
+  const handlePublishNote = useCallback(async (note, viewMode) => {
+    try {
+      const res = await fetch('/api/public-note/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: { ...note, viewMode: viewMode ?? null } }),
+      })
+      const data = await res.json()
+      if (!res.ok) return { error: data.error ?? 'Publish failed' }
+      return { ok: true, url: data.url, slug: data.slug }
     } catch (e) {
       return { error: e.message ?? 'Network error' }
     }
@@ -362,18 +556,24 @@ function AppShell({ user, logout }) {
     const handler = (e) => {
       const inInput = ['INPUT','TEXTAREA'].includes(e.target.tagName)
       if (e.altKey && e.key === 'n') { e.preventDefault(); createNote() }
+      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navigateLocationHistory(-1) }
+      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navigateLocationHistory(1) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); searchRef.current?.focus() }
       if (e.key === 'Escape') { setSearchQuery(''); setSearchResults(null); setShowSettings(false); setShowHelp(false) }
       if (e.key === '?' && !inInput) { e.preventDefault(); setShowHelp(h => !h) }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [createNote])
+  }, [createNote, navigateLocationHistory])
 
   const displayedNotes = searchResults ?? notes
-  const activeNote = notes.find(n => n.id === activeNoteId) ?? null
+  const openPanes = editorPanes
+    .map(pane => ({ ...pane, note: notes.find(n => n.id === pane.noteId) }))
+    .filter(pane => pane.note)
   const aiEnabled = isOpenAIReady()
   const publicNoteCount = notes.filter(n => n.isPublic).length
+  const canGoBack = locationHistoryIndex > 0
+  const canGoForward = locationHistoryIndex >= 0 && locationHistoryIndex < locationHistory.length - 1
 
   // ── Render ──────────────────────────────────────────────────────────────────
   if (!dbReady) {
@@ -427,6 +627,28 @@ function AppShell({ user, logout }) {
             <span className={`w-1.5 h-1.5 rounded-full ${aiEnabled ? 'bg-green-500' : 'bg-zinc-700'}`} />
             <span>AI</span>
           </div>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => navigateLocationHistory(-1)}
+              disabled={!canGoBack}
+              title="Back through note locations (Alt+Left)"
+              className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors disabled:text-zinc-800 disabled:hover:bg-transparent disabled:cursor-default"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M12.78 4.22a.75.75 0 010 1.06L8.06 10l4.72 4.72a.75.75 0 11-1.06 1.06l-5.25-5.25a.75.75 0 010-1.06l5.25-5.25a.75.75 0 011.06 0z" clipRule="evenodd" />
+              </svg>
+            </button>
+            <button
+              onClick={() => navigateLocationHistory(1)}
+              disabled={!canGoForward}
+              title="Forward through note locations (Alt+Right)"
+              className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors disabled:text-zinc-800 disabled:hover:bg-transparent disabled:cursor-default"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M7.22 4.22a.75.75 0 011.06 0l5.25 5.25a.75.75 0 010 1.06l-5.25 5.25a.75.75 0 11-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 010-1.06z" clipRule="evenodd" />
+              </svg>
+            </button>
+          </div>
           <button
             onClick={createNote}
             title="New note (Alt+N)"
@@ -478,38 +700,74 @@ function AppShell({ user, logout }) {
       </header>
 
       {/* Body */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         <NoteGrid
           notes={displayedNotes}
           activeNoteId={activeNoteId}
           aiProcessing={aiProcessing}
-          onSelectNote={(id) => {
+          onSelectNote={(id, options = {}) => {
             if (diffLoaderRef.current) {
               const note = notes.find(n => n.id === id)
               if (note) diffLoaderRef.current(note)
             } else {
-              setActiveNoteId(id)
+              openNoteInPane(id, options)
             }
           }}
           searchQuery={searchQuery}
           diffActive={diffActive}
+          isPeekOpen={notePeekOpen}
+          onPeekOpenChange={setNotePeekOpen}
         />
-        {activeNote ? (
-          <NotePanel
-            key={activeNote.id}
-            note={activeNote}
-            aiProcessing={aiProcessing.has(activeNote.id)}
-            aiEnabled={aiEnabled}
-            onUpdate={(updates) => updateNote(activeNote.id, updates)}
-            onDelete={() => deleteNote(activeNote.id)}
-            txExpanded={txExpanded}
-            onTxExpandedChange={setTxExpanded}
-            notes={notes}
-            onDiffModeChange={(loader) => {
-              diffLoaderRef.current = loader
-              setDiffActive(!!loader)
-            }}
-          />
+        {openPanes.length ? (
+          <div className="flex flex-1 min-w-0 overflow-x-auto overflow-y-hidden">
+            {openPanes.map(({ id: paneId, note }, index) => (
+              <div
+                key={paneId}
+                onMouseDown={() => {
+                  setActivePaneId(paneId)
+                  setActiveNoteId(note.id)
+                }}
+                className={[
+                  'flex flex-col min-w-[520px] flex-1 border-r border-zinc-800 last:border-r-0',
+                  activePaneId === paneId ? 'bg-zinc-950' : 'bg-zinc-950/80',
+                ].join(' ')}
+              >
+                <div className={`flex items-center gap-2 px-3 py-1.5 border-b shrink-0 ${
+                  activePaneId === paneId ? 'border-blue-900/70 bg-blue-950/20' : 'border-zinc-800 bg-zinc-900/40'
+                }`}>
+                  <span className="text-[10px] text-zinc-600 font-mono shrink-0">pane {index + 1}</span>
+                  <span className="text-[11px] text-zinc-400 truncate min-w-0">
+                    {note.content.split('\n').find(l => l.trim()) || 'empty note'}
+                  </span>
+                  <button
+                    onMouseDown={e => e.stopPropagation()}
+                    onClick={() => closeEditorPane(paneId)}
+                    title="Close pane"
+                    className="ml-auto text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
+                  >
+                    ×
+                  </button>
+                </div>
+                <NotePanel
+                  key={`${paneId}:${note.id}`}
+                  note={note}
+                  aiProcessing={aiProcessing.has(note.id)}
+                  aiEnabled={aiEnabled}
+                  onUpdate={(updates) => updateNote(note.id, updates)}
+                  onDelete={() => deleteNote(note.id)}
+                  onPublishNote={(mode) => handlePublishNote(note, mode)}
+                  focusNonce={activePaneId === paneId ? editorFocusNonce : 0}
+                  restoreLocation={restoreLocation?.noteId === note.id ? restoreLocation : null}
+                  onLocationChange={recordLocation}
+                  notes={notes}
+                  onDiffModeChange={(loader) => {
+                    diffLoaderRef.current = loader
+                    setDiffActive(!!loader)
+                  }}
+                />
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-zinc-700">
             <svg className="w-12 h-12 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">

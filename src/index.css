@@ -38,9 +38,20 @@ textarea, input { font-family: inherit; }
   align-content: start;
 }
 
+.card-grid-peek {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
 .line-clamp-3 {
   display: -webkit-box;
   -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-8 {
+  display: -webkit-box;
+  -webkit-line-clamp: 8;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

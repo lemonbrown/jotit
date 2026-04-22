@@ -28,6 +28,13 @@ const CATEGORY_COLORS = {
   github:      'bg-slate-800/80 text-slate-300 border-slate-700',
   aws:         'bg-amber-950/80 text-amber-400 border-amber-900',
   docker:      'bg-sky-950/80 text-sky-400 border-sky-900',
+  'csv / tables': 'bg-cyan-950/80 text-cyan-300 border-cyan-900',
+  csv:         'bg-cyan-950/80 text-cyan-300 border-cyan-900',
+  table:       'bg-cyan-950/80 text-cyan-300 border-cyan-900',
+  spreadsheet: 'bg-cyan-950/80 text-cyan-300 border-cyan-900',
+  'diagrams / flowcharts': 'bg-fuchsia-950/80 text-fuchsia-300 border-fuchsia-900',
+  diagram:     'bg-fuchsia-950/80 text-fuchsia-300 border-fuchsia-900',
+  flowchart:   'bg-fuchsia-950/80 text-fuchsia-300 border-fuchsia-900',
 }
 
 export function getCategoryColor(category) {
