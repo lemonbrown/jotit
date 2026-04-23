@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
-import { initDB, getAllNotes, upsertNoteSync, deleteNoteSync, markPendingDelete, schedulePersist, exportSQLite } from './utils/db'
+import { initDB, getAllNotes, getAllSnippets, upsertNoteSync, upsertSnippetSync, deleteNoteSync, deleteSnippetSync, markPendingDelete, schedulePersist, exportSQLite } from './utils/db'
 import { syncAll, syncPull, scheduleSyncPush } from './utils/sync'
-import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, initCategoryEmbeddings, categorize, categorizeByPatterns } from './utils/openai'
+import { initOpenAI, isOpenAIReady, getEmbedding, semanticSearch, semanticSearchItems, initCategoryEmbeddings, categorize, categorizeByPatterns } from './utils/openai'
 import { generateId, SAMPLE_NOTES } from './utils/helpers'
 import { csvToNotes } from './utils/csv'
 import NoteGrid from './components/NoteGrid'
@@ -11,6 +11,7 @@ import SearchBar from './components/SearchBar'
 import Settings from './components/Settings'
 import HelpModal from './components/HelpModal'
 import AuthScreen from './components/AuthScreen'
+import SnippetManager from './components/SnippetManager'
 import { useAuth } from './contexts/AuthContext'
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
@@ -35,6 +36,7 @@ export default function App() {
 function AppShell({ user, logout }) {
   const [dbReady, setDbReady] = useState(false)
   const [notes, setNotes] = useState([])
+  const [snippets, setSnippets] = useState([])
   const [activeNoteId, setActiveNoteId] = useState(null)
   const [editorPanes, setEditorPanes] = useState([])
   const [activePaneId, setActivePaneId] = useState(null)
@@ -45,6 +47,7 @@ function AppShell({ user, logout }) {
   const [settings, setSettings] = useState(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  const [showSnippets, setShowSnippets] = useState(false)
   const searchRef = useRef(null)
   const [isSearching, setIsSearching] = useState(false)
   const [aiProcessing, setAiProcessing] = useState(new Set())
@@ -59,6 +62,8 @@ function AppShell({ user, logout }) {
 
   const notesRef = useRef(notes)
   useEffect(() => { notesRef.current = notes }, [notes])
+  const snippetsRef = useRef(snippets)
+  useEffect(() => { snippetsRef.current = snippets }, [snippets])
   const locationHistoryRef = useRef(locationHistory)
   const locationHistoryIndexRef = useRef(locationHistoryIndex)
   const suppressLocationCaptureRef = useRef(false)
@@ -160,6 +165,7 @@ function AppShell({ user, logout }) {
         loaded = getAllNotes()
       }
       setNotes(loaded)
+      setSnippets(getAllSnippets())
       setActiveNoteId(loaded[0]?.id ?? null)
       if (loaded[0]) {
         const paneId = generateId()
@@ -239,6 +245,28 @@ function AppShell({ user, logout }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.openaiApiKey, dbReady])
 
+  useEffect(() => {
+    if (!dbReady || !isOpenAIReady()) return
+    const unembedded = snippetsRef.current.filter(s => !s.embedding && s.content.trim())
+    if (!unembedded.length) return
+    unembedded.forEach((snippet, i) => {
+      setTimeout(async () => {
+        const embedding = await getEmbedding(snippet.content)
+        if (!embedding) return
+        setSnippets(prev => {
+          const next = prev.map(s => {
+            if (s.id !== snippet.id) return s
+            const updated = { ...s, embedding, updatedAt: s.updatedAt ?? Date.now() }
+            upsertSnippetSync(updated)
+            return updated
+          })
+          schedulePersist()
+          return next
+        })
+      }, i * 400)
+    })
+  }, [settings.openaiApiKey, dbReady])
+
   // ── CRUD ────────────────────────────────────────────────────────────────────
   const createNote = useCallback(() => {
     const note = {
@@ -307,6 +335,97 @@ function AppShell({ user, logout }) {
         }
       }, 1800)
     }
+  }, [])
+
+  const createSnippet = useCallback(async ({ content, name = '', sourceNoteId = null }) => {
+    const text = content?.trim()
+    if (!text) return null
+
+    const snippet = {
+      id: generateId(),
+      name: name.trim(),
+      content: text,
+      embedding: null,
+      sourceNoteId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+
+    upsertSnippetSync(snippet)
+    schedulePersist()
+    setSnippets(prev => [snippet, ...prev])
+
+    if (isOpenAIReady()) {
+      getEmbedding(text).then(embedding => {
+        if (!embedding) return
+        setSnippets(prev => {
+          const next = prev.map(s => {
+            if (s.id !== snippet.id) return s
+            const updated = { ...s, embedding }
+            upsertSnippetSync(updated)
+            return updated
+          })
+          schedulePersist()
+          return next
+        })
+      })
+    }
+
+    return snippet
+  }, [])
+
+  const updateSnippet = useCallback((id, updates) => {
+    setSnippets(prev => {
+      const next = prev.map(snippet => {
+        if (snippet.id !== id) return snippet
+        const updated = {
+          ...snippet,
+          ...updates,
+          name: updates.name ?? snippet.name ?? '',
+          updatedAt: Date.now(),
+        }
+        upsertSnippetSync(updated)
+        return updated
+      })
+      schedulePersist()
+      return next
+    })
+  }, [])
+
+  const deleteSnippet = useCallback((id) => {
+    deleteSnippetSync(id)
+    schedulePersist()
+    setSnippets(prev => prev.filter(snippet => snippet.id !== id))
+  }, [])
+
+  const searchSnippets = useCallback(async (query) => {
+    const raw = query.trim()
+    if (!raw) return []
+    const q = raw.toLowerCase()
+    const local = snippetsRef.current
+      .map((snippet, index) => {
+        const name = (snippet.name ?? '').toLowerCase()
+        const content = snippet.content.toLowerCase()
+        const preview = snippet.content.split('\n').find(line => line.trim()) ?? snippet.content
+        let score = 0
+        if (name === q) score += 300
+        else if (name.startsWith(q)) score += 220
+        else if (name.includes(q)) score += 160
+        if (content.includes(q)) score += 70
+        if (preview.toLowerCase().includes(q)) score += 35
+        if (!score) return null
+        return { snippet, score, index }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .map(entry => entry.snippet)
+
+    if (!isOpenAIReady() || raw.length < 3) return local
+
+    const semantic = await semanticSearchItems(raw, snippetsRef.current, 8, 0.18)
+    if (!semantic?.length) return local
+    const seen = new Set(local.map(snippet => snippet.id))
+    return [...local, ...semantic.filter(snippet => !seen.has(snippet.id))]
   }, [])
 
   const deleteNote = useCallback((id) => {
@@ -559,7 +678,7 @@ function AppShell({ user, logout }) {
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navigateLocationHistory(-1) }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navigateLocationHistory(1) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); searchRef.current?.focus() }
-      if (e.key === 'Escape') { setSearchQuery(''); setSearchResults(null); setShowSettings(false); setShowHelp(false) }
+      if (e.key === 'Escape') { setSearchQuery(''); setSearchResults(null); setShowSettings(false); setShowHelp(false); setShowSnippets(false) }
       if (e.key === '?' && !inInput) { e.preventDefault(); setShowHelp(h => !h) }
     }
     window.addEventListener('keydown', handler)
@@ -657,6 +776,13 @@ function AppShell({ user, logout }) {
             + New
           </button>
           <button
+            onClick={() => setShowSnippets(true)}
+            title="Manage snippets"
+            className="px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+          >
+            Snippets
+          </button>
+          <button
             onClick={() => setShowHelp(true)}
             title="Hotkeys & commands (?)"
             className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors font-mono text-sm leading-none"
@@ -751,10 +877,13 @@ function AppShell({ user, logout }) {
                 <NotePanel
                   key={`${paneId}:${note.id}`}
                   note={note}
+                  snippets={snippets}
                   aiProcessing={aiProcessing.has(note.id)}
                   aiEnabled={aiEnabled}
                   onUpdate={(updates) => updateNote(note.id, updates)}
                   onDelete={() => deleteNote(note.id)}
+                  onCreateSnippet={createSnippet}
+                  onSearchSnippets={searchSnippets}
                   onPublishNote={(mode) => handlePublishNote(note, mode)}
                   focusNonce={activePaneId === paneId ? editorFocusNonce : 0}
                   restoreLocation={restoreLocation?.noteId === note.id ? restoreLocation : null}
@@ -783,6 +912,14 @@ function AppShell({ user, logout }) {
 
       {showSettings && (
         <Settings settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} onExportDB={exportSQLite} onPublish={handlePublish} publicNoteCount={publicNoteCount} />
+      )}
+      {showSnippets && (
+        <SnippetManager
+          snippets={snippets}
+          onClose={() => setShowSnippets(false)}
+          onDelete={deleteSnippet}
+          onRename={(id, name) => updateSnippet(id, { name })}
+        />
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showAuth && <AuthScreen onClose={() => setShowAuth(false)} />}

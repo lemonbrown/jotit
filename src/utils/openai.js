@@ -205,3 +205,21 @@ export async function semanticSearch(query, notes, topK = 15) {
     return null
   }
 }
+
+export async function semanticSearchItems(query, items, topK = 10, threshold = 0.2) {
+  if (!client) return null
+  try {
+    const qEmbed = await getEmbedding(query)
+    if (!qEmbed) return null
+    const withEmbed = items.filter(item => item.embedding?.length)
+    if (!withEmbed.length) return null
+    return withEmbed
+      .map(item => ({ item, score: cosineSimilarity(qEmbed, item.embedding) }))
+      .filter(entry => entry.score > threshold)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(entry => entry.item)
+  } catch {
+    return null
+  }
+}

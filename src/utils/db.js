@@ -56,6 +56,16 @@ const SCHEMA = `
     updated_at  INTEGER NOT NULL,
     is_public   INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS snippets (
+    id             TEXT PRIMARY KEY,
+    name           TEXT,
+    content        TEXT    NOT NULL DEFAULT '',
+    embedding      TEXT,
+    source_note_id TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+  );
 `
 
 export async function initDB() {
@@ -197,6 +207,41 @@ export function deleteNoteSync(id) {
   db.run('DELETE FROM notes WHERE id = ?', [id])
 }
 
+export function getAllSnippets() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM snippets ORDER BY updated_at DESC')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const snippet = {}
+    columns.forEach((col, i) => { snippet[col] = row[i] })
+    return deserializeSnippet(snippet)
+  })
+}
+
+export function upsertSnippetSync(snippet) {
+  if (!db) return
+  db.run(
+    `INSERT OR REPLACE INTO snippets
+       (id, name, content, embedding, source_note_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      snippet.id,
+      snippet.name?.trim() ? snippet.name.trim() : null,
+      snippet.content,
+      snippet.embedding ? JSON.stringify(snippet.embedding) : null,
+      snippet.sourceNoteId ?? null,
+      snippet.createdAt,
+      snippet.updatedAt,
+    ]
+  )
+}
+
+export function deleteSnippetSync(id) {
+  if (!db) return
+  db.run('DELETE FROM snippets WHERE id = ?', [id])
+}
+
 // Export the raw .sqlite file as a download
 export function exportSQLite() {
   if (!db) return
@@ -223,5 +268,17 @@ function deserialize(row) {
     isPublic:      row.is_public === 1,
     dirty:         row.dirty,
     pendingDelete: row.pending_delete === 1,
+  }
+}
+
+function deserializeSnippet(row) {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    content: row.content,
+    embedding: row.embedding ? JSON.parse(row.embedding) : null,
+    sourceNoteId: row.source_note_id ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }

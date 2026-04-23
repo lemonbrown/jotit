@@ -124,6 +124,235 @@ textarea, input { font-family: inherit; }
 .md-prose hr { border: none; border-top: 1px solid #3f3f46; margin: 1.25em 0; }
 .md-prose img { max-width: 100%; border-radius: 4px; }
 
+.json-block-host {
+  margin: 0.75em 0;
+}
+
+.json-block-viewer {
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #0d1117 0%, #0b1016 100%);
+  overflow: hidden;
+}
+
+.json-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #30363d;
+  background: rgba(17, 24, 39, 0.7);
+  flex-wrap: wrap;
+}
+
+.json-badge {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: #7dd3fc;
+  border: 1px solid rgba(14, 116, 144, 0.8);
+  background: rgba(8, 47, 73, 0.55);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.json-scope-label {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.json-search {
+  flex: 1 1 240px;
+  min-width: 180px;
+  background: #111827;
+  color: #e5e7eb;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  outline: none;
+}
+
+.json-search:focus {
+  border-color: #38bdf8;
+}
+
+.json-toolbar-button {
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.json-toolbar-button:hover {
+  border-color: #475569;
+  color: #f8fafc;
+}
+
+.json-tree {
+  padding: 10px 0 12px;
+}
+
+.json-inline-editor {
+  min-height: 100%;
+}
+
+.json-status {
+  padding: 8px 12px 0;
+  color: #93c5fd;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+}
+
+.json-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.json-row:hover {
+  background: rgba(30, 41, 59, 0.32);
+}
+
+.json-toggle,
+.json-path-button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #64748b;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+
+.json-toggle:hover,
+.json-path-button:hover {
+  border-color: #334155;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.75);
+}
+
+.json-spacer {
+  width: 22px;
+  flex: 0 0 22px;
+}
+
+.json-spacer-ghost {
+  width: 35px;
+  flex-basis: 35px;
+}
+
+.json-key {
+  color: #93c5fd;
+}
+
+.json-key-input,
+.json-literal-input,
+.json-raw-textarea {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #e2e8f0;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.json-key-input {
+  min-width: 120px;
+  padding: 3px 7px;
+  color: #93c5fd;
+}
+
+.json-literal-input {
+  min-width: 180px;
+  flex: 1;
+  padding: 3px 7px;
+}
+
+.json-key-input:focus,
+.json-literal-input:focus,
+.json-raw-textarea:focus {
+  border-color: #38bdf8;
+}
+
+.json-punc,
+.json-meta {
+  color: #64748b;
+}
+
+.json-value.json-string {
+  color: #86efac;
+}
+
+.json-value.json-number {
+  color: #fca5a5;
+}
+
+.json-value.json-boolean {
+  color: #f9a8d4;
+}
+
+.json-value.json-null {
+  color: #fcd34d;
+}
+
+.json-inline-match {
+  background: rgba(250, 204, 21, 0.22);
+  color: #fef08a;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.json-pretty-view,
+.json-block-fallback {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #dbeafe;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.json-raw-panel {
+  padding: 12px;
+}
+
+.json-raw-textarea {
+  width: 100%;
+  min-height: 420px;
+  resize: vertical;
+  padding: 12px;
+  white-space: pre;
+}
+
+.json-raw-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.json-empty-state {
+  padding: 10px 12px 0;
+  color: #f59e0b;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+}
+
 .rx-match {
   background: rgba(251, 191, 36, 0.2);
   color: #fde68a;

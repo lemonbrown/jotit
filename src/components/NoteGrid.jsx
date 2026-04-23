@@ -82,8 +82,6 @@ export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNo
       }
 
       onPeekOpenChangeRef.current?.(false)
-      e.preventDefault()
-      selectByWheel(e)
     }
 
     const closePeek = (e) => {

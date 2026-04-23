@@ -15,7 +15,8 @@ import ini from 'highlight.js/lib/languages/ini'
 import 'highlight.js/styles/github-dark.css'
 
 import { timeAgo } from '../utils/helpers'
-import { TRANSFORMS, applyTransform } from '../utils/transforms'
+import { TRANSFORMS, applyTransform, parseDates, detectSingleDate, getDateFormats,
+         detectTimeWithZone, getTimeConversions, detectTimestamp, getTimestampFormats } from '../utils/transforms'
 import { analyzeCalculation } from '../utils/calculator'
 import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
 import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
@@ -30,6 +31,7 @@ import DiffViewer from './DiffViewer'
 import TableViewer from './TableViewer'
 import CronBuilder from './CronBuilder'
 import DiagramEditor from './DiagramEditor'
+import JsonBlockViewer from './JsonBlockViewer'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -83,7 +85,22 @@ function isValidJson(text) {
   try { JSON.parse(t); return true } catch { return false }
 }
 
-export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete, onPublishNote, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
+function snippetLabel(snippet) {
+  if (snippet.name?.trim()) return snippet.name.trim()
+  const firstLine = snippet.content.split('\n').find(line => line.trim()) ?? snippet.content
+  return firstLine.trim().slice(0, 48) || 'untitled snippet'
+}
+
+function getSnippetTrigger(text, cursor) {
+  const before = text.slice(0, cursor)
+  const match = before.match(/(?:^|[\s([{\n])!(?<query>[^\s!()]*)$/)
+  if (!match || match.index == null) return null
+  const bangIndex = before.lastIndexOf('!')
+  if (bangIndex === -1) return null
+  return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
+}
+
+export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -114,6 +131,13 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [tableSession, setTableSession] = useState(null)
   const [cronSession, setCronSession] = useState(null)
   const [diagramSession, setDiagramSession] = useState(null)
+  const [jsonSession, setJsonSession] = useState(null)
+  const [snippetSaveOpen, setSnippetSaveOpen] = useState(false)
+  const [snippetDraftName, setSnippetDraftName] = useState('')
+  const [snippetSaved, setSnippetSaved] = useState(false)
+  const [snippetPicker, setSnippetPicker] = useState(null)
+  const [snippetResults, setSnippetResults] = useState([])
+  const [snippetActiveIndex, setSnippetActiveIndex] = useState(0)
   const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
   const textareaRef = useRef(null)
@@ -121,6 +145,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const codePreRef = useRef(null)
   const interactiveInputRef = useRef(null)
   const gotoInputRef = useRef(null)
+  const snippetNameInputRef = useRef(null)
   const editorScrollCoastRef = useRef({ velocity: 0, direction: 1, rafId: null })
   const historyRef = useRef([note.content])
   const historyIdxRef = useRef(0)
@@ -129,6 +154,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const capturedHttpSelRef = useRef('')
   const capturedDiffARef = useRef('')
   const capturedDiffBRef = useRef('')
+  const txRangeRef = useRef({ start: 0, end: 0 })
   const [httpInstance, setHttpInstance] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
   const [findOpen, setFindOpen] = useState(false)
@@ -137,6 +163,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [findMatchIndex, setFindMatchIndex] = useState(0)
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
+  const snippetSearchSeqRef = useRef(0)
   const charCount = content.length
   const lineCount = content.split('\n').length
 
@@ -290,6 +317,13 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setTableSession(null)
     setCronSession(null)
     setDiagramSession(null)
+    setJsonSession(null)
+    setSnippetSaveOpen(false)
+    setSnippetDraftName('')
+    setSnippetSaved(false)
+    setSnippetPicker(null)
+    setSnippetResults([])
+    setSnippetActiveIndex(0)
     setInteractiveTx(null)
     setDisplayHint(null)
     setFindOpen(false)
@@ -378,6 +412,31 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     }
   }, [mode, reportCurrentLocation])
 
+  useEffect(() => {
+    if (!snippetPicker?.query) {
+      setSnippetResults(snippets.slice(0, 8))
+      setSnippetActiveIndex(0)
+      return
+    }
+
+    let cancelled = false
+    const seq = ++snippetSearchSeqRef.current
+    const run = async () => {
+      const next = onSearchSnippets
+        ? await onSearchSnippets(snippetPicker.query)
+        : snippets.filter(snippet => snippetLabel(snippet).toLowerCase().includes(snippetPicker.query.toLowerCase()))
+      if (cancelled || seq !== snippetSearchSeqRef.current) return
+      setSnippetResults(next.slice(0, 8))
+      setSnippetActiveIndex(0)
+    }
+
+    const timer = setTimeout(run, 120)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [onSearchSnippets, snippetPicker?.query, snippets])
+
   // Register/unregister diff note loader with parent
   useEffect(() => {
     if (mode === 'diff') {
@@ -395,6 +454,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     const { selectionStart: start, selectionEnd: end } = ta
     if (end > start) {
       setSel({ start, end, text: ta.value.slice(start, end) })
+    } else {
+      setSel({ start: 0, end: 0, text: '' })
     }
     reportCurrentLocation(ta)
   }
@@ -406,6 +467,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       setSel({ start: 0, end: 0, text: '' })
       setTxResult(null)
       setInteractiveTx(null)
+      setSnippetSaveOpen(false)
     }
     reportCurrentLocation(ta)
   }
@@ -459,8 +521,11 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   // ── Transforms ──────────────────────────────────────────────────────────────
   const runTransform = (id, opName, param = '') => {
+    const hasText = sel.text.length > 0
+    const inputText = hasText ? sel.text : content
+    txRangeRef.current = hasText ? { start: sel.start, end: sel.end } : { start: 0, end: content.length }
     try {
-      const result = applyTransform(id, sel.text, param)
+      const result = applyTransform(id, inputText, param)
       setTxResult({ opName, text: result, error: null })
       setCalcResult(null)
     } catch (e) {
@@ -470,6 +535,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }
 
   const startInteractive = (id, opName) => {
+    const hasText = sel.text.length > 0
+    txRangeRef.current = hasText ? { start: sel.start, end: sel.end } : { start: 0, end: content.length }
     setInteractiveTx({ id, opName, param: '' })
     setTxResult(null)
     requestAnimationFrame(() => interactiveInputRef.current?.focus())
@@ -477,8 +544,10 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   const updateInteractiveParam = (param) => {
     setInteractiveTx(prev => ({ ...prev, param }))
+    const hasText = sel.text.length > 0
+    const inputText = hasText ? sel.text : content
     try {
-      const result = applyTransform(interactiveTx.id, sel.text, param)
+      const result = applyTransform(interactiveTx.id, inputText, param)
       setTxResult({ opName: interactiveTx.opName, text: result, error: null })
     } catch (e) {
       setTxResult({ opName: interactiveTx.opName, text: '', error: e.message })
@@ -605,6 +674,99 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setMode('edit')
   }
 
+  const openJsonViewer = (useSelection) => {
+    const hasText = sel.text.length > 0
+    const text = useSelection && hasText ? sel.text : content
+    const start = useSelection && hasText ? sel.start : 0
+    const end = useSelection && hasText ? sel.end : content.length
+    if (!isValidJson(text)) {
+      setTxResult({ opName: 'JSON Viewer', text: '', error: 'Selection is not valid JSON' })
+      setJsonSession(null)
+      return
+    }
+    setTxResult(null)
+    setCalcResult(null)
+    setPendingCalc(null)
+    setCodeViewActive(false)
+    setJsonSession({
+      start,
+      end,
+      text: text.trim(),
+      scopeLabel: useSelection && hasText ? 'Selection' : 'Whole note',
+    })
+  }
+
+  const applyJsonEdit = (nextJson) => {
+    if (!jsonSession) return
+    const nextContent = content.slice(0, jsonSession.start) + nextJson + content.slice(jsonSession.end)
+    pushHistoryNow(nextContent)
+    setContent(nextContent)
+    onUpdate({ content: nextContent })
+    setJsonSession({
+      ...jsonSession,
+      text: nextJson,
+      end: jsonSession.start + nextJson.length,
+    })
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(jsonSession.start, jsonSession.start + nextJson.length)
+      reportCurrentLocation(ta)
+    })
+  }
+
+  const openSnippetSave = useCallback(() => {
+    if (!sel.text.trim()) return
+    setSnippetDraftName('')
+    setSnippetSaveOpen(true)
+    setSnippetSaved(false)
+    requestAnimationFrame(() => snippetNameInputRef.current?.focus())
+  }, [sel.text])
+
+  const saveSnippetSelection = useCallback(async () => {
+    if (!sel.text.trim() || !onCreateSnippet) return
+    const created = await onCreateSnippet({
+      content: sel.text,
+      name: snippetDraftName,
+      sourceNoteId: note.id,
+    })
+    if (!created) return
+    setSnippetSaved(true)
+    setSnippetSaveOpen(false)
+    setSnippetDraftName('')
+    setTimeout(() => setSnippetSaved(false), 1500)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }, [note.id, onCreateSnippet, sel.text, snippetDraftName])
+
+  const closeSnippetPicker = useCallback(() => {
+    setSnippetPicker(null)
+    setSnippetResults([])
+    setSnippetActiveIndex(0)
+  }, [])
+
+  const replaceRangeInEditor = useCallback((start, end, text) => {
+    const next = content.slice(0, start) + text + content.slice(end)
+    pushHistoryNow(next)
+    setContent(next)
+    onUpdate({ content: next })
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const cursor = start + text.length
+      ta.focus()
+      ta.selectionStart = ta.selectionEnd = cursor
+      setSel({ start: 0, end: 0, text: '' })
+      reportCurrentLocation(ta)
+    })
+  }, [content, onUpdate, reportCurrentLocation])
+
+  const insertSnippet = useCallback((snippet) => {
+    if (!snippetPicker) return
+    replaceRangeInEditor(snippetPicker.start, snippetPicker.end, snippet.content)
+    closeSnippetPicker()
+  }, [closeSnippetPicker, replaceRangeInEditor, snippetPicker])
+
   const runCalculation = ({ complete = false } = {}) => {
     const range = getCalcRange()
     try {
@@ -696,8 +858,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setTimeout(() => setGuidCopied(false), 1500)
   }
 
+  const replaceSelectionWith = (value) => {
+    const newContent = content.slice(0, sel.start) + value + content.slice(sel.end)
+    pushHistoryNow(newContent)
+    setContent(newContent)
+    onUpdate({ content: newContent })
+    setSel({ start: 0, end: 0, text: '' })
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
   const applyTxResult = () => {
-    const newContent = content.slice(0, sel.start) + txResult.text + content.slice(sel.end)
+    const range = txRangeRef.current
+    const newContent = content.slice(0, range.start) + txResult.text + content.slice(range.end)
     pushHistoryNow(newContent)
     setContent(newContent)
     onUpdate({ content: newContent })
@@ -715,14 +887,61 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   // ── Editor actions ──────────────────────────────────────────────────────────
   const handleContent = (e) => {
+    const target = e.target
+    const cursor = target.selectionStart ?? 0
+    const trigger = getSnippetTrigger(e.target.value, cursor)
     setPendingCalc(null)
     setContent(e.target.value)
     onUpdate({ content: e.target.value })
     pushHistory(e.target.value)
-    reportCurrentLocation(e.target)
+    if (jsonSession) setJsonSession(null)
+    if (trigger) {
+      const before = e.target.value.slice(0, trigger.start)
+      const lineIndex = before.split('\n').length - 1
+      const lineStart = before.lastIndexOf('\n') + 1
+      const column = before.length - lineStart
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setSnippetPicker({
+        ...trigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + column * charWidth - target.scrollLeft,
+      })
+    } else if (snippetPicker) {
+      closeSnippetPicker()
+    }
+    reportCurrentLocation(target)
   }
 
   const handleKeyDown = (e) => {
+    if (snippetPicker) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSnippetActiveIndex(index => Math.min(index + 1, Math.max(0, snippetResults.length - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSnippetActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && snippetResults.length) {
+        e.preventDefault()
+        insertSnippet(snippetResults[snippetActiveIndex] ?? snippetResults[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeSnippetPicker()
+        return
+      }
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 's') {
+      if (!sel.text.trim()) return
+      e.preventDefault()
+      openSnippetSave()
+      return
+    }
     if (pendingCalc && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
       acceptPendingCalc()
@@ -792,16 +1011,6 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       pushHistoryNow(newVal)
       requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
     }
-  }
-
-  const prettifyJson = () => {
-    try {
-      const pretty = JSON.stringify(JSON.parse(content), null, 2)
-      pushHistoryNow(content)
-      setContent(pretty)
-      onUpdate({ content: pretty })
-      pushHistoryNow(pretty)
-    } catch {}
   }
 
   const enterCodeMode = () => {
@@ -1034,6 +1243,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [content, sel.text])
 
   const jsonValid = isValidJson(content)
+  const selectedJsonValid = isValidJson(sel.text)
   const hasSelection = sel.text.length > 0
 
   // Score each transform against the selected text for contextual ordering
@@ -1060,11 +1270,29 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       if (id === 'toCamel')  return (/_[a-z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
       if (id === 'toPascal') return (/_[a-z]/.test(t) || /[a-z][A-Z]/.test(t) || /[-\s][a-zA-Z]/.test(t)) ? 4 : 0
       if (id === 'oneliner') return /\\\n/.test(t) ? 10 : 0
+      if (id === 'dategap')  return parseDates(t).length >= 2 ? 8 : 0
       return 0
     }
     return TRANSFORMS.map(tx => ({ ...tx, score: score(tx.id) }))
   }, [sel.text])
 
+  const dateFmtPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const date = detectSingleDate(sel.text)
+    return date ? getDateFormats(date) : null
+  }, [sel.text, hasSelection])
+
+  const tzPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const result = detectTimeWithZone(sel.text)
+    return result ? getTimeConversions(result.utcDate) : null
+  }, [sel.text, hasSelection])
+
+  const tsPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const date = detectTimestamp(sel.text)
+    return date ? getTimestampFormats(date) : null
+  }, [sel.text, hasSelection])
 
   return (
     <div className="flex flex-col flex-1 min-w-0 overflow-hidden" onKeyDown={handlePanelKeyDown}>
@@ -1073,12 +1301,16 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
         {jsonValid && (
           <button
-            onClick={prettifyJson}
-            title="Prettify JSON"
-            className="flex items-center gap-1 px-2 py-1 text-[11px] text-amber-400 hover:text-amber-300 bg-amber-950/40 hover:bg-amber-950/70 border border-amber-900/50 rounded transition-colors font-mono"
+            onClick={() => jsonSession ? setJsonSession(null) : openJsonViewer(false)}
+            title={jsonSession ? 'Close inline JSON editor' : 'Open inline JSON editor for the whole note'}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] border rounded transition-colors font-mono ${
+              jsonSession
+                ? 'text-amber-200 bg-amber-900/50 border-amber-700'
+                : 'text-amber-400 hover:text-amber-300 bg-amber-950/40 hover:bg-amber-950/70 border-amber-900/50'
+            }`}
           >
             <span className="text-[13px] leading-none">{'{}'}</span>
-            Prettify
+            {jsonSession ? 'Text' : 'JSON'}
           </button>
         )}
         <button
@@ -1338,14 +1570,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       {/* ── Transform strip ── */}
       {mode === 'edit' && !interactiveTx && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 flex flex-wrap gap-1">
-          {hasSelection ? (
+          {hasSelection && (
             <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">
               {sel.text.length}c
             </span>
-          ) : (
-            <span className="text-[10px] text-zinc-700 font-mono shrink-0 self-center mr-0.5">
-              select to transform
-            </span>
+          )}
+          {selectedJsonValid && (
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => openJsonViewer(true)}
+              title="Inspect selected JSON"
+              className="px-2 py-0.5 text-[11px] font-mono text-amber-300 hover:text-amber-100 border border-amber-800 hover:border-amber-600 rounded bg-amber-950/30 hover:bg-amber-950/50 transition-colors whitespace-nowrap shrink-0"
+            >
+              JSON view
+            </button>
           )}
 
           {/* All transforms stay visible; scores only affect emphasis. */}
@@ -1354,14 +1592,12 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               <button
                 key={t.id}
                 onMouseDown={e => e.preventDefault()}
-                onClick={() => hasSelection && (t.interactive ? startInteractive(t.id, t.title) : runTransform(t.id, t.title))}
-                title={hasSelection ? t.title : 'Select text first'}
+                onClick={() => t.interactive ? startInteractive(t.id, t.title) : runTransform(t.id, t.title)}
+                title={t.title}
                 className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
-                  !hasSelection
-                    ? 'text-zinc-700 border-zinc-800 cursor-default'
-                    : t.score > 0
-                      ? 'text-zinc-300 hover:text-zinc-100 border-zinc-600 hover:border-zinc-400 bg-zinc-800/80 hover:bg-zinc-700'
-                      : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600 bg-transparent hover:bg-zinc-800/40'
+                  hasSelection && t.score > 0
+                    ? 'text-zinc-300 hover:text-zinc-100 border-zinc-600 hover:border-zinc-400 bg-zinc-800/80 hover:bg-zinc-700'
+                    : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600 bg-transparent hover:bg-zinc-800/40'
                 }`}
               >
                 {t.label}
@@ -1408,6 +1644,68 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
+      {/* ── Date format strip ── */}
+      {mode === 'edit' && !interactiveTx && dateFmtPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">date</span>
+          {dateFmtPopup.map(f => (
+            <button
+              key={f.label}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(f.value)}
+              title={f.label}
+              className="px-2 py-0.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 border border-zinc-700/60 hover:border-zinc-500 rounded bg-transparent hover:bg-zinc-800/60 transition-colors whitespace-nowrap shrink-0"
+            >
+              {f.value}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Timezone conversion strip ── */}
+      {mode === 'edit' && !interactiveTx && tzPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">tz</span>
+          {tzPopup.map(c => (
+            <button
+              key={c.abbr}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(c.value)}
+              title={c.label}
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                c.isUser
+                  ? 'text-amber-300 border-amber-700/60 bg-amber-950/20 hover:bg-amber-950/50 hover:text-amber-100'
+                  : 'text-zinc-400 hover:text-zinc-100 border-zinc-700/60 bg-transparent hover:bg-zinc-800/60 hover:border-zinc-500'
+              }`}
+            >
+              {c.value}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Timestamp conversion strip ── */}
+      {mode === 'edit' && !interactiveTx && tsPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">ts</span>
+          {tsPopup.map(f => (
+            <button
+              key={f.label}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(f.value)}
+              title={f.label}
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                f.label === 'relative'
+                  ? 'text-sky-400 border-sky-800/60 bg-sky-950/20 hover:bg-sky-950/40 hover:text-sky-200'
+                  : 'text-zinc-400 hover:text-zinc-100 border-zinc-700/60 bg-transparent hover:bg-zinc-800/60 hover:border-zinc-500'
+              }`}
+            >
+              {f.value}
+            </button>
+          ))}
+        </div>
+      )}
+
       {mode === 'edit' && gotoOpen && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0">
@@ -1450,6 +1748,47 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             title="Cancel (Esc)"
           >
             ✕
+          </button>
+        </div>
+      )}
+
+      {mode === 'edit' && snippetSaveOpen && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0">
+            save snippet
+          </span>
+          <input
+            ref={snippetNameInputRef}
+            value={snippetDraftName}
+            onChange={e => setSnippetDraftName(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') saveSnippetSelection()
+              if (e.key === 'Escape') {
+                setSnippetSaveOpen(false)
+                requestAnimationFrame(() => textareaRef.current?.focus())
+              }
+            }}
+            placeholder="optional name"
+            spellCheck={false}
+            className="flex-1 bg-zinc-800 border border-zinc-700 focus:border-zinc-500 rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700"
+          />
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={saveSnippetSelection}
+            className="px-2 py-1 text-[11px] font-mono text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800 transition-colors"
+          >
+            save
+          </button>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => {
+              setSnippetSaveOpen(false)
+              requestAnimationFrame(() => textareaRef.current?.focus())
+            }}
+            className="text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
+            title="Cancel"
+          >
+            âœ•
           </button>
         </div>
       )}
@@ -1522,7 +1861,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             </div>
           )}
           {!codeViewActive ? (
-            <div className="relative flex-1 min-w-0 overflow-hidden">
+            <div className="flex flex-1 min-w-0 overflow-hidden">
+              {jsonSession ? (
+                <div className="flex-1 min-w-0 overflow-auto p-4">
+                  <JsonBlockViewer
+                    rawJson={jsonSession.text}
+                    scopeLabel={jsonSession.scopeLabel}
+                    onChangeJson={applyJsonEdit}
+                    onClose={() => setJsonSession(null)}
+                  />
+                </div>
+              ) : (
+              <div className="relative flex-1 min-w-0 overflow-hidden">
               <textarea
                 ref={textareaRef}
                 value={content}
@@ -1556,6 +1906,44 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
                     Enter accept · Esc cancel
                   </span>
                 </div>
+              )}
+              {snippetPicker && (
+                <div
+                  className="absolute z-20 w-80 max-w-[calc(100%-32px)]"
+                  style={{
+                    top: `${Math.max(16, snippetPicker.top + 24)}px`,
+                    left: `${Math.max(16, snippetPicker.left)}px`,
+                  }}
+                >
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/95 shadow-2xl shadow-black/40 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/80 flex items-center gap-2">
+                      <span className="text-[10px] text-zinc-600 font-mono">snippets</span>
+                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">!{snippetPicker.query}</span>
+                      {snippetSaved && <span className="ml-auto text-[10px] text-emerald-400 font-mono">saved</span>}
+                    </div>
+                    <div className="max-h-72 overflow-auto">
+                      {snippetResults.length ? snippetResults.map((snippet, index) => (
+                        <button
+                          key={snippet.id}
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => insertSnippet(snippet)}
+                          className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                            index === snippetActiveIndex ? 'bg-zinc-800/80' : 'bg-transparent hover:bg-zinc-900/80'
+                          }`}
+                        >
+                          <div className="text-[12px] text-zinc-200 font-mono truncate">{snippetLabel(snippet)}</div>
+                          <div className="text-[11px] text-zinc-500 note-content whitespace-pre-wrap line-clamp-2">
+                            {snippet.content}
+                          </div>
+                        </button>
+                      )) : (
+                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no snippets</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              </div>
               )}
             </div>
           ) : (
