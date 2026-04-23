@@ -131,3 +131,11 @@ textarea, input { font-family: inherit; }
   outline: 1px solid rgba(251, 191, 36, 0.35);
   padding: 0 1px;
 }
+
+.find-mark {
+  background: rgba(250, 204, 21, 0.25);
+  color: #fef08a;
+  border-radius: 2px;
+  outline: 1px solid rgba(250, 204, 21, 0.3);
+  padding: 0 1px;
+}

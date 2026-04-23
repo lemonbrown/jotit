@@ -21,6 +21,9 @@ import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
 import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
 import { detectRequestType } from '../utils/httpParser'
 import CategoryBadge from './CategoryBadge'
+import FindBar from './FindBar'
+import { findMatches, isValidRegex, parseSearchScope, findMatchesScoped } from '../utils/inNoteSearch'
+import { parseSections, matchesToSections } from '../utils/parseNoteSections'
 import RegexTester from './RegexTester'
 import HttpRunner from './HttpRunner'
 import DiffViewer from './DiffViewer'
@@ -57,6 +60,23 @@ mdRenderer.code = ({ text, lang }) => {
 }
 marked.use({ renderer: mdRenderer, gfm: true, breaks: true })
 
+function autoIndent(code) {
+  const lines = code.split('\n')
+  let depth = 0
+  const out = []
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) { out.push(''); continue }
+    const leadingClose = (line.match(/^[}\]\)]+/) || [''])[0].length
+    depth = Math.max(0, depth - leadingClose)
+    out.push('  '.repeat(depth) + line)
+    const opens  = (line.match(/[{(\[]/g) || []).length
+    const closes = (line.match(/[}\)\]]/g) || []).length
+    depth = Math.max(0, depth + opens - closes + leadingClose)
+  }
+  return out.join('\n')
+}
+
 function isValidJson(text) {
   const t = text.trim()
   if (!t || (t[0] !== '{' && t[0] !== '[')) return false
@@ -71,6 +91,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [shareState, setShareState] = useState(null)
   const [sharing, setSharing] = useState(false)
   const [regexInstance, setRegexInstance] = useState(0)
+  const [codeViewActive, setCodeViewActive] = useState(false)
 
   // Selection + transform state
   const [sel, setSel] = useState({ start: 0, end: 0, text: '' })
@@ -110,7 +131,12 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const capturedDiffBRef = useRef('')
   const [httpInstance, setHttpInstance] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findMode, setFindMode] = useState('exact')
+  const [findMatchIndex, setFindMatchIndex] = useState(0)
   const lineNumsRef = useRef(null)
+  const findInputRef = useRef(null)
   const charCount = content.length
   const lineCount = content.split('\n').length
 
@@ -180,6 +206,79 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     requestAnimationFrame(() => focusEditorLine(nextLine))
   }, [focusEditorLine, gotoLine])
 
+  const openFind = useCallback(() => {
+    setFindOpen(true)
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus()
+      findInputRef.current?.select()
+    })
+  }, [])
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }, [])
+
+  const jumpToFindMatch = useCallback((targetIndex, results) => {
+    if (!results.length) return
+    const count = results.length
+    const idx = ((targetIndex % count) + count) % count
+    setFindMatchIndex(idx)
+    const match = results[idx]
+
+    const jumpInMain = () => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(match.start, match.end)
+      const lineIndex = ta.value.slice(0, match.start).split('\n').length - 1
+      const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
+      ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight * 0.35)
+      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+    }
+
+    if (mode === 'markdown') {
+      setMode('edit')
+      requestAnimationFrame(jumpInMain)
+    } else if (codeViewActive) {
+      const localStart = match.start - codeBefore.length
+      const localEnd   = match.end   - codeBefore.length
+      if (localStart >= 0 && localEnd <= codeContent.length) {
+        requestAnimationFrame(() => {
+          const ta = codeEditRef.current
+          if (!ta) return
+          ta.focus()
+          ta.setSelectionRange(localStart, localEnd)
+          const lineIndex = ta.value.slice(0, localStart).split('\n').length - 1
+          const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
+          ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight * 0.35)
+          if (codePreRef.current) codePreRef.current.scrollTop = ta.scrollTop
+        })
+      } else {
+        setCodeViewActive(false)
+        requestAnimationFrame(jumpInMain)
+      }
+    } else {
+      requestAnimationFrame(jumpInMain)
+    }
+  }, [mode, codeViewActive, codeBefore, codeContent])
+
+  const jumpToSection = useCallback((section) => {
+    if (mode === 'markdown') {
+      setMode('edit')
+      requestAnimationFrame(() => focusEditorLine(section.startLine + 1))
+    } else {
+      focusEditorLine(section.startLine + 1)
+    }
+  }, [mode, focusEditorLine])
+
+  const handlePanelKeyDown = useCallback((e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      e.preventDefault()
+      openFind()
+    }
+  }, [openFind])
+
   useEffect(() => {
     setContent(note.content)
     setConfirmDelete(false)
@@ -193,10 +292,22 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setDiagramSession(null)
     setInteractiveTx(null)
     setDisplayHint(null)
+    setFindOpen(false)
+    setFindQuery('')
+    setFindMatchIndex(0)
+    setCodeViewActive(false)
     clearTimeout(historyTimerRef.current)
     historyRef.current = [note.content]
     historyIdxRef.current = 0
   }, [note.id])
+
+  useEffect(() => {
+    setFindMatchIndex(0)
+  }, [findQuery, findMode])
+
+  useEffect(() => {
+    if (mode !== 'edit') setCodeViewActive(false)
+  }, [mode])
 
   useEffect(() => {
     if (!focusNonce || mode !== 'edit') return
@@ -332,10 +443,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     const prev = historyRef.current[idx - 1]
     setContent(prev)
     onUpdate({ content: prev })
-    if (mode === 'code') {
-      const newCode = codeAfter.length > 0 ? prev.slice(codeBefore.length, -codeAfter.length) : prev.slice(codeBefore.length)
-      setCodeContent(newCode)
-    }
+    if (codeViewActive) setCodeContent(prev)
   }
 
   const redo = () => {
@@ -346,10 +454,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     const next = historyRef.current[idx + 1]
     setContent(next)
     onUpdate({ content: next })
-    if (mode === 'code') {
-      const newCode = codeAfter.length > 0 ? next.slice(codeBefore.length, -codeAfter.length) : next.slice(codeBefore.length)
-      setCodeContent(newCode)
-    }
+    if (codeViewActive) setCodeContent(next)
   }
 
   // ── Transforms ──────────────────────────────────────────────────────────────
@@ -628,6 +733,29 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       cancelPendingCalc()
       return
     }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      e.preventDefault()
+      openFind()
+      return
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
+      if (sections.length === 0) return
+      e.preventDefault()
+      const ta = textareaRef.current
+      const curLine = ta ? content.slice(0, ta.selectionStart).split('\n').length - 1 : 0
+      const next = sections.find(s => s.startLine > curLine)
+      if (next) focusEditorLine(next.startLine + 1)
+      return
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') {
+      if (sections.length === 0) return
+      e.preventDefault()
+      const ta = textareaRef.current
+      const curLine = ta ? content.slice(0, ta.selectionStart).split('\n').length - 1 : 0
+      const prev = [...sections].reverse().find(s => s.startLine < curLine)
+      if (prev) focusEditorLine(prev.startLine + 1)
+      return
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
       e.preventDefault()
       openGotoLine()
@@ -677,23 +805,42 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }
 
   const enterCodeMode = () => {
-    if (mode === 'code') {
-      setMode('edit')
+    if (codeViewActive) {
+      setCodeViewActive(false)
       requestAnimationFrame(() => textareaRef.current?.focus())
       return
     }
     const ta = textareaRef.current
     const hasTextSel = ta && ta.selectionStart !== ta.selectionEnd
     if (hasTextSel) {
-      setCodeBefore(content.slice(0, ta.selectionStart))
-      setCodeContent(content.slice(ta.selectionStart, ta.selectionEnd))
-      setCodeAfter(content.slice(ta.selectionEnd))
-    } else {
-      setCodeBefore('')
-      setCodeContent(content)
-      setCodeAfter('')
+      // Pure in-place transform: auto-indent only the selected text, no overlay
+      const before = content.slice(0, ta.selectionStart)
+      const selected = content.slice(ta.selectionStart, ta.selectionEnd)
+      const after = content.slice(ta.selectionEnd)
+      const formatted = autoIndent(selected)
+      if (formatted !== selected) {
+        const next = before + formatted + after
+        pushHistoryNow(content)
+        setContent(next)
+        onUpdate({ content: next })
+      }
+      requestAnimationFrame(() => {
+        ta.focus()
+        ta.setSelectionRange(before.length, before.length + formatted.length)
+      })
+      return
     }
-    setMode('code')
+    // Whole note: activate syntax-highlighted overlay
+    const formatted = autoIndent(content)
+    setCodeBefore('')
+    setCodeContent(formatted)
+    setCodeAfter('')
+    if (formatted !== content) {
+      pushHistoryNow(content)
+      setContent(formatted)
+      onUpdate({ content: formatted })
+    }
+    setCodeViewActive(true)
     requestAnimationFrame(() => codeEditRef.current?.focus())
   }
 
@@ -718,7 +865,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       return
     }
     if (e.key === 'Escape') {
-      setMode('edit')
+      setCodeViewActive(false)
       requestAnimationFrame(() => textareaRef.current?.focus())
     }
     if (e.key === 'Tab') {
@@ -740,6 +887,9 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     if (codePreRef.current) {
       codePreRef.current.scrollTop = e.target.scrollTop
       codePreRef.current.scrollLeft = e.target.scrollLeft
+    }
+    if (showLineNumbers && lineNumsRef.current) {
+      lineNumsRef.current.scrollTop = e.target.scrollTop
     }
   }
 
@@ -799,7 +949,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
 
   const { codeHighlighted, codeLanguage } = useMemo(() => {
-    if (mode !== 'code') return { codeHighlighted: '', codeLanguage: '' }
+    if (!codeViewActive) return { codeHighlighted: '', codeLanguage: '' }
     if (!codeContent.trim()) return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
     try {
       const result = hljs.highlightAuto(codeContent, HINT_LANGS)
@@ -807,12 +957,69 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     } catch {
       return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
     }
-  }, [codeContent, mode])
+  }, [codeContent, codeViewActive])
 
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
     try { return marked.parse(content) } catch { return '' }
   }, [content])
+
+  // Derived scope/term from the raw query (supports "in:code <term>" / "in:text <term>")
+  const findParsed = useMemo(() => parseSearchScope(findQuery), [findQuery])
+
+  const findRegexError = useMemo(() => {
+    return findMode === 'regex' && findParsed.term.length > 0 && !isValidRegex(findParsed.term)
+  }, [findMode, findParsed.term])
+
+  const findResults = useMemo(() => {
+    if (!findOpen || findRegexError) return []
+    // No results while the user is still completing the "in:…" directive (no space yet)
+    const typingDirective = findQuery.toLowerCase().startsWith('in:') && !findQuery.slice(3).includes(' ')
+    if (!findParsed.term || typingDirective) return []
+    return findMatchesScoped(content, findParsed.term, findParsed.scope, findMode) ?? []
+  }, [findOpen, findParsed, findQuery, findMode, findRegexError, content])
+
+  const displayMarkdownHtml = useMemo(() => {
+    if (!findOpen || !findParsed.term || findRegexError || !markdownHtml) return markdownHtml
+    const wrapText = (text) => {
+      try {
+        if (findMode === 'exact') {
+          const escaped = findParsed.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark class="find-mark">$1</mark>')
+        }
+        if (findMode === 'regex') {
+          return text.replace(new RegExp(`(${findParsed.term})`, 'gi'), '<mark class="find-mark">$1</mark>')
+        }
+      } catch {}
+      return text
+    }
+    if (findParsed.scope === 'code') {
+      // Only highlight inside <pre><code>…</code></pre> blocks
+      return markdownHtml.replace(/(<pre><code[^>]*>)([\s\S]*?)(<\/code><\/pre>)/gi,
+        (_, open, body, close) => open + wrapText(body) + close)
+    }
+    if (findParsed.scope === 'text') {
+      // Highlight everywhere except inside <pre><code>…</code></pre> blocks
+      return markdownHtml.replace(/(<pre>[\s\S]*?<\/pre>)|(<[^>]+>)|([^<]*)/g, (_, pre, tag, text) => {
+        if (pre || tag) return pre ?? tag
+        if (!text) return ''
+        return wrapText(text)
+      })
+    }
+    // scope === 'all': highlight everywhere
+    return markdownHtml.replace(/(<[^>]+>)|([^<]*)/g, (_, tag, text) => {
+      if (tag) return tag
+      if (!text) return ''
+      return wrapText(text)
+    })
+  }, [markdownHtml, findOpen, findParsed, findMode, findRegexError])
+
+  const sections = useMemo(() => parseSections(content), [content])
+
+  const sectionMatches = useMemo(() => {
+    if (!findOpen || !findResults.length) return []
+    return matchesToSections(findResults, sections, content)
+  }, [findOpen, findResults, sections, content])
 
   const looksLikeRequest = useMemo(() => {
     return detectRequestType(content) !== null
@@ -860,7 +1067,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+    <div className="flex flex-col flex-1 min-w-0 overflow-hidden" onKeyDown={handlePanelKeyDown}>
 
       {/* ── Main toolbar ── */}
       <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
@@ -877,15 +1084,15 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         <button
           onMouseDown={e => e.preventDefault()}
           onClick={enterCodeMode}
-          title={mode === 'code' ? 'Exit code editor' : 'Editable syntax-highlighted view — select text first for a region'}
+          title={codeViewActive ? 'Exit code view (Esc)' : 'Syntax-highlighted code view with auto-indent — select text first for a region'}
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
-            mode === 'code'
+            codeViewActive
               ? 'text-blue-300 bg-blue-950/50 border-blue-800'
               : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
           }`}
         >
           <span className="text-[12px]">&lt;/&gt;</span>
-          {mode === 'code' ? 'Edit' : 'Code'}
+          {codeViewActive ? 'Edit' : 'Code'}
         </button>
         <button
           onMouseDown={captureSelForModeSwitch}
@@ -1017,6 +1224,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </button>
         <button
           onMouseDown={e => e.preventDefault()}
+          onClick={findOpen ? closeFind : openFind}
+          title="Find in note (Ctrl+F)"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            findOpen
+              ? 'text-yellow-300 bg-yellow-950/50 border-yellow-800'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          Find
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
           onClick={() => runCalculation()}
           title="Calculate selection or current line (Ctrl+=)"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
@@ -1095,6 +1314,26 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           </button>
         </div>
       </div>
+
+      {/* ── Find bar ── */}
+      {findOpen && (mode === 'edit' || mode === 'markdown') && (
+        <FindBar
+          inputRef={findInputRef}
+          query={findQuery}
+          onQueryChange={q => setFindQuery(q)}
+          mode={findMode}
+          onModeChange={m => setFindMode(m)}
+          matchIndex={findMatchIndex}
+          matchCount={findResults.length}
+          regexError={findRegexError}
+          onNext={() => jumpToFindMatch(findMatchIndex + 1, findResults)}
+          onPrev={() => jumpToFindMatch(findMatchIndex - 1, findResults)}
+          onClose={closeFind}
+          sectionMatches={sectionMatches}
+          onJumpToSection={idx => jumpToFindMatch(idx, findResults)}
+          scope={findParsed.scope}
+        />
+      )}
 
       {/* ── Transform strip ── */}
       {mode === 'edit' && !interactiveTx && (
@@ -1241,6 +1480,27 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
+      {/* ── Section navigation bar ── */}
+      {sections.length > 0 && (mode === 'edit' || mode === 'markdown') && (
+        <div
+          className="flex items-center gap-1 px-2 py-1 border-b border-zinc-800/50 bg-zinc-950/30 shrink-0 overflow-x-auto"
+          style={{ scrollbarWidth: 'none' }}
+        >
+          {sections.map((section, i) => (
+            <button
+              key={i}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => jumpToSection(section)}
+              title={section.title}
+              className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono text-zinc-700 hover:text-zinc-300 border border-zinc-800/80 hover:border-zinc-600 rounded bg-transparent hover:bg-zinc-800/40 transition-colors whitespace-nowrap shrink-0"
+            >
+              <span className="text-zinc-800">{'#'.repeat(section.level)}</span>
+              <span>{section.title}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* ── Content area ── */}
       {mode === 'edit' && (
         <div className="flex flex-1 overflow-hidden">
@@ -1261,82 +1521,70 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               ))}
             </div>
           )}
-          <div className="relative flex-1 min-w-0 overflow-hidden">
-            <textarea
-              ref={textareaRef}
-              value={content}
-              onChange={handleContent}
-              onKeyDown={handleKeyDown}
-              onSelect={updateSel}
-              onMouseUp={updateSel}
-              onKeyUp={updateSel}
-              onClick={clearSelIfEmpty}
-              onScroll={e => {
-                if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
-                reportCurrentLocation(e.target)
-              }}
-              placeholder="Start typing…"
-              spellCheck={false}
-              className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
-            />
-            {pendingCalc && pendingCalcInline?.visible && (
-              <div
-                className="absolute z-10 pointer-events-none flex items-start gap-2"
-                style={{
-                  top: `${pendingCalcInline.top}px`,
-                  left: `${Math.max(16, pendingCalcInline.left)}px`,
-                  maxWidth: 'calc(100% - 32px)',
+          {!codeViewActive ? (
+            <div className="relative flex-1 min-w-0 overflow-hidden">
+              <textarea
+                ref={textareaRef}
+                value={content}
+                onChange={handleContent}
+                onKeyDown={handleKeyDown}
+                onSelect={updateSel}
+                onMouseUp={updateSel}
+                onKeyUp={updateSel}
+                onClick={clearSelIfEmpty}
+                onScroll={e => {
+                  if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
+                  reportCurrentLocation(e.target)
                 }}
-              >
-                <pre className="note-content text-[13px] text-emerald-200 bg-emerald-950/80 border border-emerald-800/70 rounded px-1.5 py-0.5 whitespace-pre-wrap m-0 shadow-lg shadow-black/30">
-                  {pendingCalc.previewText}
-                </pre>
-                <span className="mt-0.5 shrink-0 text-[10px] font-mono text-emerald-500 bg-zinc-950/90 border border-emerald-900/70 rounded px-1.5 py-0.5">
-                  Enter accept · Esc cancel
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {mode === 'code' && (
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {codeBefore.length > 0 && (
-            <div className="px-4 py-2 border-b border-zinc-800 text-zinc-600 note-content text-[13px] leading-relaxed max-h-28 overflow-hidden shrink-0 select-none">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{codeBefore}</pre>
+                placeholder="Start typing…"
+                spellCheck={false}
+                className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
+              />
+              {pendingCalc && pendingCalcInline?.visible && (
+                <div
+                  className="absolute z-10 pointer-events-none flex items-start gap-2"
+                  style={{
+                    top: `${pendingCalcInline.top}px`,
+                    left: `${Math.max(16, pendingCalcInline.left)}px`,
+                    maxWidth: 'calc(100% - 32px)',
+                  }}
+                >
+                  <pre className="note-content text-[13px] text-emerald-200 bg-emerald-950/80 border border-emerald-800/70 rounded px-1.5 py-0.5 whitespace-pre-wrap m-0 shadow-lg shadow-black/30">
+                    {pendingCalc.previewText}
+                  </pre>
+                  <span className="mt-0.5 shrink-0 text-[10px] font-mono text-emerald-500 bg-zinc-950/90 border border-emerald-900/70 rounded px-1.5 py-0.5">
+                    Enter accept · Esc cancel
+                  </span>
+                </div>
+              )}
             </div>
-          )}
-          <div className="relative flex-1 overflow-hidden" style={{ background: '#0d1117' }}>
-            <pre
-              ref={codePreRef}
-              aria-hidden="true"
-              className="hljs absolute inset-0 m-0 p-4 overflow-auto pointer-events-none text-[13px] leading-relaxed"
-              style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace" }}
-              dangerouslySetInnerHTML={{ __html: codeHighlighted + '\n' }}
-            />
-            <textarea
-              ref={codeEditRef}
-              value={codeContent}
-              onChange={handleCodeEdit}
-              onKeyDown={handleCodeKeyDown}
-              onScroll={syncCodeScroll}
-              spellCheck={false}
-              className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px] leading-relaxed"
-              style={{ color: 'transparent', caretColor: '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
-            />
-          </div>
-          {codeAfter.length > 0 && (
-            <div className="px-4 py-2 border-t border-zinc-800 text-zinc-600 note-content text-[13px] leading-relaxed max-h-28 overflow-hidden shrink-0 select-none">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{codeAfter}</pre>
+          ) : (
+            <div className="relative flex-1 overflow-hidden" style={{ background: '#0d1117' }}>
+              <pre
+                ref={codePreRef}
+                aria-hidden="true"
+                className="hljs absolute inset-0 m-0 p-4 overflow-auto pointer-events-none text-[13px] leading-relaxed"
+                style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace" }}
+                dangerouslySetInnerHTML={{ __html: codeHighlighted + '\n' }}
+              />
+              <textarea
+                ref={codeEditRef}
+                value={codeContent}
+                onChange={handleCodeEdit}
+                onKeyDown={handleCodeKeyDown}
+                onScroll={syncCodeScroll}
+                spellCheck={false}
+                className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px] leading-relaxed"
+                style={{ color: 'transparent', caretColor: '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+              />
             </div>
           )}
         </div>
       )}
       {mode === 'markdown' && (
         <div className="flex-1 overflow-auto p-5">
-          {markdownHtml ? (
-            <div className="md-prose max-w-none" dangerouslySetInnerHTML={{ __html: markdownHtml }} />
+          {displayMarkdownHtml ? (
+            <div className="md-prose max-w-none" dangerouslySetInnerHTML={{ __html: displayMarkdownHtml }} />
           ) : (
             <span className="text-zinc-700 note-content text-sm">empty</span>
           )}
@@ -1480,25 +1728,16 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
-      {/* ── Code mode footer ── */}
-      {mode === 'code' && (
-        <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]" style={{ background: '#0d1117' }}>
-          <span className="text-[11px] text-zinc-600 font-mono">Esc to exit · Tab for indent</span>
-          <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-600 shrink-0 font-mono">
-            {codeLanguage && <span className="text-zinc-400">{codeLanguage}</span>}
-            <span>{codeContent.split('\n').length}L · {codeContent.length}C</span>
-            <span>{timeAgo(note.updatedAt)}</span>
-          </div>
-        </div>
-      )}
       {/* ── Footer ── */}
-      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'code' && mode !== 'table' && mode !== 'cron' && mode !== 'diagram' && (
+      {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'table' && mode !== 'cron' && mode !== 'diagram' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
           {note.categories.length > 0
             ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
             : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'AI will tag when you stop typing…' : 'Add OpenAI key in ⚙ for auto-tagging'}</span>
           }
           <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-700 shrink-0">
+            {codeViewActive && <span className="text-blue-600 font-mono">Esc to exit code view</span>}
+            {codeViewActive && codeLanguage && <span className="text-zinc-500 font-mono">{codeLanguage}</span>}
             {mode === 'markdown' && <span className="text-emerald-700 font-mono">markdown</span>}
             <span>{lineCount}L · {charCount}C</span>
             <span>{timeAgo(note.updatedAt)}</span>
