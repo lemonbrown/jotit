@@ -1,0 +1,16 @@
+{
+  "name": "jotit-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "jotit-agent": "./bin/jotit-agent.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "start": "node ./bin/jotit-agent.js"
+  }
+}

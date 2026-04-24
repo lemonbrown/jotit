@@ -1,0 +1,81 @@
+import { csvToNotes } from './csv.js'
+import { createImportedOpenApiNote, createImportedTextNote } from './noteFactories.js'
+import { looksLikeOpenApiJsonFile, parseOpenApiJson } from './openapi/parse.js'
+import { createSQLiteAssetFromFile, isSQLiteFileName } from './sqliteAssets.js'
+import { createImportedSQLiteNote } from './sqliteNote.js'
+import { generateId } from './helpers.js'
+
+function looksBinary(text) {
+  return (text.slice(0, 1024).match(/\0/g) ?? []).length > 10
+}
+
+export async function importFiles(files, maxFileSize, deps = {}) {
+  const {
+    createTextNote = createImportedTextNote,
+    createOpenApiNote = createImportedOpenApiNote,
+    createSqliteAsset = createSQLiteAssetFromFile,
+    createSqliteNote = createImportedSQLiteNote,
+    categorizeText = () => [],
+    csvToNotesImpl = csvToNotes,
+    isSQLiteName = isSQLiteFileName,
+    makeId = generateId,
+    upsertNote = () => {},
+  } = deps
+
+  const results = await Promise.all(files.map(async (file) => {
+    if (file.size > maxFileSize) return []
+
+    if (isSQLiteName(file.name)) {
+      const assetId = makeId()
+      await createSqliteAsset(file, assetId)
+      const note = createSqliteNote(file.name, assetId)
+      upsertNote(note)
+      return [note]
+    }
+
+    let text
+    try {
+      text = await file.text()
+    } catch {
+      return []
+    }
+
+    if (looksBinary(text)) return []
+
+    if (looksLikeOpenApiJsonFile(file.name, text)) {
+      try {
+        const document = parseOpenApiJson(text)
+        const note = createOpenApiNote(file.name, document)
+        upsertNote(note)
+        return [note]
+      } catch {
+        return []
+      }
+    }
+
+    if (file.name.toLowerCase().endsWith('.csv')) {
+      const notes = csvToNotesImpl(text).map(note => ({
+        ...note,
+        categories: note.categories.length ? note.categories : categorizeText(note.content),
+      }))
+
+      for (const note of notes) upsertNote(note)
+      return notes
+    }
+
+    const note = createTextNote(file.name, text)
+    upsertNote(note)
+    return [note]
+  }))
+
+  return results.flat()
+}
+
+export async function importDroppedFiles(files, maxFileSize) {
+  const { upsertNoteSync } = await import('./db.js')
+  const { categorizeByPatterns } = await import('./patternCategories.js')
+  return importFiles(files, maxFileSize, {
+    upsertNote: upsertNoteSync,
+    categorizeText: categorizeByPatterns,
+  })
+}

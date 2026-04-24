@@ -4,6 +4,18 @@ function isObjectLike(value) {
   return value !== null && typeof value === 'object'
 }
 
+function tryParseJsonString(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (trimmed[0] !== '{' && trimmed[0] !== '[') return null
+  try {
+    const parsed = JSON.parse(value)
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -118,6 +130,20 @@ function highlightText(text, query) {
   )
 }
 
+function CopyParsedButton({ parsedInner }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(JSON.stringify(parsedInner, null, 2))
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1200)
+  }
+  return (
+    <button className="json-str-expand-btn" onClick={handleCopy}>
+      {copied ? 'copied!' : 'copy parsed'}
+    </button>
+  )
+}
+
 function JsonKeyInput({ value, query, onCommit }) {
   const [draft, setDraft] = useState(value)
 
@@ -186,6 +212,8 @@ function JsonNode({
   onUpdateValue,
   query,
   forceExpanded,
+  expandedStrings,
+  onToggleStringExpand,
 }) {
   const pathText = formatPath(path)
   const containerMatch = branchMatches(value, path, nodeKey, query)
@@ -198,6 +226,70 @@ function JsonNode({
   const keyLabel = isRoot ? '$' : String(nodeKey)
 
   if (!composite) {
+    const parsedInner = tryParseJsonString(value)
+    const isStringExpanded = parsedInner !== null && expandedStrings.has(pathText)
+
+    if (isStringExpanded) {
+      const innerIsCollapsed = collapsed.has(pathText) && !forceExpanded
+      const innerEntries = Array.isArray(parsedInner)
+        ? parsedInner.map((item, i) => [i, item])
+        : Object.entries(parsedInner)
+      const openChar = Array.isArray(parsedInner) ? '[' : '{'
+      const closeChar = Array.isArray(parsedInner) ? ']' : '}'
+
+      return (
+        <div>
+          <div className="json-row" style={{ paddingLeft: `${depth * 14}px` }}>
+            <button className="json-toggle" onClick={() => onToggle(pathText)} title={innerIsCollapsed ? 'Expand' : 'Collapse'}>
+              {innerIsCollapsed ? '+' : '-'}
+            </button>
+            <button className="json-path-button" onClick={() => onCopyPath(pathText)} title={`Copy path ${pathText}`}>
+              path
+            </button>
+            {typeof nodeKey === 'string' ? (
+              <JsonKeyInput value={keyLabel} query={query} onCommit={nextKey => onRenameKey(path, nextKey)} />
+            ) : (
+              <span className="json-key">{highlightText(keyLabel, query)}</span>
+            )}
+            <span className="json-punc">: </span>
+            <span className="json-punc">{openChar}</span>
+            <span className="json-meta"> {valueLabel(parsedInner)}</span>
+            <span className="json-str-badge">str</span>
+            <CopyParsedButton parsedInner={parsedInner} />
+            <button className="json-str-expand-btn" onClick={() => onToggleStringExpand(pathText)}>collapse</button>
+            {innerIsCollapsed ? <span className="json-punc"> {closeChar}</span> : null}
+          </div>
+          {!innerIsCollapsed && (
+            <>
+              {innerEntries.map(([childKey, childValue]) => (
+                <JsonNode
+                  key={`${pathText}:str:${String(childKey)}`}
+                  value={childValue}
+                  path={[...path, childKey]}
+                  nodeKey={childKey}
+                  depth={depth + 1}
+                  collapsed={collapsed}
+                  onToggle={onToggle}
+                  onCopyPath={onCopyPath}
+                  onRenameKey={() => {}}
+                  onUpdateValue={() => {}}
+                  query={query}
+                  forceExpanded={forceExpanded}
+                  expandedStrings={expandedStrings}
+                  onToggleStringExpand={onToggleStringExpand}
+                />
+              ))}
+              <div className="json-row" style={{ paddingLeft: `${depth * 14}px` }}>
+                <span className="json-spacer" />
+                <span className="json-spacer json-spacer-ghost" />
+                <span className="json-punc">{closeChar}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )
+    }
+
     return (
       <div className="json-row" style={{ paddingLeft: `${depth * 14}px` }}>
         <span className="json-spacer" />
@@ -211,6 +303,9 @@ function JsonNode({
         )}
         <span className="json-punc">: </span>
         <JsonLiteralInput value={value} onCommit={nextLiteral => onUpdateValue(path, nextLiteral)} />
+        {parsedInner !== null && (
+          <button className="json-str-expand-btn" onClick={() => onToggleStringExpand(pathText)}>expand</button>
+        )}
       </div>
     )
   }
@@ -259,6 +354,8 @@ function JsonNode({
               onUpdateValue={onUpdateValue}
               query={query}
               forceExpanded={forceExpanded}
+              expandedStrings={expandedStrings}
+              onToggleStringExpand={onToggleStringExpand}
             />
           ))}
           <div className="json-row" style={{ paddingLeft: `${depth * 14}px` }}>
@@ -283,6 +380,7 @@ export default function JsonBlockViewer({ rawJson, onChangeJson = null, onClose 
   const [parsed, setParsed] = useState(initialParsed)
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState(() => new Set())
+  const [expandedStrings, setExpandedStrings] = useState(() => new Set())
   const [copiedPath, setCopiedPath] = useState('')
   const [viewMode, setViewMode] = useState('tree')
   const [status, setStatus] = useState('')
@@ -319,6 +417,15 @@ export default function JsonBlockViewer({ rawJson, onChangeJson = null, onClose 
 
   const togglePath = (pathText) => {
     setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(pathText)) next.delete(pathText)
+      else next.add(pathText)
+      return next
+    })
+  }
+
+  const toggleStringExpand = (pathText) => {
+    setExpandedStrings(prev => {
       const next = new Set(prev)
       if (next.has(pathText)) next.delete(pathText)
       else next.add(pathText)
@@ -447,6 +554,8 @@ export default function JsonBlockViewer({ rawJson, onChangeJson = null, onClose 
             onUpdateValue={handleLiteralUpdate}
             query={search}
             forceExpanded={Boolean(search)}
+            expandedStrings={expandedStrings}
+            onToggleStringExpand={toggleStringExpand}
           />
         </div>
       )}

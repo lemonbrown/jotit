@@ -1,30 +1,51 @@
-import { useState } from 'react'
-import { testConnection } from '../utils/openai'
+import { useEffect, useState } from 'react'
+import { useLocalAgentStatus } from '../hooks/useLocalAgentStatus'
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$|^[a-z0-9]{2,40}$/
 
-export default function Settings({ settings, onSave, onClose, onExportDB, onPublish, publicNoteCount }) {
-  const [apiKey, setApiKey] = useState(settings.openaiApiKey ?? '')
+export default function Settings({
+  settings,
+  onSave,
+  onClose,
+  onDeleteAllNotes,
+  onDeleteSharedLink,
+  onExportDB,
+  onListSharedLinks,
+  onPublish,
+  onSeedNotes,
+  publicNoteCount,
+  noteCount = 0,
+}) {
   const [serverProxy, setServerProxy] = useState(settings.serverProxy ?? false)
+  const [localAgentToken, setLocalAgentToken] = useState(settings.localAgentToken ?? '')
   const [bucketName, setBucketName] = useState(settings.bucketName ?? '')
-  const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState(null) // null | 'ok' | 'fail'
   const [publishing, setPublishing] = useState(false)
-  const [publishResult, setPublishResult] = useState(null) // null | { ok, url, count } | { error }
+  const [publishResult, setPublishResult] = useState(null)
+  const [sharedLinks, setSharedLinks] = useState([])
+  const [sharedLinksError, setSharedLinksError] = useState(null)
+  const [loadingSharedLinks, setLoadingSharedLinks] = useState(false)
+  const [removingSlug, setRemovingSlug] = useState(null)
+  const localAgentStatus = useLocalAgentStatus()
 
-  const handleTest = async () => {
-    setTesting(true)
-    setTestResult(null)
-    // Temporarily init with entered key to test
-    const { initOpenAI } = await import('../utils/openai')
-    initOpenAI(apiKey)
-    const ok = await testConnection()
-    setTestResult(ok ? 'ok' : 'fail')
-    setTesting(false)
+  const loadSharedLinks = async () => {
+    if (!onListSharedLinks) return
+    setLoadingSharedLinks(true)
+    setSharedLinksError(null)
+    try {
+      const result = await onListSharedLinks()
+      if (result?.ok) setSharedLinks(result.links ?? [])
+      else setSharedLinksError(result?.error ?? 'Failed to load shared links')
+    } finally {
+      setLoadingSharedLinks(false)
+    }
   }
 
+  useEffect(() => {
+    loadSharedLinks()
+  }, [])
+
   const handleSave = () => {
-    onSave({ ...settings, openaiApiKey: apiKey.trim(), serverProxy, bucketName: bucketName.trim() })
+    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), bucketName: bucketName.trim() })
   }
 
   const handlePublish = async () => {
@@ -40,12 +61,43 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
     }
   }
 
+  const handleDeleteAllNotes = () => {
+    if (!noteCount) return
+    const confirmed = window.confirm(`Delete all ${noteCount} notes? This cannot be undone.`)
+    if (!confirmed) return
+    onDeleteAllNotes?.()
+    onClose()
+  }
+
+  const handleSeedNotes = () => {
+    onSeedNotes?.()
+    onClose()
+  }
+
+  const handleRemoveSharedLink = async (slug) => {
+    if (!slug || !onDeleteSharedLink) return
+    const confirmed = window.confirm(`Remove shared link /n/${slug}? This will break the public URL.`)
+    if (!confirmed) return
+    setRemovingSlug(slug)
+    setSharedLinksError(null)
+    try {
+      const result = await onDeleteSharedLink(slug)
+      if (!result?.ok) {
+        setSharedLinksError(result?.error ?? 'Failed to remove shared link')
+        return
+      }
+      setSharedLinks(current => current.filter(link => link.slug !== slug))
+    } finally {
+      setRemovingSlug(null)
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
       onClick={e => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-[480px] p-6">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-[560px] max-h-[88vh] overflow-y-auto p-6">
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-base font-semibold text-zinc-100">Settings</h2>
           <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition-colors">
@@ -56,35 +108,22 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
         </div>
 
         <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-zinc-400 mb-1.5">
-              OpenAI API Key
-            </label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={e => { setApiKey(e.target.value); setTestResult(null) }}
-              placeholder="sk-proj-..."
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
-            />
-            <p className="text-[11px] text-zinc-600 mt-1.5">
-              Used for automatic note categorization and semantic search. Your key is stored locally and never sent anywhere except OpenAI.
-            </p>
-          </div>
-
           <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-3 text-[12px] text-zinc-500 space-y-1">
-            <p className="text-zinc-400 font-medium mb-1">What AI does:</p>
-            <p>• Auto-tags notes (token, config, github, etc.) after you stop typing</p>
-            <p>• Generates embeddings for semantic search</p>
-            <p>• Lets you search "github token" and find relevant notes even without exact words</p>
+            <p className="text-zinc-400 font-medium mb-1">AI access</p>
+            <p>Server AI is owned and controlled by the backend.</p>
+            <p>Signed-in users can search their workspace semantically when server AI is enabled.</p>
+            <p>Guests keep local keyword search only.</p>
           </div>
 
           <div className="pt-1 border-t border-zinc-800">
             <div className="flex items-center justify-between">
               <div>
-                <label className="block text-xs font-medium text-zinc-400">Route requests via local server</label>
+                <label className="block text-xs font-medium text-zinc-400">Route HTTP requests via local agent</label>
                 <p className="text-[11px] text-zinc-600 mt-0.5">
-                  Bypasses CORS by proxying HTTP requests through a local server. Requires <code className="font-mono">npm run server</code> or <code className="font-mono">npm run dev:full</code>.
+                  Uses <code className="font-mono">jotit-agent</code> on <code className="font-mono">127.0.0.1:3210</code> for localhost/private-network/dev targets.
+                </p>
+                <p className={`text-[11px] mt-1 ${localAgentStatus.available ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                  {localAgentStatus.checking ? 'Checking local agent...' : localAgentStatus.available ? 'Local agent connected' : 'Local agent not detected'}
                 </p>
               </div>
               <button
@@ -96,6 +135,19 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
                 <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${serverProxy ? 'translate-x-4' : 'translate-x-0'}`} />
               </button>
             </div>
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-zinc-400 mb-1.5">Local Agent Token</label>
+              <input
+                type="password"
+                value={localAgentToken}
+                onChange={e => setLocalAgentToken(e.target.value)}
+                placeholder="Paste token printed by jotit-agent"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+              />
+              <p className="text-[11px] text-zinc-600 mt-1.5">
+                Start the side app with <code className="font-mono">node agent/bin/jotit-agent.js</code>, copy the token shown in terminal, and paste it here.
+              </p>
+            </div>
           </div>
 
           <div className="pt-1 border-t border-zinc-800 space-y-2">
@@ -104,7 +156,7 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
               {publicNoteCount > 0 ? (
                 <span className="text-[11px] text-emerald-500">{publicNoteCount} public note{publicNoteCount !== 1 ? 's' : ''}</span>
               ) : (
-                <span className="text-[11px] text-zinc-600">no public notes — toggle notes to make them public</span>
+                <span className="text-[11px] text-zinc-600">no public notes - toggle notes to make them public</span>
               )}
             </div>
             <div className="flex items-center gap-2">
@@ -121,17 +173,16 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
                 disabled={publishing || !SLUG_RE.test(bucketName.trim()) || publicNoteCount === 0}
                 className="px-3 py-2 text-xs bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md transition-colors font-medium whitespace-nowrap"
               >
-                {publishing ? 'Publishing…' : 'Publish'}
+                {publishing ? 'Publishing...' : 'Publish'}
               </button>
             </div>
             {!SLUG_RE.test(bucketName.trim()) && bucketName.trim().length > 0 && (
-              <p className="text-[11px] text-red-400">Use 2–40 lowercase letters, numbers, or hyphens</p>
+              <p className="text-[11px] text-red-400">Use 2-40 lowercase letters, numbers, or hyphens</p>
             )}
             {publishResult?.ok && (
               <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                Published {publishResult.count} note{publishResult.count !== 1 ? 's' : ''} →{' '}
-                <span className="font-mono text-emerald-300">/b/{bucketName.trim()}</span>
+                Published {publishResult.count} note{publishResult.count !== 1 ? 's' : ''} {'->'} <span className="font-mono text-emerald-300">/b/{bucketName.trim()}</span>
               </p>
             )}
             {publishResult?.error && (
@@ -139,34 +190,101 @@ export default function Settings({ settings, onSave, onClose, onExportDB, onPubl
             )}
           </div>
 
+          <div className="pt-1 border-t border-zinc-800 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <label className="block text-xs font-medium text-zinc-400">Shared Links</label>
+                <p className="text-[11px] text-zinc-600 mt-0.5">Every individually published note link across this workspace.</p>
+              </div>
+              <button
+                onClick={loadSharedLinks}
+                disabled={loadingSharedLinks}
+                className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors disabled:opacity-50"
+              >
+                {loadingSharedLinks ? 'Refreshing...' : 'Refresh'}
+              </button>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
+              {loadingSharedLinks && !sharedLinks.length ? (
+                <div className="px-3 py-4 text-[11px] font-mono text-zinc-500">Loading shared links...</div>
+              ) : sharedLinks.length ? (
+                <div className="divide-y divide-zinc-800">
+                  {sharedLinks.map(link => {
+                    const absoluteUrl = `${window.location.origin}${link.url}`
+                    return (
+                      <div key={link.slug} className="px-3 py-3 space-y-2">
+                        <div className="flex items-start gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm text-zinc-200 truncate">{link.title}</div>
+                            <div className="text-[11px] text-zinc-500 font-mono truncate">{link.url}</div>
+                          </div>
+                          <button
+                            onClick={() => handleRemoveSharedLink(link.slug)}
+                            disabled={removingSlug === link.slug}
+                            className="px-2.5 py-1.5 text-[11px] bg-red-950 hover:bg-red-900 border border-red-900 text-red-200 rounded-md transition-colors disabled:opacity-50"
+                          >
+                            {removingSlug === link.slug ? 'Removing...' : 'Remove'}
+                          </button>
+                        </div>
+                        <div className="text-[11px] text-zinc-600 line-clamp-2">{link.preview || 'No preview'}</div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[10px] text-zinc-600 font-mono">note {link.noteId}</span>
+                          {link.viewMode && <span className="text-[10px] text-zinc-600 font-mono">{link.viewMode}</span>}
+                          {link.publishedAt > 0 && (
+                            <span className="text-[10px] text-zinc-600 font-mono">
+                              {new Date(link.publishedAt).toLocaleString()}
+                            </span>
+                          )}
+                          <button
+                            onClick={() => navigator.clipboard.writeText(absoluteUrl)}
+                            className="ml-auto px-2 py-1 text-[10px] bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 rounded transition-colors"
+                          >
+                            Copy
+                          </button>
+                          <a
+                            href={link.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-2 py-1 text-[10px] bg-blue-950/60 hover:bg-blue-900/70 border border-blue-900 text-blue-200 rounded transition-colors"
+                          >
+                            Open
+                          </a>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="px-3 py-4 text-[11px] font-mono text-zinc-500">No shared note links yet.</div>
+              )}
+            </div>
+            {sharedLinksError && <p className="text-[11px] text-red-400">{sharedLinksError}</p>}
+          </div>
+
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
             <span className="text-[11px] text-zinc-600">Database</span>
+            <button
+              onClick={handleSeedNotes}
+              className="px-3 py-1.5 text-xs bg-emerald-950 hover:bg-emerald-900 border border-emerald-900 text-emerald-200 rounded-md transition-colors"
+            >
+              Seed dev notes
+            </button>
             <button
               onClick={onExportDB}
               className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors"
             >
               Export .sqlite
             </button>
+            <button
+              onClick={handleDeleteAllNotes}
+              disabled={!noteCount}
+              className="px-3 py-1.5 text-xs bg-red-950 hover:bg-red-900 border border-red-900 text-red-200 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Delete all notes
+            </button>
           </div>
 
           <div className="flex items-center gap-2">
-            {apiKey && (
-              <button
-                onClick={handleTest}
-                disabled={testing}
-                className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors disabled:opacity-50"
-              >
-                {testing ? 'Testing…' : 'Test connection'}
-              </button>
-            )}
-            {testResult === 'ok' && (
-              <span className="text-xs text-green-400 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Connected
-              </span>
-            )}
-            {testResult === 'fail' && (
-              <span className="text-xs text-red-400">Invalid key or no access</span>
-            )}
             <div className="ml-auto flex items-center gap-2">
               <button
                 onClick={onClose}

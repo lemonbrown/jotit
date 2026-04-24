@@ -14,7 +14,18 @@ import dockerfile from 'highlight.js/lib/languages/dockerfile'
 import ini from 'highlight.js/lib/languages/ini'
 import 'highlight.js/styles/github-dark.css'
 
-import { timeAgo } from '../utils/helpers'
+import { timeAgo, generateId } from '../utils/helpers'
+import {
+  buildMarker,
+  extractMarkerIds,
+  processImageFile,
+} from '../utils/attachments'
+import {
+  insertAttachment,
+  getAttachmentsForNote,
+  deleteAttachment,
+  schedulePersist,
+} from '../utils/db'
 import { TRANSFORMS, applyTransform, parseDates, detectSingleDate, getDateFormats,
          detectTimeWithZone, getTimeConversions, detectTimestamp, getTimestampFormats } from '../utils/transforms'
 import { analyzeCalculation } from '../utils/calculator'
@@ -32,6 +43,11 @@ import TableViewer from './TableViewer'
 import CronBuilder from './CronBuilder'
 import DiagramEditor from './DiagramEditor'
 import JsonBlockViewer from './JsonBlockViewer'
+import InlineImageEditor from './InlineImageEditor'
+import SQLiteViewer from './SQLiteViewer'
+import OpenApiViewer from './OpenApiViewer'
+import { extractSQLiteAssetRef } from '../utils/sqliteNote'
+import { NOTE_TYPE_OPENAPI, isOpenApiNote } from '../utils/noteTypes'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -47,6 +63,15 @@ hljs.registerLanguage('ini', ini)
 
 const HINT_LANGS = ['json','javascript','typescript','python','sql','bash','yaml','xml','css','dockerfile','ini']
 
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
   let highlighted = ''
@@ -56,7 +81,7 @@ mdRenderer.code = ({ text, lang }) => {
   if (!highlighted) {
     try { highlighted = hljs.highlightAuto(text, HINT_LANGS).value } catch {}
   }
-  if (!highlighted) highlighted = hljs.escapeHTML(text)
+  if (!highlighted) highlighted = escapeHtml(text)
   const cls = lang ? `hljs language-${lang}` : 'hljs'
   return `<pre><code class="${cls}">${highlighted}</code></pre>`
 }
@@ -100,7 +125,7 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
-export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
+export default function NotePanel({ note, snippets = [], aiEnabled, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onCreateNoteFromContent, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -161,11 +186,27 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
   const [findMatchIndex, setFindMatchIndex] = useState(0)
+  const [outlineOpen, setOutlineOpen] = useState(false)
+  const [outlineQuery, setOutlineQuery] = useState('')
+  const [outlineIndex, setOutlineIndex] = useState(0)
+  const [attachments, setAttachments] = useState([])
+  const [pasteError, setPasteError] = useState('')
+
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
+  const outlineInputRef = useRef(null)
+  const outlineListRef = useRef(null)
   const snippetSearchSeqRef = useRef(0)
-  const charCount = content.length
-  const lineCount = content.split('\n').length
+  const inlineSegOffsetRef = useRef(0)
+  const inlineScrollRef = useRef(null)
+  const markdownPreviewRef = useRef(null)
+  const panelRef = useRef(null)
+  const attachmentMap = useMemo(() => new Map(attachments.map(a => [a.id, a])), [attachments])
+  const hasInlineImages = attachments.length > 0 && /\[img:\/\/[^\]]+\]/.test(content)
+  const openApiNote = useMemo(() => isOpenApiNote(note), [note])
+  const editorDisplayContent = openApiNote ? (note.noteData?.rawText ?? content) : content
+  const charCount = editorDisplayContent.length
+  const lineCount = editorDisplayContent.split('\n').length
 
   const pendingCalcInline = useMemo(() => {
     if (!pendingCalc) return null
@@ -246,6 +287,9 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [])
 
+  const sections = useMemo(() => parseSections(content), [content])
+  const sqliteAssetRef = useMemo(() => extractSQLiteAssetRef(content), [content])
+
   const jumpToFindMatch = useCallback((targetIndex, results) => {
     if (!results.length) return
     const count = results.length
@@ -291,23 +335,119 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
   }, [mode, codeViewActive, codeBefore, codeContent])
 
   const jumpToSection = useCallback((section) => {
+    focusEditorLine(section.startLine + 1)
+  }, [focusEditorLine])
+
+  const jumpToPreviewSection = useCallback((section, sectionIndex) => {
+    const preview = markdownPreviewRef.current
+    if (!preview) return
+
+    const target = preview.querySelector(`[data-section-index="${sectionIndex}"]`)
+    if (!target) return
+
+    const previewRect = preview.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    const top = Math.max(0, preview.scrollTop + targetRect.top - previewRect.top - 16)
+    preview.scrollTo({ top, behavior: 'smooth' })
+  }, [])
+
+  const handleSectionJump = useCallback((section, sectionIndex) => {
     if (mode === 'markdown') {
-      setMode('edit')
-      requestAnimationFrame(() => focusEditorLine(section.startLine + 1))
-    } else {
-      focusEditorLine(section.startLine + 1)
+      jumpToPreviewSection(section, sectionIndex)
+      return
     }
-  }, [mode, focusEditorLine])
+
+    jumpToSection(section)
+  }, [mode, jumpToPreviewSection, jumpToSection])
+
+  const focusCurrentSurface = useCallback(() => {
+    if (mode === 'markdown') {
+      markdownPreviewRef.current?.focus()
+      return
+    }
+    textareaRef.current?.focus()
+  }, [mode])
+
+  const getCurrentSectionIndex = useCallback(() => {
+    if (!sections.length) return 0
+
+    if (mode === 'markdown') {
+      const preview = markdownPreviewRef.current
+      if (!preview) return 0
+      const headings = [...preview.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+      if (!headings.length) return 0
+      const previewTop = preview.getBoundingClientRect().top
+      let currentIdx = 0
+      headings.forEach((heading, index) => {
+        if (heading.getBoundingClientRect().top - previewTop <= 48) currentIdx = index
+      })
+      return currentIdx
+    }
+
+    const ta = textareaRef.current
+    const currentLine = ta
+      ? content.slice(0, ta.selectionStart ?? 0).split('\n').length - 1
+      : 0
+
+    let currentIdx = 0
+    sections.forEach((section, index) => {
+      if (section.startLine <= currentLine) currentIdx = index
+    })
+    return currentIdx
+  }, [content, mode, sections])
+
+  const filteredSections = useMemo(() => {
+    const query = outlineQuery.trim().toLowerCase()
+    if (!query) return sections
+    return sections.filter(section => section.title.toLowerCase().includes(query))
+  }, [outlineQuery, sections])
+
+  const closeOutline = useCallback(() => {
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
+    requestAnimationFrame(() => focusCurrentSurface())
+  }, [focusCurrentSurface])
+
+  const commitOutlineSelection = useCallback((index = outlineIndex) => {
+    const section = filteredSections[index]
+    if (!section) return
+    const sectionIndex = sections.findIndex(candidate =>
+      candidate.startLine === section.startLine &&
+      candidate.level === section.level &&
+      candidate.title === section.title
+    )
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
+    requestAnimationFrame(() => {
+      handleSectionJump(section, Math.max(0, sectionIndex))
+      focusCurrentSurface()
+    })
+  }, [filteredSections, handleSectionJump, outlineIndex, focusCurrentSurface, sections])
+
+  const openOutline = useCallback((step = 0) => {
+    if (!sections.length) return
+    setOutlineOpen(true)
+    setOutlineQuery('')
+    setOutlineIndex(prev => {
+      const start = outlineOpen ? prev : getCurrentSectionIndex()
+      const next = start + step
+      return Math.max(0, Math.min(sections.length - 1, next))
+    })
+  }, [getCurrentSectionIndex, outlineOpen, sections])
 
   const handlePanelKeyDown = useCallback((e) => {
+    if (outlineOpen) return
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
       e.preventDefault()
       openFind()
     }
-  }, [openFind])
+  }, [openFind, outlineOpen])
 
   useEffect(() => {
     setContent(note.content)
+    setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
     setConfirmDelete(false)
     setShareState(null)
     setSel({ start: 0, end: 0, text: '' })
@@ -329,6 +469,9 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     setFindOpen(false)
     setFindQuery('')
     setFindMatchIndex(0)
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
     setCodeViewActive(false)
     clearTimeout(historyTimerRef.current)
     historyRef.current = [note.content]
@@ -336,8 +479,56 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
   }, [note.id])
 
   useEffect(() => {
+    setAttachments(getAttachmentsForNote(note.id))
+  }, [note.id])
+
+  // Remove attachment rows whose markers were deleted from the content
+  useEffect(() => {
+    const referenced = new Set(extractMarkerIds(content))
+    setAttachments(prev => {
+      const orphans = prev.filter(a => !referenced.has(a.id))
+      if (!orphans.length) return prev
+      orphans.forEach(a => { deleteAttachment(a.id); schedulePersist() })
+      return prev.filter(a => referenced.has(a.id))
+    })
+  }, [content])
+
+  useEffect(() => {
     setFindMatchIndex(0)
   }, [findQuery, findMode])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    requestAnimationFrame(() => {
+      outlineInputRef.current?.focus()
+      outlineInputRef.current?.select()
+    })
+  }, [outlineOpen])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    setOutlineIndex(idx => Math.max(0, Math.min(Math.max(filteredSections.length - 1, 0), idx)))
+  }, [filteredSections.length, outlineOpen])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    const active = outlineListRef.current?.querySelector(`[data-outline-index="${outlineIndex}"]`)
+    active?.scrollIntoView({ block: 'nearest' })
+  }, [outlineIndex, outlineOpen])
+
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+
+    const handler = (e) => {
+      if (!e.shiftKey || e.altKey || !sections.length) return
+      e.preventDefault()
+      openOutline(e.deltaY > 0 ? 1 : -1)
+    }
+
+    panel.addEventListener('wheel', handler, { passive: false })
+    return () => panel.removeEventListener('wheel', handler)
+  }, [openOutline, sections.length])
 
   useEffect(() => {
     if (mode !== 'edit') setCodeViewActive(false)
@@ -356,15 +547,20 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     }
 
     requestAnimationFrame(() => {
-      const ta = textareaRef.current
-      if (!ta) return
-      const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
-      const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)
-      ta.focus()
-      ta.selectionStart = cursorStart
-      ta.selectionEnd = cursorEnd
-      ta.scrollTop = restoreLocation.scrollTop ?? 0
-      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+      const scrollTop = restoreLocation.scrollTop ?? 0
+      if (inlineScrollRef.current) {
+        inlineScrollRef.current.scrollTop = scrollTop
+      } else {
+        const ta = textareaRef.current
+        if (!ta) return
+        const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
+        const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)
+        ta.focus()
+        ta.selectionStart = cursorStart
+        ta.selectionEnd = cursorEnd
+        ta.scrollTop = scrollTop
+        if (lineNumsRef.current) lineNumsRef.current.scrollTop = scrollTop
+      }
     })
   }, [restoreLocation, note.id, mode])
 
@@ -496,6 +692,55 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     historyRef.current = next
     historyIdxRef.current = next.length - 1
   }
+
+  const handlePaste = useCallback(async (e) => {
+    const imageItem = [...(e.clipboardData?.items ?? [])].find(item => item.type.startsWith('image/'))
+    if (!imageItem) return
+
+    e.preventDefault()
+    setPasteError('')
+
+    let processed
+    try {
+      processed = await processImageFile(imageItem.getAsFile())
+    } catch (err) {
+      setPasteError(err.message)
+      setTimeout(() => setPasteError(''), 4000)
+      return
+    }
+
+    const id = generateId()
+    const attachment = { id, noteId: note.id, mimeType: processed.mimeType, data: processed.dataURL, createdAt: Date.now() }
+    insertAttachment(attachment)
+    schedulePersist()
+    setAttachments(prev => [...prev, attachment])
+
+    const marker = buildMarker(id)
+    const ta = textareaRef.current
+    const segOff = hasInlineImages ? (inlineSegOffsetRef.current ?? 0) : 0
+    const insertAt = ta ? ta.selectionStart + segOff : content.length
+    const next = content.slice(0, insertAt) + marker + '\n' + content.slice(insertAt)
+    setContent(next)
+    onUpdate({ content: next })
+    pushHistoryNow(next)
+    requestAnimationFrame(() => {
+      if (ta) ta.selectionStart = ta.selectionEnd = insertAt + marker.length + 1 - segOff
+    })
+  }, [content, hasInlineImages, note.id, onUpdate, pushHistoryNow])
+
+  const handleDeleteAttachment = useCallback((id) => {
+    deleteAttachment(id)
+    schedulePersist()
+    setAttachments(prev => prev.filter(a => a.id !== id))
+
+    const marker = buildMarker(id)
+    const next = content.replace(marker + '\n', '').replace(marker, '')
+    if (next !== content) {
+      setContent(next)
+      onUpdate({ content: next })
+      pushHistoryNow(next)
+    }
+  }, [content, onUpdate, pushHistoryNow])
 
   const undo = () => {
     clearTimeout(historyTimerRef.current)
@@ -913,6 +1158,16 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     reportCurrentLocation(target)
   }
 
+  // Used by InlineImageEditor when a text segment changes; receives the assembled full content
+  const handleInlineEditorChange = useCallback((newContent) => {
+    setPendingCalc(null)
+    if (snippetPicker) closeSnippetPicker()
+    setContent(newContent)
+    onUpdate({ content: newContent })
+    pushHistory(newContent)
+    if (jsonSession) setJsonSession(null)
+  }, [onUpdate, pushHistory, closeSnippetPicker, snippetPicker, jsonSession])
+
   const handleKeyDown = (e) => {
     if (snippetPicker) {
       if (e.key === 'ArrowDown') {
@@ -1003,13 +1258,14 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
     if (e.key === 'Tab') {
       e.preventDefault()
       const ta = textareaRef.current
-      const start = ta.selectionStart
-      const end = ta.selectionEnd
+      const segOff = hasInlineImages ? (inlineSegOffsetRef.current ?? 0) : 0
+      const start = ta.selectionStart + segOff
+      const end = ta.selectionEnd + segOff
       const newVal = content.slice(0, start) + '  ' + content.slice(end)
       setContent(newVal)
       onUpdate({ content: newVal })
       pushHistoryNow(newVal)
-      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 - segOff })
     }
   }
 
@@ -1159,19 +1415,33 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
 
   const { codeHighlighted, codeLanguage } = useMemo(() => {
     if (!codeViewActive) return { codeHighlighted: '', codeLanguage: '' }
-    if (!codeContent.trim()) return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
+    if (!codeContent.trim()) return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
     try {
       const result = hljs.highlightAuto(codeContent, HINT_LANGS)
       return { codeHighlighted: result.value, codeLanguage: result.language ?? '' }
     } catch {
-      return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
+      return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
     }
   }, [codeContent, codeViewActive])
 
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
-    try { return marked.parse(content) } catch { return '' }
-  }, [content])
+    try {
+      const rendered = marked.parse(content)
+      let nextSectionIndex = 0
+      return rendered.replace(/<h([1-6])(\b[^>]*)>([\s\S]*?)<\/h\1>/gi, (match, level, attrs, inner) => {
+        const section = sections[nextSectionIndex]
+        if (!section || section.level !== Number(level)) return match
+        const nextAttrs = attrs?.includes('data-section-index=')
+          ? attrs
+          : `${attrs ?? ''} data-section-index="${nextSectionIndex}"`
+        nextSectionIndex += 1
+        return `<h${level}${nextAttrs}>${inner}</h${level}>`
+      })
+    } catch {
+      return ''
+    }
+  }, [content, sections])
 
   // Derived scope/term from the raw query (supports "in:code <term>" / "in:text <term>")
   const findParsed = useMemo(() => parseSearchScope(findQuery), [findQuery])
@@ -1222,8 +1492,6 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
       return wrapText(text)
     })
   }, [markdownHtml, findOpen, findParsed, findMode, findRegexError])
-
-  const sections = useMemo(() => parseSections(content), [content])
 
   const sectionMatches = useMemo(() => {
     if (!findOpen || !findResults.length) return []
@@ -1295,7 +1563,7 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
   }, [sel.text, hasSelection])
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 overflow-hidden" onKeyDown={handlePanelKeyDown}>
+    <div ref={panelRef} className="flex flex-col flex-1 min-w-0 overflow-hidden relative" onKeyDown={handlePanelKeyDown}>
 
       {/* ── Main toolbar ── */}
       <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
@@ -1340,6 +1608,22 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
           {mode === 'regex' ? 'Edit' : 'Regex'}
         </button>
         <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => switchMode('sqlite')}
+          title="Inspect linked SQLite database"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'sqlite'
+              ? 'text-fuchsia-300 bg-fuchsia-950/50 border-fuchsia-800'
+              : sqliteAssetRef
+                ? 'text-fuchsia-400 hover:text-fuchsia-200 bg-fuchsia-950/20 border-fuchsia-900 hover:border-fuchsia-700'
+                : 'text-zinc-800 bg-transparent border-zinc-900 cursor-not-allowed'
+          }`}
+          disabled={!sqliteAssetRef}
+        >
+          <span className="text-[12px]">DB</span>
+          {mode === 'sqlite' ? 'Edit' : 'SQLite'}
+        </button>
+        <button
           onMouseDown={captureSelForModeSwitch}
           onClick={() => switchMode('markdown')}
           title="Markdown preview"
@@ -1352,6 +1636,21 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
           <span className="text-[12px]">MD</span>
           {mode === 'markdown' ? 'Edit' : 'Preview'}
         </button>
+        {openApiNote && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => switchMode('openapi')}
+            title="OpenAPI document viewer"
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              mode === 'openapi'
+                ? 'text-cyan-300 bg-cyan-950/50 border-cyan-800'
+                : 'text-cyan-400 hover:text-cyan-200 bg-cyan-950/20 border-cyan-900 hover:border-cyan-700'
+            }`}
+          >
+            <span className="text-[12px]">API</span>
+            {mode === 'openapi' ? 'Edit' : 'OpenAPI'}
+          </button>
+        )}
         <button
           onMouseDown={captureSelForModeSwitch}
           onClick={() => switchMode('http')}
@@ -1527,12 +1826,6 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
           )}
           {shareState?.error && (
             <span className="text-[11px] text-red-400 font-mono">{shareState.error}</span>
-          )}
-          {aiProcessing && (
-            <span className="text-[11px] text-blue-400 animate-pulse flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse inline-block" />
-              categorizing…
-            </span>
           )}
           <button
             onClick={handleDelete}
@@ -1829,7 +2122,7 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
             <button
               key={i}
               onMouseDown={e => e.preventDefault()}
-              onClick={() => jumpToSection(section)}
+              onClick={() => handleSectionJump(section, i)}
               title={section.title}
               className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono text-zinc-700 hover:text-zinc-300 border border-zinc-800/80 hover:border-zinc-600 rounded bg-transparent hover:bg-zinc-800/40 transition-colors whitespace-nowrap shrink-0"
             >
@@ -1843,6 +2136,27 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
       {/* ── Content area ── */}
       {mode === 'edit' && (
         <div className="flex flex-1 overflow-hidden">
+          {hasInlineImages && !jsonSession && !codeViewActive ? (
+            <InlineImageEditor
+              content={content}
+              attachmentMap={attachmentMap}
+              onChangeContent={handleInlineEditorChange}
+              onDeleteAttachment={handleDeleteAttachment}
+              showLineNumbers={showLineNumbers}
+              scrollRef={inlineScrollRef}
+              onActiveSegment={(el, offset) => {
+                textareaRef.current = el
+                inlineSegOffsetRef.current = offset
+              }}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onSelect={updateSel}
+              onMouseUp={updateSel}
+              onKeyUp={updateSel}
+              onClick={clearSelIfEmpty}
+            />
+          ) : (
+          <>
           {showLineNumbers && (
             <div
               ref={lineNumsRef}
@@ -1875,9 +2189,10 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
               <div className="relative flex-1 min-w-0 overflow-hidden">
               <textarea
                 ref={textareaRef}
-                value={content}
-                onChange={handleContent}
+                value={editorDisplayContent}
+                onChange={openApiNote ? undefined : handleContent}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onSelect={updateSel}
                 onMouseUp={updateSel}
                 onKeyUp={updateSel}
@@ -1886,7 +2201,8 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
                   if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
                   reportCurrentLocation(e.target)
                 }}
-                placeholder="Start typing…"
+                placeholder={openApiNote ? 'OpenAPI document JSON' : 'Start typing…'}
+                readOnly={openApiNote}
                 spellCheck={false}
                 className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
               />
@@ -1967,15 +2283,108 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
               />
             </div>
           )}
+        </>
+        )}
         </div>
       )}
+
+      {/* ── Paste error ── */}
+      {pasteError && (
+        <div className="shrink-0 px-4 py-1.5 text-[11px] font-mono text-red-400 bg-red-950/30 border-t border-red-900/40">
+          {pasteError}
+        </div>
+      )}
+
       {mode === 'markdown' && (
-        <div className="flex-1 overflow-auto p-5">
+        <div ref={markdownPreviewRef} tabIndex={-1} className="flex-1 overflow-auto p-5 outline-none">
           {displayMarkdownHtml ? (
             <div className="md-prose max-w-none" dangerouslySetInnerHTML={{ __html: displayMarkdownHtml }} />
           ) : (
             <span className="text-zinc-700 note-content text-sm">empty</span>
           )}
+        </div>
+      )}
+      {mode === 'sqlite' && (
+        sqliteAssetRef ? (
+          <SQLiteViewer assetId={sqliteAssetRef.assetId} />
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-[12px] font-mono text-zinc-600">
+            No SQLite asset is linked to this note.
+          </div>
+        )
+      )}
+      {mode === 'openapi' && (
+        <OpenApiViewer
+          note={note}
+          onCopyRequestToNewNote={(requestText) => onCreateNoteFromContent?.(requestText)}
+        />
+      )}
+      {outlineOpen && (
+        <div className="absolute inset-0 z-40 bg-black/45 backdrop-blur-[1px] flex items-start justify-center px-4 py-10">
+          <div className="w-full max-w-2xl max-h-[70vh] overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950/98 shadow-2xl shadow-black/50">
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800">
+              <div className="min-w-0">
+                <div className="text-[11px] font-mono text-zinc-400">document outline</div>
+                <div className="text-[10px] font-mono text-zinc-600">shift+wheel moves · enter jumps · esc closes</div>
+              </div>
+              <div className="ml-auto text-[10px] font-mono text-zinc-600">{filteredSections.length}/{sections.length}</div>
+            </div>
+            <div className="px-4 py-3 border-b border-zinc-900">
+              <input
+                ref={outlineInputRef}
+                value={outlineQuery}
+                onChange={e => { setOutlineQuery(e.target.value); setOutlineIndex(0) }}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    closeOutline()
+                    return
+                  }
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setOutlineIndex(idx => Math.min(idx + 1, Math.max(filteredSections.length - 1, 0)))
+                    return
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setOutlineIndex(idx => Math.max(idx - 1, 0))
+                    return
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    commitOutlineSelection()
+                  }
+                }}
+                placeholder="Filter headings..."
+                spellCheck={false}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-600 focus:border-zinc-500"
+              />
+            </div>
+            <div ref={outlineListRef} className="max-h-[52vh] overflow-auto px-2 py-2">
+              {filteredSections.length ? filteredSections.map((section, index) => (
+                <button
+                  key={`${section.startLine}-${section.title}`}
+                  data-outline-index={index}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => commitOutlineSelection(index)}
+                  className={`w-full text-left rounded-lg px-3 py-2 transition-colors ${
+                    index === outlineIndex
+                      ? 'bg-blue-950/50 border border-blue-800/80'
+                      : 'border border-transparent hover:bg-zinc-900/80'
+                  }`}
+                  style={{ paddingLeft: `${12 + section.level * 14}px` }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-[10px] font-mono text-zinc-600 shrink-0">{'#'.repeat(section.level)}</span>
+                    <span className="min-w-0 truncate text-sm text-zinc-200 note-content">{section.title}</span>
+                    <span className="ml-auto shrink-0 text-[10px] font-mono text-zinc-600">L{section.startLine + 1}</span>
+                  </div>
+                </button>
+              )) : (
+                <div className="px-3 py-6 text-center text-[11px] font-mono text-zinc-500">no matching headings</div>
+              )}
+            </div>
+          </div>
         </div>
       )}
       {mode === 'table' && tableSession && (
@@ -2011,6 +2420,11 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
           key={`${note.id}-${httpInstance}`}
           noteContent={content}
           initialText={capturedHttpSelRef.current}
+          onCopyRequestToNewNote={(request) => onCreateNoteFromContent?.(
+            `${request.method} ${request.url}${Object.keys(request.headers ?? {}).length ? '\n' : ''}${
+              Object.entries(request.headers ?? {}).map(([key, value]) => `${key}: ${value}`).join('\n')
+            }${request.body ? `\n\n${request.body}` : ''}`
+          )}
         />
       )}
       {mode === 'diff' && (
@@ -2119,10 +2533,10 @@ export default function NotePanel({ note, snippets = [], aiProcessing, aiEnabled
       {/* ── Footer ── */}
       {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'table' && mode !== 'cron' && mode !== 'diagram' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
-          {note.categories.length > 0
-            ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
-            : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'AI will tag when you stop typing…' : 'Add OpenAI key in ⚙ for auto-tagging'}</span>
-          }
+            {note.categories.length > 0
+              ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
+              : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'Server AI search is enabled for this account' : 'Sign in to use server AI features'}</span>
+            }
           <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-700 shrink-0">
             {codeViewActive && <span className="text-blue-600 font-mono">Esc to exit code view</span>}
             {codeViewActive && codeLanguage && <span className="text-zinc-500 font-mono">{codeLanguage}</span>}

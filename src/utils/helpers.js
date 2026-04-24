@@ -91,3 +91,162 @@ export const SAMPLE_NOTES = [
     updatedAt: Date.now() - 3600000,
   },
 ]
+
+export function createDeveloperSeedNotes() {
+  const now = Date.now()
+  const base = [
+    {
+      title: 'Azure staging API auth',
+      body: `AZURE_TENANT_ID=11111111-2222-3333-4444-555555555555
+AZURE_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+AZURE_CLIENT_SECRET=staging-secret-value
+
+Use bearer token from Key Vault for the staging API.
+Fallback curl:
+
+\`\`\`bash
+curl -X POST https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token \\
+  -d "client_id=$AZURE_CLIENT_ID" \\
+  -d "client_secret=$AZURE_CLIENT_SECRET" \\
+  -d "scope=api://staging-api/.default" \\
+  -d "grant_type=client_credentials"
+\`\`\`
+
+401 usually means the app registration is missing API permissions.`,
+      categories: ['azure', 'credentials', 'token', 'api', 'config'],
+    },
+    {
+      title: 'Postgres staging connection',
+      body: `DATABASE_URL=postgres://staging_user:staging_pw@db.staging.internal:5432/app
+PGHOST=db.staging.internal
+PGPORT=5432
+PGUSER=staging_user
+
+psql "$DATABASE_URL"
+
+If migrations fail, verify the VPN is connected and the allowlist contains your IP.`,
+      categories: ['postgres', 'credentials', 'database', 'config'],
+    },
+    {
+      title: 'GitHub Actions npm publish token',
+      body: `NPM_TOKEN=npm_xxxxxxxxxxxxxxxxxxxxx
+Stored in GitHub Actions secrets for package publish workflow.
+
+Workflow file:
+.github/workflows/publish.yml
+
+Required scopes:
+- package:write
+- repo`,
+      categories: ['github', 'token', 'credentials', 'ci'],
+    },
+    {
+      title: 'Docker local API env',
+      body: `docker compose up api redis postgres
+
+API_BASE_URL=http://localhost:8080
+REDIS_URL=redis://localhost:6379
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/jotit_local
+
+If the API fails on boot, prune containers and rerun migrations.`,
+      categories: ['docker', 'config', 'command', 'local'],
+    },
+    {
+      title: 'JWT middleware debugging',
+      body: `Issue: JWT middleware rejects valid tokens from the SPA.
+
+Observed error:
+401 Unauthorized
+invalid audience
+
+Check:
+- issuer is https://login.microsoftonline.com/<tenant>/v2.0
+- audience is api://jotit-api
+- bearer prefix is preserved before token parsing`,
+      categories: ['jwt', 'debugging', 'auth', 'api'],
+    },
+    {
+      title: 'AWS S3 write role',
+      body: `Role ARN: arn:aws:iam::123456789012:role/jotit-staging-s3-write
+Bucket: jotit-staging-uploads
+Policy allows:
+- s3:PutObject
+- s3:AbortMultipartUpload
+
+Assume role via sts:AssumeRole for background import worker.`,
+      categories: ['aws', 's3', 'iam', 'credentials', 'infra'],
+    },
+    {
+      title: 'Redis prod host',
+      body: `REDIS_HOST=redis-prod.internal
+REDIS_PORT=6380
+REDIS_TLS=true
+
+Use redis-cli --tls -h redis-prod.internal -p 6380
+
+Timeouts usually indicate the app is still pointing at the old non-TLS port.`,
+      categories: ['redis', 'config', 'production', 'debugging'],
+    },
+    {
+      title: 'Kubernetes restart commands',
+      body: `kubectl config use-context staging
+kubectl get pods -n jotit
+kubectl rollout restart deployment/jotit-api -n jotit
+kubectl logs deployment/jotit-api -n jotit --since=10m
+
+Use this when the staging API is stuck after config rotation.`,
+      categories: ['kubernetes', 'command', 'staging', 'ops'],
+    },
+    {
+      title: 'GCP service account key',
+      body: `GOOGLE_APPLICATION_CREDENTIALS=/home/user/.config/gcloud/service-account.json
+GCP_PROJECT_ID=my-project-123
+
+Service account: jotit-backend@my-project-123.iam.gserviceaccount.com
+
+Download key JSON from IAM & Admin > Service Accounts.
+Rotate every 90 days via:
+
+\`\`\`bash
+gcloud iam service-accounts keys create key.json \\
+  --iam-account=jotit-backend@my-project-123.iam.gserviceaccount.com
+\`\`\``,
+      categories: ['gcp', 'credentials', 'config', 'cloud'],
+    },
+    {
+      title: 'MySQL RDS connection',
+      body: `DATABASE_URL=mysql://admin:password@db.rds.amazonaws.com:3306/jotit_prod
+MYSQL_HOST=db.rds.amazonaws.com
+MYSQL_PORT=3306
+MYSQL_USER=admin
+
+mysql -h $MYSQL_HOST -u $MYSQL_USER -p
+
+Use RDS proxy endpoint for connection pooling in Lambda.
+Connection string format: mysql://user:pass@host:port/dbname`,
+      categories: ['mysql', 'database', 'credentials', 'aws', 'config'],
+    },
+    {
+      title: 'Terraform staging state',
+      body: `terraform workspace select staging
+terraform plan -var-file=staging.tfvars
+terraform apply -auto-approve -var-file=staging.tfvars
+
+State stored in S3: s3://jotit-terraform-state/staging/terraform.tfstate
+DynamoDB lock table: jotit-terraform-locks
+
+Run from the infra/ directory. Requires AWS_PROFILE=jotit-infra.`,
+      categories: ['terraform', 'infra', 'staging', 'command', 'aws'],
+    },
+  ]
+
+  return base.map((entry, index) => ({
+    id: generateId(),
+    content: `${entry.title}\n${entry.body}`,
+    categories: entry.categories,
+    embedding: null,
+    isPublic: false,
+    createdAt: now - ((base.length - index) * 60000),
+    updatedAt: now - ((base.length - index) * 60000),
+  }))
+}

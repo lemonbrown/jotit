@@ -29,9 +29,9 @@ export function saveNotes(notes) {
 export function loadSettings() {
   try {
     const data = localStorage.getItem(SETTINGS_KEY)
-    return data ? JSON.parse(data) : { openaiApiKey: '', serverProxy: false, bucketName: '' }
+    return data ? JSON.parse(data) : { serverProxy: false, localAgentToken: '', bucketName: '' }
   } catch {
-    return { openaiApiKey: '', serverProxy: false }
+    return { serverProxy: false, localAgentToken: '', bucketName: '' }
   }
 }
 

@@ -353,6 +353,35 @@ textarea, input { font-family: inherit; }
   font-size: 11px;
 }
 
+.json-str-badge {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 10px;
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  background: rgba(109, 40, 217, 0.15);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.json-str-expand-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #a78bfa;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.json-str-expand-btn:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #c4b5fd;
+  background: rgba(109, 40, 217, 0.15);
+  opacity: 1;
+}
+
 .rx-match {
   background: rgba(251, 191, 36, 0.2);
   color: #fde68a;

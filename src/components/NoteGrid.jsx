@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 
-export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNote, searchQuery, diffActive, isPeekOpen, onPeekOpenChange }) {
+export default function NoteGrid({ notes, activeNoteId, onSelectNote, searchMatches, searchQuery, diffActive, isPeekOpen, onPeekOpenChange }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
   const activeIdRef = useRef(activeNoteId)
@@ -140,8 +140,9 @@ export default function NoteGrid({ notes, activeNoteId, aiProcessing, onSelectNo
             key={note.id}
             note={note}
             isActive={note.id === activeNoteId}
-            isProcessing={aiProcessing.has(note.id)}
+            isProcessing={false}
             onSelect={onSelectNote}
+            searchMatch={searchMatches?.get(note.id) ?? null}
             searchQuery={searchQuery}
             expanded={isPeekOpen}
           />
