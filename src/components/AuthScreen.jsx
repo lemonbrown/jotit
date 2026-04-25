@@ -46,7 +46,7 @@ export default function AuthScreen({ onClose }) {
     >
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 w-full max-w-sm">
         <div className="text-center mb-8">
-          <span className="text-2xl font-bold tracking-tight text-zinc-100">JotIt</span>
+          <span className="text-2xl font-bold tracking-tight text-zinc-100">jot.it</span>
           <p className="text-zinc-500 text-sm mt-1">
             {mode === 'login' ? 'Sign in to your account' : 'Create an account'}
           </p>

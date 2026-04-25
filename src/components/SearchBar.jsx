@@ -22,7 +22,7 @@ export default function SearchBar({ value, onChange, isSearching, aiEnabled, inp
         type="text"
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder={aiEnabled ? 'Search notes or ask AI…' : 'Search notes…'}
+        placeholder={aiEnabled ? 'Search all of your notes…' : 'Search notes…'}
         className="w-full pl-8 pr-8 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 focus:bg-zinc-800 transition-colors"
       />
       {value && (

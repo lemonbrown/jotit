@@ -52,10 +52,65 @@ const SCHEMA = `
     content     TEXT    NOT NULL DEFAULT '',
     categories  TEXT    NOT NULL DEFAULT '[]',
     embedding   TEXT,
+    note_type   TEXT    NOT NULL DEFAULT 'text',
+    note_data   TEXT,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     is_public   INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS snippets (
+    id             TEXT PRIMARY KEY,
+    name           TEXT,
+    content        TEXT    NOT NULL DEFAULT '',
+    embedding      TEXT,
+    source_note_id TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS note_chunks (
+    id            TEXT PRIMARY KEY,
+    note_id       TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'prose',
+    section_title TEXT,
+    start_offset  INTEGER NOT NULL DEFAULT 0,
+    end_offset    INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_chunks_note_id ON note_chunks(note_id);
+
+  CREATE TABLE IF NOT EXISTS note_entities (
+    id               TEXT PRIMARY KEY,
+    note_id          TEXT NOT NULL,
+    chunk_id         TEXT,
+    entity_type      TEXT NOT NULL,
+    entity_value     TEXT NOT NULL,
+    normalized_value TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_entities_note_id ON note_entities(note_id);
+  CREATE INDEX IF NOT EXISTS idx_note_entities_normalized_value ON note_entities(normalized_value);
+
+  CREATE TABLE IF NOT EXISTS search_metadata (
+    note_id         TEXT PRIMARY KEY,
+    keywords        TEXT NOT NULL DEFAULT '[]',
+    facets          TEXT NOT NULL DEFAULT '[]',
+    last_indexed_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS attachments (
+    id         TEXT PRIMARY KEY,
+    note_id    TEXT    NOT NULL,
+    mime_type  TEXT    NOT NULL,
+    data       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_attachments_note_id ON attachments(note_id);
 `
 
 export async function initDB() {
@@ -68,6 +123,8 @@ export async function initDB() {
   try { db.run('ALTER TABLE notes ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN dirty INTEGER NOT NULL DEFAULT 1') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN pending_delete INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.run(`ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'text'`) } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN note_data TEXT') } catch {}
 
   // Migrate from localStorage if SQLite is empty and localStorage has data
   const count = db.exec('SELECT COUNT(*) as n FROM notes')[0]?.values[0][0] ?? 0
@@ -79,10 +136,10 @@ export async function initDB() {
         for (const n of notes) migrateNote(n)
         await persist()
         localStorage.removeItem('jotit_notes')
-        console.info(`[JotIt] Migrated ${notes.length} notes from localStorage → SQLite`)
+        console.info(`[jot.it] Migrated ${notes.length} notes from localStorage → SQLite`)
       }
     } catch (e) {
-      console.warn('[JotIt] Migration failed:', e)
+      console.warn('[jot.it] Migration failed:', e)
     }
   }
 
@@ -100,6 +157,8 @@ function migrateNote(n) {
     content,
     categories: n.categories ?? [],
     embedding: n.embedding ?? null,
+    noteType: n.noteType ?? 'text',
+    noteData: n.noteData ?? null,
     createdAt: n.createdAt ?? Date.now(),
     updatedAt: n.updatedAt ?? Date.now(),
   })
@@ -138,13 +197,15 @@ export function upsertNoteSync(note, dirty = 1) {
   if (!db) return
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, content, categories, embedding, created_at, updated_at, is_public, dirty, pending_delete)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       (id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     [
       note.id,
       note.content,
       JSON.stringify(note.categories ?? []),
       note.embedding ? JSON.stringify(note.embedding) : null,
+      note.noteType ?? 'text',
+      note.noteData ? JSON.stringify(note.noteData) : null,
       note.createdAt,
       note.updatedAt,
       note.isPublic ? 1 : 0,
@@ -195,6 +256,177 @@ export function markSynced(ids) {
 export function deleteNoteSync(id) {
   if (!db) return
   db.run('DELETE FROM notes WHERE id = ?', [id])
+  db.run('DELETE FROM attachments WHERE note_id = ?', [id])
+  deleteNoteSearchArtifacts(id)
+}
+
+export function replaceNoteSearchArtifacts(noteId, { chunks = [], entities = [], metadata = null }) {
+  if (!db || !noteId) return
+
+  db.run('DELETE FROM note_chunks WHERE note_id = ?', [noteId])
+  db.run('DELETE FROM note_entities WHERE note_id = ?', [noteId])
+  db.run('DELETE FROM search_metadata WHERE note_id = ?', [noteId])
+
+  for (const chunk of chunks) {
+    db.run(
+      `INSERT INTO note_chunks
+         (id, note_id, content, kind, section_title, start_offset, end_offset, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        chunk.id,
+        chunk.noteId,
+        chunk.content,
+        chunk.kind,
+        chunk.sectionTitle ?? null,
+        chunk.startOffset ?? 0,
+        chunk.endOffset ?? 0,
+        chunk.createdAt ?? Date.now(),
+        chunk.updatedAt ?? Date.now(),
+      ]
+    )
+  }
+
+  for (const entity of entities) {
+    db.run(
+      `INSERT INTO note_entities
+         (id, note_id, chunk_id, entity_type, entity_value, normalized_value)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        entity.id,
+        entity.noteId,
+        entity.chunkId ?? null,
+        entity.entityType,
+        entity.entityValue,
+        entity.normalizedValue,
+      ]
+    )
+  }
+
+  if (metadata) {
+    db.run(
+      `INSERT INTO search_metadata
+         (note_id, keywords, facets, last_indexed_at)
+       VALUES (?, ?, ?, ?)`,
+      [
+        metadata.noteId,
+        JSON.stringify(metadata.keywords ?? []),
+        JSON.stringify(metadata.facets ?? []),
+        metadata.lastIndexedAt ?? Date.now(),
+      ]
+    )
+  }
+}
+
+export function deleteNoteSearchArtifacts(noteId) {
+  if (!db) return
+  db.run('DELETE FROM note_chunks WHERE note_id = ?', [noteId])
+  db.run('DELETE FROM note_entities WHERE note_id = ?', [noteId])
+  db.run('DELETE FROM search_metadata WHERE note_id = ?', [noteId])
+}
+
+export function getAllNoteChunks() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM note_chunks')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const chunk = {}
+    columns.forEach((col, i) => { chunk[col] = row[i] })
+    return deserializeChunk(chunk)
+  })
+}
+
+export function getAllNoteEntities() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM note_entities')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const entity = {}
+    columns.forEach((col, i) => { entity[col] = row[i] })
+    return deserializeEntity(entity)
+  })
+}
+
+export function getSearchMetadataMap() {
+  if (!db) return new Map()
+  const result = db.exec('SELECT * FROM search_metadata')
+  if (!result.length) return new Map()
+  const { columns, values } = result[0]
+  return new Map(values.map(row => {
+    const metadata = {}
+    columns.forEach((col, i) => { metadata[col] = row[i] })
+    const deserialized = deserializeSearchMetadata(metadata)
+    return [deserialized.noteId, deserialized]
+  }))
+}
+
+export function getAllSnippets() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM snippets ORDER BY updated_at DESC')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const snippet = {}
+    columns.forEach((col, i) => { snippet[col] = row[i] })
+    return deserializeSnippet(snippet)
+  })
+}
+
+export function upsertSnippetSync(snippet) {
+  if (!db) return
+  db.run(
+    `INSERT OR REPLACE INTO snippets
+       (id, name, content, embedding, source_note_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      snippet.id,
+      snippet.name?.trim() ? snippet.name.trim() : null,
+      snippet.content,
+      snippet.embedding ? JSON.stringify(snippet.embedding) : null,
+      snippet.sourceNoteId ?? null,
+      snippet.createdAt,
+      snippet.updatedAt,
+    ]
+  )
+}
+
+export function deleteSnippetSync(id) {
+  if (!db) return
+  db.run('DELETE FROM snippets WHERE id = ?', [id])
+}
+
+// ── Attachments ────────────────────────────────────────────────────────────────
+
+export function insertAttachment(attachment) {
+  if (!db) return
+  db.run(
+    `INSERT OR REPLACE INTO attachments (id, note_id, mime_type, data, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [attachment.id, attachment.noteId, attachment.mimeType, attachment.data, attachment.createdAt]
+  )
+}
+
+export function getAttachmentsForNote(noteId) {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM attachments WHERE note_id = ? ORDER BY created_at ASC', [noteId])
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const att = {}
+    columns.forEach((col, i) => { att[col] = row[i] })
+    return deserializeAttachment(att)
+  })
+}
+
+export function deleteAttachment(id) {
+  if (!db) return
+  db.run('DELETE FROM attachments WHERE id = ?', [id])
+}
+
+export function deleteAttachmentsForNote(noteId) {
+  if (!db) return
+  db.run('DELETE FROM attachments WHERE note_id = ?', [noteId])
 }
 
 // Export the raw .sqlite file as a download
@@ -218,10 +450,68 @@ function deserialize(row) {
     content:       row.content,
     categories:    JSON.parse(row.categories ?? '[]'),
     embedding:     row.embedding ? JSON.parse(row.embedding) : null,
+    noteType:      row.note_type ?? 'text',
+    noteData:      row.note_data ? JSON.parse(row.note_data) : null,
     createdAt:     row.created_at,
     updatedAt:     row.updated_at,
     isPublic:      row.is_public === 1,
     dirty:         row.dirty,
     pendingDelete: row.pending_delete === 1,
+  }
+}
+
+function deserializeSnippet(row) {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    content: row.content,
+    embedding: row.embedding ? JSON.parse(row.embedding) : null,
+    sourceNoteId: row.source_note_id ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function deserializeChunk(row) {
+  return {
+    id: row.id,
+    noteId: row.note_id,
+    content: row.content,
+    kind: row.kind ?? 'prose',
+    sectionTitle: row.section_title ?? null,
+    startOffset: row.start_offset ?? 0,
+    endOffset: row.end_offset ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function deserializeEntity(row) {
+  return {
+    id: row.id,
+    noteId: row.note_id,
+    chunkId: row.chunk_id ?? null,
+    entityType: row.entity_type,
+    entityValue: row.entity_value,
+    normalizedValue: row.normalized_value,
+  }
+}
+
+function deserializeSearchMetadata(row) {
+  return {
+    noteId: row.note_id,
+    keywords: JSON.parse(row.keywords ?? '[]'),
+    facets: JSON.parse(row.facets ?? '[]'),
+    lastIndexedAt: row.last_indexed_at ?? 0,
+  }
+}
+
+function deserializeAttachment(row) {
+  return {
+    id:        row.id,
+    noteId:    row.note_id,
+    mimeType:  row.mime_type,
+    data:      row.data,
+    createdAt: row.created_at,
   }
 }

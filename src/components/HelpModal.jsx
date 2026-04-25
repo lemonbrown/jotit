@@ -32,7 +32,7 @@ export default function HelpModal({ onClose }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800 sticky top-0 bg-zinc-900 z-10">
           <div>
             <h2 className="text-sm font-semibold text-zinc-100">Hotkeys &amp; Commands</h2>
-            <p className="text-[11px] text-zinc-600 mt-0.5">Everything JotIt can do</p>
+            <p className="text-[11px] text-zinc-600 mt-0.5">Everything jot.it can do</p>
           </div>
           <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 transition-colors">
             <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
@@ -65,6 +65,7 @@ export default function HelpModal({ onClose }) {
             [['Ctrl+G'],             'Go to line'],
             [['Ctrl+='],             'Calculate selection or current line'],
             [['Ctrl+Enter'],         'Preview calculation insert; Enter accepts it'],
+            [['Shift+Mouse wheel'],  'Open the document outline and move through markdown headings'],
             [['Alt+Mouse wheel'],    'Velocity scroll through the editor'],
             [['Share'],              'Publish current note and copy a public link'],
             [['📋 Copy'],            'Copy entire note content to clipboard'],
@@ -104,13 +105,13 @@ export default function HelpModal({ onClose }) {
 
           <Section title="Search" rows={[
             [['text'],               'Instant filter by content or category tags'],
-            [['AI semantic'],        'With OpenAI key: searches by meaning, not just keywords'],
+            [['AI semantic'],        'Signed-in users get server-backed semantic search when AI is enabled'],
           ]} />
 
-          <Section title="AI (requires OpenAI key in ⚙)" rows={[
-            [['Auto-tag'],           'Note is categorized ~2s after you stop typing'],
-            [['Embeddings'],         'Generated in background for semantic search'],
-            [['Batch embed'],        'All un-embedded notes indexed when key is first added'],
+          <Section title="AI" rows={[
+            [['Account-gated'],      'Server AI features require a signed-in account'],
+            [['Semantic search'],    'Global search can rank by meaning for signed-in users'],
+            [['Key ownership'],      'The server owns the AI key; users do not bring their own'],
           ]} />
 
           <Section title="Database" rows={[

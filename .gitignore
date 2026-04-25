@@ -32,3 +32,4 @@ coverage/
 .DS_Store
 Thumbs.db
 notepad_session_dump.csv
+/.vs

@@ -14,8 +14,20 @@ import dockerfile from 'highlight.js/lib/languages/dockerfile'
 import ini from 'highlight.js/lib/languages/ini'
 import 'highlight.js/styles/github-dark.css'
 
-import { timeAgo } from '../utils/helpers'
-import { TRANSFORMS, applyTransform } from '../utils/transforms'
+import { timeAgo, generateId } from '../utils/helpers'
+import {
+  buildMarker,
+  extractMarkerIds,
+  processImageFile,
+} from '../utils/attachments'
+import {
+  insertAttachment,
+  getAttachmentsForNote,
+  deleteAttachment,
+  schedulePersist,
+} from '../utils/db'
+import { TRANSFORMS, applyTransform, parseDates, detectSingleDate, getDateFormats,
+         detectTimeWithZone, getTimeConversions, detectTimestamp, getTimestampFormats } from '../utils/transforms'
 import { analyzeCalculation } from '../utils/calculator'
 import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
 import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
@@ -30,6 +42,12 @@ import DiffViewer from './DiffViewer'
 import TableViewer from './TableViewer'
 import CronBuilder from './CronBuilder'
 import DiagramEditor from './DiagramEditor'
+import JsonBlockViewer from './JsonBlockViewer'
+import InlineImageEditor from './InlineImageEditor'
+import SQLiteViewer from './SQLiteViewer'
+import OpenApiViewer from './OpenApiViewer'
+import { extractSQLiteAssetRef } from '../utils/sqliteNote'
+import { NOTE_TYPE_OPENAPI, isOpenApiNote } from '../utils/noteTypes'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -45,6 +63,15 @@ hljs.registerLanguage('ini', ini)
 
 const HINT_LANGS = ['json','javascript','typescript','python','sql','bash','yaml','xml','css','dockerfile','ini']
 
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
   let highlighted = ''
@@ -54,7 +81,7 @@ mdRenderer.code = ({ text, lang }) => {
   if (!highlighted) {
     try { highlighted = hljs.highlightAuto(text, HINT_LANGS).value } catch {}
   }
-  if (!highlighted) highlighted = hljs.escapeHTML(text)
+  if (!highlighted) highlighted = escapeHtml(text)
   const cls = lang ? `hljs language-${lang}` : 'hljs'
   return `<pre><code class="${cls}">${highlighted}</code></pre>`
 }
@@ -83,7 +110,22 @@ function isValidJson(text) {
   try { JSON.parse(t); return true } catch { return false }
 }
 
-export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onDelete, onPublishNote, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
+function snippetLabel(snippet) {
+  if (snippet.name?.trim()) return snippet.name.trim()
+  const firstLine = snippet.content.split('\n').find(line => line.trim()) ?? snippet.content
+  return firstLine.trim().slice(0, 48) || 'untitled snippet'
+}
+
+function getSnippetTrigger(text, cursor) {
+  const before = text.slice(0, cursor)
+  const match = before.match(/(?:^|[\s([{\n])!(?<query>[^\s!()]*)$/)
+  if (!match || match.index == null) return null
+  const bangIndex = before.lastIndexOf('!')
+  if (bangIndex === -1) return null
+  return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
+}
+
+export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onCreateNoteFromContent, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -114,6 +156,13 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const [tableSession, setTableSession] = useState(null)
   const [cronSession, setCronSession] = useState(null)
   const [diagramSession, setDiagramSession] = useState(null)
+  const [jsonSession, setJsonSession] = useState(null)
+  const [snippetSaveOpen, setSnippetSaveOpen] = useState(false)
+  const [snippetDraftName, setSnippetDraftName] = useState('')
+  const [snippetSaved, setSnippetSaved] = useState(false)
+  const [snippetPicker, setSnippetPicker] = useState(null)
+  const [snippetResults, setSnippetResults] = useState([])
+  const [snippetActiveIndex, setSnippetActiveIndex] = useState(0)
   const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
   const textareaRef = useRef(null)
@@ -121,6 +170,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const codePreRef = useRef(null)
   const interactiveInputRef = useRef(null)
   const gotoInputRef = useRef(null)
+  const snippetNameInputRef = useRef(null)
   const editorScrollCoastRef = useRef({ velocity: 0, direction: 1, rafId: null })
   const historyRef = useRef([note.content])
   const historyIdxRef = useRef(0)
@@ -129,16 +179,34 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   const capturedHttpSelRef = useRef('')
   const capturedDiffARef = useRef('')
   const capturedDiffBRef = useRef('')
+  const txRangeRef = useRef({ start: 0, end: 0 })
   const [httpInstance, setHttpInstance] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
   const [findMatchIndex, setFindMatchIndex] = useState(0)
+  const [outlineOpen, setOutlineOpen] = useState(false)
+  const [outlineQuery, setOutlineQuery] = useState('')
+  const [outlineIndex, setOutlineIndex] = useState(0)
+  const [attachments, setAttachments] = useState([])
+  const [pasteError, setPasteError] = useState('')
+
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
-  const charCount = content.length
-  const lineCount = content.split('\n').length
+  const outlineInputRef = useRef(null)
+  const outlineListRef = useRef(null)
+  const snippetSearchSeqRef = useRef(0)
+  const inlineSegOffsetRef = useRef(0)
+  const inlineScrollRef = useRef(null)
+  const markdownPreviewRef = useRef(null)
+  const panelRef = useRef(null)
+  const attachmentMap = useMemo(() => new Map(attachments.map(a => [a.id, a])), [attachments])
+  const hasInlineImages = attachments.length > 0 && /\[img:\/\/[^\]]+\]/.test(content)
+  const openApiNote = useMemo(() => isOpenApiNote(note), [note])
+  const editorDisplayContent = openApiNote ? (note.noteData?.rawText ?? content) : content
+  const charCount = editorDisplayContent.length
+  const lineCount = editorDisplayContent.split('\n').length
 
   const pendingCalcInline = useMemo(() => {
     if (!pendingCalc) return null
@@ -219,6 +287,9 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [])
 
+  const sections = useMemo(() => parseSections(content), [content])
+  const sqliteAssetRef = useMemo(() => extractSQLiteAssetRef(content), [content])
+
   const jumpToFindMatch = useCallback((targetIndex, results) => {
     if (!results.length) return
     const count = results.length
@@ -264,23 +335,119 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [mode, codeViewActive, codeBefore, codeContent])
 
   const jumpToSection = useCallback((section) => {
+    focusEditorLine(section.startLine + 1)
+  }, [focusEditorLine])
+
+  const jumpToPreviewSection = useCallback((section, sectionIndex) => {
+    const preview = markdownPreviewRef.current
+    if (!preview) return
+
+    const target = preview.querySelector(`[data-section-index="${sectionIndex}"]`)
+    if (!target) return
+
+    const previewRect = preview.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    const top = Math.max(0, preview.scrollTop + targetRect.top - previewRect.top - 16)
+    preview.scrollTo({ top, behavior: 'smooth' })
+  }, [])
+
+  const handleSectionJump = useCallback((section, sectionIndex) => {
     if (mode === 'markdown') {
-      setMode('edit')
-      requestAnimationFrame(() => focusEditorLine(section.startLine + 1))
-    } else {
-      focusEditorLine(section.startLine + 1)
+      jumpToPreviewSection(section, sectionIndex)
+      return
     }
-  }, [mode, focusEditorLine])
+
+    jumpToSection(section)
+  }, [mode, jumpToPreviewSection, jumpToSection])
+
+  const focusCurrentSurface = useCallback(() => {
+    if (mode === 'markdown') {
+      markdownPreviewRef.current?.focus()
+      return
+    }
+    textareaRef.current?.focus()
+  }, [mode])
+
+  const getCurrentSectionIndex = useCallback(() => {
+    if (!sections.length) return 0
+
+    if (mode === 'markdown') {
+      const preview = markdownPreviewRef.current
+      if (!preview) return 0
+      const headings = [...preview.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+      if (!headings.length) return 0
+      const previewTop = preview.getBoundingClientRect().top
+      let currentIdx = 0
+      headings.forEach((heading, index) => {
+        if (heading.getBoundingClientRect().top - previewTop <= 48) currentIdx = index
+      })
+      return currentIdx
+    }
+
+    const ta = textareaRef.current
+    const currentLine = ta
+      ? content.slice(0, ta.selectionStart ?? 0).split('\n').length - 1
+      : 0
+
+    let currentIdx = 0
+    sections.forEach((section, index) => {
+      if (section.startLine <= currentLine) currentIdx = index
+    })
+    return currentIdx
+  }, [content, mode, sections])
+
+  const filteredSections = useMemo(() => {
+    const query = outlineQuery.trim().toLowerCase()
+    if (!query) return sections
+    return sections.filter(section => section.title.toLowerCase().includes(query))
+  }, [outlineQuery, sections])
+
+  const closeOutline = useCallback(() => {
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
+    requestAnimationFrame(() => focusCurrentSurface())
+  }, [focusCurrentSurface])
+
+  const commitOutlineSelection = useCallback((index = outlineIndex) => {
+    const section = filteredSections[index]
+    if (!section) return
+    const sectionIndex = sections.findIndex(candidate =>
+      candidate.startLine === section.startLine &&
+      candidate.level === section.level &&
+      candidate.title === section.title
+    )
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
+    requestAnimationFrame(() => {
+      handleSectionJump(section, Math.max(0, sectionIndex))
+      focusCurrentSurface()
+    })
+  }, [filteredSections, handleSectionJump, outlineIndex, focusCurrentSurface, sections])
+
+  const openOutline = useCallback((step = 0) => {
+    if (!sections.length) return
+    setOutlineOpen(true)
+    setOutlineQuery('')
+    setOutlineIndex(prev => {
+      const start = outlineOpen ? prev : getCurrentSectionIndex()
+      const next = start + step
+      return Math.max(0, Math.min(sections.length - 1, next))
+    })
+  }, [getCurrentSectionIndex, outlineOpen, sections])
 
   const handlePanelKeyDown = useCallback((e) => {
+    if (outlineOpen) return
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
       e.preventDefault()
       openFind()
     }
-  }, [openFind])
+  }, [openFind, outlineOpen])
 
   useEffect(() => {
     setContent(note.content)
+    setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
     setConfirmDelete(false)
     setShareState(null)
     setSel({ start: 0, end: 0, text: '' })
@@ -290,11 +457,21 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setTableSession(null)
     setCronSession(null)
     setDiagramSession(null)
+    setJsonSession(null)
+    setSnippetSaveOpen(false)
+    setSnippetDraftName('')
+    setSnippetSaved(false)
+    setSnippetPicker(null)
+    setSnippetResults([])
+    setSnippetActiveIndex(0)
     setInteractiveTx(null)
     setDisplayHint(null)
     setFindOpen(false)
     setFindQuery('')
     setFindMatchIndex(0)
+    setOutlineOpen(false)
+    setOutlineQuery('')
+    setOutlineIndex(0)
     setCodeViewActive(false)
     clearTimeout(historyTimerRef.current)
     historyRef.current = [note.content]
@@ -302,8 +479,56 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [note.id])
 
   useEffect(() => {
+    setAttachments(getAttachmentsForNote(note.id))
+  }, [note.id])
+
+  // Remove attachment rows whose markers were deleted from the content
+  useEffect(() => {
+    const referenced = new Set(extractMarkerIds(content))
+    setAttachments(prev => {
+      const orphans = prev.filter(a => !referenced.has(a.id))
+      if (!orphans.length) return prev
+      orphans.forEach(a => { deleteAttachment(a.id); schedulePersist() })
+      return prev.filter(a => referenced.has(a.id))
+    })
+  }, [content])
+
+  useEffect(() => {
     setFindMatchIndex(0)
   }, [findQuery, findMode])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    requestAnimationFrame(() => {
+      outlineInputRef.current?.focus()
+      outlineInputRef.current?.select()
+    })
+  }, [outlineOpen])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    setOutlineIndex(idx => Math.max(0, Math.min(Math.max(filteredSections.length - 1, 0), idx)))
+  }, [filteredSections.length, outlineOpen])
+
+  useEffect(() => {
+    if (!outlineOpen) return
+    const active = outlineListRef.current?.querySelector(`[data-outline-index="${outlineIndex}"]`)
+    active?.scrollIntoView({ block: 'nearest' })
+  }, [outlineIndex, outlineOpen])
+
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+
+    const handler = (e) => {
+      if (!e.shiftKey || e.altKey || !sections.length) return
+      e.preventDefault()
+      openOutline(e.deltaY > 0 ? 1 : -1)
+    }
+
+    panel.addEventListener('wheel', handler, { passive: false })
+    return () => panel.removeEventListener('wheel', handler)
+  }, [openOutline, sections.length])
 
   useEffect(() => {
     if (mode !== 'edit') setCodeViewActive(false)
@@ -322,15 +547,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     }
 
     requestAnimationFrame(() => {
-      const ta = textareaRef.current
-      if (!ta) return
-      const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
-      const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)
-      ta.focus()
-      ta.selectionStart = cursorStart
-      ta.selectionEnd = cursorEnd
-      ta.scrollTop = restoreLocation.scrollTop ?? 0
-      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+      const scrollTop = restoreLocation.scrollTop ?? 0
+      if (inlineScrollRef.current) {
+        inlineScrollRef.current.scrollTop = scrollTop
+      } else {
+        const ta = textareaRef.current
+        if (!ta) return
+        const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
+        const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)
+        ta.focus()
+        ta.selectionStart = cursorStart
+        ta.selectionEnd = cursorEnd
+        ta.scrollTop = scrollTop
+        if (lineNumsRef.current) lineNumsRef.current.scrollTop = scrollTop
+      }
     })
   }, [restoreLocation, note.id, mode])
 
@@ -378,6 +608,31 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     }
   }, [mode, reportCurrentLocation])
 
+  useEffect(() => {
+    if (!snippetPicker?.query) {
+      setSnippetResults(snippets.slice(0, 8))
+      setSnippetActiveIndex(0)
+      return
+    }
+
+    let cancelled = false
+    const seq = ++snippetSearchSeqRef.current
+    const run = async () => {
+      const next = onSearchSnippets
+        ? await onSearchSnippets(snippetPicker.query)
+        : snippets.filter(snippet => snippetLabel(snippet).toLowerCase().includes(snippetPicker.query.toLowerCase()))
+      if (cancelled || seq !== snippetSearchSeqRef.current) return
+      setSnippetResults(next.slice(0, 8))
+      setSnippetActiveIndex(0)
+    }
+
+    const timer = setTimeout(run, 120)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [onSearchSnippets, snippetPicker?.query, snippets])
+
   // Register/unregister diff note loader with parent
   useEffect(() => {
     if (mode === 'diff') {
@@ -395,6 +650,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     const { selectionStart: start, selectionEnd: end } = ta
     if (end > start) {
       setSel({ start, end, text: ta.value.slice(start, end) })
+    } else {
+      setSel({ start: 0, end: 0, text: '' })
     }
     reportCurrentLocation(ta)
   }
@@ -406,6 +663,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       setSel({ start: 0, end: 0, text: '' })
       setTxResult(null)
       setInteractiveTx(null)
+      setSnippetSaveOpen(false)
     }
     reportCurrentLocation(ta)
   }
@@ -435,6 +693,55 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     historyIdxRef.current = next.length - 1
   }
 
+  const handlePaste = useCallback(async (e) => {
+    const imageItem = [...(e.clipboardData?.items ?? [])].find(item => item.type.startsWith('image/'))
+    if (!imageItem) return
+
+    e.preventDefault()
+    setPasteError('')
+
+    let processed
+    try {
+      processed = await processImageFile(imageItem.getAsFile())
+    } catch (err) {
+      setPasteError(err.message)
+      setTimeout(() => setPasteError(''), 4000)
+      return
+    }
+
+    const id = generateId()
+    const attachment = { id, noteId: note.id, mimeType: processed.mimeType, data: processed.dataURL, createdAt: Date.now() }
+    insertAttachment(attachment)
+    schedulePersist()
+    setAttachments(prev => [...prev, attachment])
+
+    const marker = buildMarker(id)
+    const ta = textareaRef.current
+    const segOff = hasInlineImages ? (inlineSegOffsetRef.current ?? 0) : 0
+    const insertAt = ta ? ta.selectionStart + segOff : content.length
+    const next = content.slice(0, insertAt) + marker + '\n' + content.slice(insertAt)
+    setContent(next)
+    onUpdate({ content: next })
+    pushHistoryNow(next)
+    requestAnimationFrame(() => {
+      if (ta) ta.selectionStart = ta.selectionEnd = insertAt + marker.length + 1 - segOff
+    })
+  }, [content, hasInlineImages, note.id, onUpdate, pushHistoryNow])
+
+  const handleDeleteAttachment = useCallback((id) => {
+    deleteAttachment(id)
+    schedulePersist()
+    setAttachments(prev => prev.filter(a => a.id !== id))
+
+    const marker = buildMarker(id)
+    const next = content.replace(marker + '\n', '').replace(marker, '')
+    if (next !== content) {
+      setContent(next)
+      onUpdate({ content: next })
+      pushHistoryNow(next)
+    }
+  }, [content, onUpdate, pushHistoryNow])
+
   const undo = () => {
     clearTimeout(historyTimerRef.current)
     const idx = historyIdxRef.current
@@ -459,8 +766,11 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   // ── Transforms ──────────────────────────────────────────────────────────────
   const runTransform = (id, opName, param = '') => {
+    const hasText = sel.text.length > 0
+    const inputText = hasText ? sel.text : content
+    txRangeRef.current = hasText ? { start: sel.start, end: sel.end } : { start: 0, end: content.length }
     try {
-      const result = applyTransform(id, sel.text, param)
+      const result = applyTransform(id, inputText, param)
       setTxResult({ opName, text: result, error: null })
       setCalcResult(null)
     } catch (e) {
@@ -470,6 +780,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }
 
   const startInteractive = (id, opName) => {
+    const hasText = sel.text.length > 0
+    txRangeRef.current = hasText ? { start: sel.start, end: sel.end } : { start: 0, end: content.length }
     setInteractiveTx({ id, opName, param: '' })
     setTxResult(null)
     requestAnimationFrame(() => interactiveInputRef.current?.focus())
@@ -477,8 +789,10 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   const updateInteractiveParam = (param) => {
     setInteractiveTx(prev => ({ ...prev, param }))
+    const hasText = sel.text.length > 0
+    const inputText = hasText ? sel.text : content
     try {
-      const result = applyTransform(interactiveTx.id, sel.text, param)
+      const result = applyTransform(interactiveTx.id, inputText, param)
       setTxResult({ opName: interactiveTx.opName, text: result, error: null })
     } catch (e) {
       setTxResult({ opName: interactiveTx.opName, text: '', error: e.message })
@@ -605,6 +919,99 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setMode('edit')
   }
 
+  const openJsonViewer = (useSelection) => {
+    const hasText = sel.text.length > 0
+    const text = useSelection && hasText ? sel.text : content
+    const start = useSelection && hasText ? sel.start : 0
+    const end = useSelection && hasText ? sel.end : content.length
+    if (!isValidJson(text)) {
+      setTxResult({ opName: 'JSON Viewer', text: '', error: 'Selection is not valid JSON' })
+      setJsonSession(null)
+      return
+    }
+    setTxResult(null)
+    setCalcResult(null)
+    setPendingCalc(null)
+    setCodeViewActive(false)
+    setJsonSession({
+      start,
+      end,
+      text: text.trim(),
+      scopeLabel: useSelection && hasText ? 'Selection' : 'Whole note',
+    })
+  }
+
+  const applyJsonEdit = (nextJson) => {
+    if (!jsonSession) return
+    const nextContent = content.slice(0, jsonSession.start) + nextJson + content.slice(jsonSession.end)
+    pushHistoryNow(nextContent)
+    setContent(nextContent)
+    onUpdate({ content: nextContent })
+    setJsonSession({
+      ...jsonSession,
+      text: nextJson,
+      end: jsonSession.start + nextJson.length,
+    })
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(jsonSession.start, jsonSession.start + nextJson.length)
+      reportCurrentLocation(ta)
+    })
+  }
+
+  const openSnippetSave = useCallback(() => {
+    if (!sel.text.trim()) return
+    setSnippetDraftName('')
+    setSnippetSaveOpen(true)
+    setSnippetSaved(false)
+    requestAnimationFrame(() => snippetNameInputRef.current?.focus())
+  }, [sel.text])
+
+  const saveSnippetSelection = useCallback(async () => {
+    if (!sel.text.trim() || !onCreateSnippet) return
+    const created = await onCreateSnippet({
+      content: sel.text,
+      name: snippetDraftName,
+      sourceNoteId: note.id,
+    })
+    if (!created) return
+    setSnippetSaved(true)
+    setSnippetSaveOpen(false)
+    setSnippetDraftName('')
+    setTimeout(() => setSnippetSaved(false), 1500)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }, [note.id, onCreateSnippet, sel.text, snippetDraftName])
+
+  const closeSnippetPicker = useCallback(() => {
+    setSnippetPicker(null)
+    setSnippetResults([])
+    setSnippetActiveIndex(0)
+  }, [])
+
+  const replaceRangeInEditor = useCallback((start, end, text) => {
+    const next = content.slice(0, start) + text + content.slice(end)
+    pushHistoryNow(next)
+    setContent(next)
+    onUpdate({ content: next })
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const cursor = start + text.length
+      ta.focus()
+      ta.selectionStart = ta.selectionEnd = cursor
+      setSel({ start: 0, end: 0, text: '' })
+      reportCurrentLocation(ta)
+    })
+  }, [content, onUpdate, reportCurrentLocation])
+
+  const insertSnippet = useCallback((snippet) => {
+    if (!snippetPicker) return
+    replaceRangeInEditor(snippetPicker.start, snippetPicker.end, snippet.content)
+    closeSnippetPicker()
+  }, [closeSnippetPicker, replaceRangeInEditor, snippetPicker])
+
   const runCalculation = ({ complete = false } = {}) => {
     const range = getCalcRange()
     try {
@@ -696,8 +1103,18 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     setTimeout(() => setGuidCopied(false), 1500)
   }
 
+  const replaceSelectionWith = (value) => {
+    const newContent = content.slice(0, sel.start) + value + content.slice(sel.end)
+    pushHistoryNow(newContent)
+    setContent(newContent)
+    onUpdate({ content: newContent })
+    setSel({ start: 0, end: 0, text: '' })
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
   const applyTxResult = () => {
-    const newContent = content.slice(0, sel.start) + txResult.text + content.slice(sel.end)
+    const range = txRangeRef.current
+    const newContent = content.slice(0, range.start) + txResult.text + content.slice(range.end)
     pushHistoryNow(newContent)
     setContent(newContent)
     onUpdate({ content: newContent })
@@ -715,14 +1132,71 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   // ── Editor actions ──────────────────────────────────────────────────────────
   const handleContent = (e) => {
+    const target = e.target
+    const cursor = target.selectionStart ?? 0
+    const trigger = getSnippetTrigger(e.target.value, cursor)
     setPendingCalc(null)
     setContent(e.target.value)
     onUpdate({ content: e.target.value })
     pushHistory(e.target.value)
-    reportCurrentLocation(e.target)
+    if (jsonSession) setJsonSession(null)
+    if (trigger) {
+      const before = e.target.value.slice(0, trigger.start)
+      const lineIndex = before.split('\n').length - 1
+      const lineStart = before.lastIndexOf('\n') + 1
+      const column = before.length - lineStart
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setSnippetPicker({
+        ...trigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + column * charWidth - target.scrollLeft,
+      })
+    } else if (snippetPicker) {
+      closeSnippetPicker()
+    }
+    reportCurrentLocation(target)
   }
 
+  // Used by InlineImageEditor when a text segment changes; receives the assembled full content
+  const handleInlineEditorChange = useCallback((newContent) => {
+    setPendingCalc(null)
+    if (snippetPicker) closeSnippetPicker()
+    setContent(newContent)
+    onUpdate({ content: newContent })
+    pushHistory(newContent)
+    if (jsonSession) setJsonSession(null)
+  }, [onUpdate, pushHistory, closeSnippetPicker, snippetPicker, jsonSession])
+
   const handleKeyDown = (e) => {
+    if (snippetPicker) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSnippetActiveIndex(index => Math.min(index + 1, Math.max(0, snippetResults.length - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSnippetActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && snippetResults.length) {
+        e.preventDefault()
+        insertSnippet(snippetResults[snippetActiveIndex] ?? snippetResults[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeSnippetPicker()
+        return
+      }
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 's') {
+      if (!sel.text.trim()) return
+      e.preventDefault()
+      openSnippetSave()
+      return
+    }
     if (pendingCalc && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
       acceptPendingCalc()
@@ -784,24 +1258,15 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     if (e.key === 'Tab') {
       e.preventDefault()
       const ta = textareaRef.current
-      const start = ta.selectionStart
-      const end = ta.selectionEnd
+      const segOff = hasInlineImages ? (inlineSegOffsetRef.current ?? 0) : 0
+      const start = ta.selectionStart + segOff
+      const end = ta.selectionEnd + segOff
       const newVal = content.slice(0, start) + '  ' + content.slice(end)
       setContent(newVal)
       onUpdate({ content: newVal })
       pushHistoryNow(newVal)
-      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2 - segOff })
     }
-  }
-
-  const prettifyJson = () => {
-    try {
-      const pretty = JSON.stringify(JSON.parse(content), null, 2)
-      pushHistoryNow(content)
-      setContent(pretty)
-      onUpdate({ content: pretty })
-      pushHistoryNow(pretty)
-    } catch {}
   }
 
   const enterCodeMode = () => {
@@ -900,6 +1365,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }
 
   const sharePublicNote = async () => {
+    if (!user) { onRequireAuth?.(); return }
     if (!onPublishNote || sharing) return
     setSharing(true)
     setShareState(null)
@@ -950,19 +1416,33 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
 
   const { codeHighlighted, codeLanguage } = useMemo(() => {
     if (!codeViewActive) return { codeHighlighted: '', codeLanguage: '' }
-    if (!codeContent.trim()) return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
+    if (!codeContent.trim()) return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
     try {
       const result = hljs.highlightAuto(codeContent, HINT_LANGS)
       return { codeHighlighted: result.value, codeLanguage: result.language ?? '' }
     } catch {
-      return { codeHighlighted: hljs.escapeHTML(codeContent), codeLanguage: '' }
+      return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
     }
   }, [codeContent, codeViewActive])
 
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
-    try { return marked.parse(content) } catch { return '' }
-  }, [content])
+    try {
+      const rendered = marked.parse(content)
+      let nextSectionIndex = 0
+      return rendered.replace(/<h([1-6])(\b[^>]*)>([\s\S]*?)<\/h\1>/gi, (match, level, attrs, inner) => {
+        const section = sections[nextSectionIndex]
+        if (!section || section.level !== Number(level)) return match
+        const nextAttrs = attrs?.includes('data-section-index=')
+          ? attrs
+          : `${attrs ?? ''} data-section-index="${nextSectionIndex}"`
+        nextSectionIndex += 1
+        return `<h${level}${nextAttrs}>${inner}</h${level}>`
+      })
+    } catch {
+      return ''
+    }
+  }, [content, sections])
 
   // Derived scope/term from the raw query (supports "in:code <term>" / "in:text <term>")
   const findParsed = useMemo(() => parseSearchScope(findQuery), [findQuery])
@@ -1014,8 +1494,6 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
     })
   }, [markdownHtml, findOpen, findParsed, findMode, findRegexError])
 
-  const sections = useMemo(() => parseSections(content), [content])
-
   const sectionMatches = useMemo(() => {
     if (!findOpen || !findResults.length) return []
     return matchesToSections(findResults, sections, content)
@@ -1034,6 +1512,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
   }, [content, sel.text])
 
   const jsonValid = isValidJson(content)
+  const selectedJsonValid = isValidJson(sel.text)
   const hasSelection = sel.text.length > 0
 
   // Score each transform against the selected text for contextual ordering
@@ -1060,25 +1539,47 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       if (id === 'toCamel')  return (/_[a-z]/.test(t) || /[-\s][a-z]/.test(t)) ? 5 : 0
       if (id === 'toPascal') return (/_[a-z]/.test(t) || /[a-z][A-Z]/.test(t) || /[-\s][a-zA-Z]/.test(t)) ? 4 : 0
       if (id === 'oneliner') return /\\\n/.test(t) ? 10 : 0
+      if (id === 'dategap')  return parseDates(t).length >= 2 ? 8 : 0
       return 0
     }
     return TRANSFORMS.map(tx => ({ ...tx, score: score(tx.id) }))
   }, [sel.text])
 
+  const dateFmtPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const date = detectSingleDate(sel.text)
+    return date ? getDateFormats(date) : null
+  }, [sel.text, hasSelection])
+
+  const tzPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const result = detectTimeWithZone(sel.text)
+    return result ? getTimeConversions(result.utcDate) : null
+  }, [sel.text, hasSelection])
+
+  const tsPopup = useMemo(() => {
+    if (!hasSelection) return null
+    const date = detectTimestamp(sel.text)
+    return date ? getTimestampFormats(date) : null
+  }, [sel.text, hasSelection])
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 overflow-hidden" onKeyDown={handlePanelKeyDown}>
+    <div ref={panelRef} className="flex flex-col flex-1 min-w-0 overflow-hidden relative" onKeyDown={handlePanelKeyDown}>
 
       {/* ── Main toolbar ── */}
       <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
         {jsonValid && (
           <button
-            onClick={prettifyJson}
-            title="Prettify JSON"
-            className="flex items-center gap-1 px-2 py-1 text-[11px] text-amber-400 hover:text-amber-300 bg-amber-950/40 hover:bg-amber-950/70 border border-amber-900/50 rounded transition-colors font-mono"
+            onClick={() => jsonSession ? setJsonSession(null) : openJsonViewer(false)}
+            title={jsonSession ? 'Close inline JSON editor' : 'Open inline JSON editor for the whole note'}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] border rounded transition-colors font-mono ${
+              jsonSession
+                ? 'text-amber-200 bg-amber-900/50 border-amber-700'
+                : 'text-amber-400 hover:text-amber-300 bg-amber-950/40 hover:bg-amber-950/70 border-amber-900/50'
+            }`}
           >
             <span className="text-[13px] leading-none">{'{}'}</span>
-            Prettify
+            {jsonSession ? 'Text' : 'JSON'}
           </button>
         )}
         <button
@@ -1108,6 +1609,22 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {mode === 'regex' ? 'Edit' : 'Regex'}
         </button>
         <button
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => switchMode('sqlite')}
+          title="Inspect linked SQLite database"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'sqlite'
+              ? 'text-fuchsia-300 bg-fuchsia-950/50 border-fuchsia-800'
+              : sqliteAssetRef
+                ? 'text-fuchsia-400 hover:text-fuchsia-200 bg-fuchsia-950/20 border-fuchsia-900 hover:border-fuchsia-700'
+                : 'text-zinc-800 bg-transparent border-zinc-900 cursor-not-allowed'
+          }`}
+          disabled={!sqliteAssetRef}
+        >
+          <span className="text-[12px]">DB</span>
+          {mode === 'sqlite' ? 'Edit' : 'SQLite'}
+        </button>
+        <button
           onMouseDown={captureSelForModeSwitch}
           onClick={() => switchMode('markdown')}
           title="Markdown preview"
@@ -1120,6 +1637,21 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           <span className="text-[12px]">MD</span>
           {mode === 'markdown' ? 'Edit' : 'Preview'}
         </button>
+        {openApiNote && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => switchMode('openapi')}
+            title="OpenAPI document viewer"
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              mode === 'openapi'
+                ? 'text-cyan-300 bg-cyan-950/50 border-cyan-800'
+                : 'text-cyan-400 hover:text-cyan-200 bg-cyan-950/20 border-cyan-900 hover:border-cyan-700'
+            }`}
+          >
+            <span className="text-[12px]">API</span>
+            {mode === 'openapi' ? 'Edit' : 'OpenAPI'}
+          </button>
+        )}
         <button
           onMouseDown={captureSelForModeSwitch}
           onClick={() => switchMode('http')}
@@ -1296,12 +1828,6 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           {shareState?.error && (
             <span className="text-[11px] text-red-400 font-mono">{shareState.error}</span>
           )}
-          {aiProcessing && (
-            <span className="text-[11px] text-blue-400 animate-pulse flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse inline-block" />
-              categorizing…
-            </span>
-          )}
           <button
             onClick={handleDelete}
             className={`text-xs transition-colors px-2 py-1 rounded ${
@@ -1338,14 +1864,20 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       {/* ── Transform strip ── */}
       {mode === 'edit' && !interactiveTx && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 flex flex-wrap gap-1">
-          {hasSelection ? (
+          {hasSelection && (
             <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">
               {sel.text.length}c
             </span>
-          ) : (
-            <span className="text-[10px] text-zinc-700 font-mono shrink-0 self-center mr-0.5">
-              select to transform
-            </span>
+          )}
+          {selectedJsonValid && (
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => openJsonViewer(true)}
+              title="Inspect selected JSON"
+              className="px-2 py-0.5 text-[11px] font-mono text-amber-300 hover:text-amber-100 border border-amber-800 hover:border-amber-600 rounded bg-amber-950/30 hover:bg-amber-950/50 transition-colors whitespace-nowrap shrink-0"
+            >
+              JSON view
+            </button>
           )}
 
           {/* All transforms stay visible; scores only affect emphasis. */}
@@ -1354,14 +1886,12 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               <button
                 key={t.id}
                 onMouseDown={e => e.preventDefault()}
-                onClick={() => hasSelection && (t.interactive ? startInteractive(t.id, t.title) : runTransform(t.id, t.title))}
-                title={hasSelection ? t.title : 'Select text first'}
+                onClick={() => t.interactive ? startInteractive(t.id, t.title) : runTransform(t.id, t.title)}
+                title={t.title}
                 className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
-                  !hasSelection
-                    ? 'text-zinc-700 border-zinc-800 cursor-default'
-                    : t.score > 0
-                      ? 'text-zinc-300 hover:text-zinc-100 border-zinc-600 hover:border-zinc-400 bg-zinc-800/80 hover:bg-zinc-700'
-                      : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600 bg-transparent hover:bg-zinc-800/40'
+                  hasSelection && t.score > 0
+                    ? 'text-zinc-300 hover:text-zinc-100 border-zinc-600 hover:border-zinc-400 bg-zinc-800/80 hover:bg-zinc-700'
+                    : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600 bg-transparent hover:bg-zinc-800/40'
                 }`}
               >
                 {t.label}
@@ -1405,6 +1935,68 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               A ✕
             </button>
           )}
+        </div>
+      )}
+
+      {/* ── Date format strip ── */}
+      {mode === 'edit' && !interactiveTx && dateFmtPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">date</span>
+          {dateFmtPopup.map(f => (
+            <button
+              key={f.label}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(f.value)}
+              title={f.label}
+              className="px-2 py-0.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 border border-zinc-700/60 hover:border-zinc-500 rounded bg-transparent hover:bg-zinc-800/60 transition-colors whitespace-nowrap shrink-0"
+            >
+              {f.value}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Timezone conversion strip ── */}
+      {mode === 'edit' && !interactiveTx && tzPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">tz</span>
+          {tzPopup.map(c => (
+            <button
+              key={c.abbr}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(c.value)}
+              title={c.label}
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                c.isUser
+                  ? 'text-amber-300 border-amber-700/60 bg-amber-950/20 hover:bg-amber-950/50 hover:text-amber-100'
+                  : 'text-zinc-400 hover:text-zinc-100 border-zinc-700/60 bg-transparent hover:bg-zinc-800/60 hover:border-zinc-500'
+              }`}
+            >
+              {c.value}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Timestamp conversion strip ── */}
+      {mode === 'edit' && !interactiveTx && tsPopup && (
+        <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">ts</span>
+          {tsPopup.map(f => (
+            <button
+              key={f.label}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(f.value)}
+              title={f.label}
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                f.label === 'relative'
+                  ? 'text-sky-400 border-sky-800/60 bg-sky-950/20 hover:bg-sky-950/40 hover:text-sky-200'
+                  : 'text-zinc-400 hover:text-zinc-100 border-zinc-700/60 bg-transparent hover:bg-zinc-800/60 hover:border-zinc-500'
+              }`}
+            >
+              {f.value}
+            </button>
+          ))}
         </div>
       )}
 
@@ -1454,6 +2046,47 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
         </div>
       )}
 
+      {mode === 'edit' && snippetSaveOpen && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0">
+            save snippet
+          </span>
+          <input
+            ref={snippetNameInputRef}
+            value={snippetDraftName}
+            onChange={e => setSnippetDraftName(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') saveSnippetSelection()
+              if (e.key === 'Escape') {
+                setSnippetSaveOpen(false)
+                requestAnimationFrame(() => textareaRef.current?.focus())
+              }
+            }}
+            placeholder="optional name"
+            spellCheck={false}
+            className="flex-1 bg-zinc-800 border border-zinc-700 focus:border-zinc-500 rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700"
+          />
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={saveSnippetSelection}
+            className="px-2 py-1 text-[11px] font-mono text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800 transition-colors"
+          >
+            save
+          </button>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => {
+              setSnippetSaveOpen(false)
+              requestAnimationFrame(() => textareaRef.current?.focus())
+            }}
+            className="text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
+            title="Cancel"
+          >
+            âœ•
+          </button>
+        </div>
+      )}
+
       {/* ── Interactive transform input (e.g. JSON path) ── */}
       {mode === 'edit' && interactiveTx && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
@@ -1490,7 +2123,7 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             <button
               key={i}
               onMouseDown={e => e.preventDefault()}
-              onClick={() => jumpToSection(section)}
+              onClick={() => handleSectionJump(section, i)}
               title={section.title}
               className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono text-zinc-700 hover:text-zinc-300 border border-zinc-800/80 hover:border-zinc-600 rounded bg-transparent hover:bg-zinc-800/40 transition-colors whitespace-nowrap shrink-0"
             >
@@ -1504,6 +2137,27 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       {/* ── Content area ── */}
       {mode === 'edit' && (
         <div className="flex flex-1 overflow-hidden">
+          {hasInlineImages && !jsonSession && !codeViewActive ? (
+            <InlineImageEditor
+              content={content}
+              attachmentMap={attachmentMap}
+              onChangeContent={handleInlineEditorChange}
+              onDeleteAttachment={handleDeleteAttachment}
+              showLineNumbers={showLineNumbers}
+              scrollRef={inlineScrollRef}
+              onActiveSegment={(el, offset) => {
+                textareaRef.current = el
+                inlineSegOffsetRef.current = offset
+              }}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onSelect={updateSel}
+              onMouseUp={updateSel}
+              onKeyUp={updateSel}
+              onClick={clearSelIfEmpty}
+            />
+          ) : (
+          <>
           {showLineNumbers && (
             <div
               ref={lineNumsRef}
@@ -1522,12 +2176,24 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
             </div>
           )}
           {!codeViewActive ? (
-            <div className="relative flex-1 min-w-0 overflow-hidden">
+            <div className="flex flex-1 min-w-0 overflow-hidden">
+              {jsonSession ? (
+                <div className="flex-1 min-w-0 overflow-auto p-4">
+                  <JsonBlockViewer
+                    rawJson={jsonSession.text}
+                    scopeLabel={jsonSession.scopeLabel}
+                    onChangeJson={applyJsonEdit}
+                    onClose={() => setJsonSession(null)}
+                  />
+                </div>
+              ) : (
+              <div className="relative flex-1 min-w-0 overflow-hidden">
               <textarea
                 ref={textareaRef}
-                value={content}
-                onChange={handleContent}
+                value={editorDisplayContent}
+                onChange={openApiNote ? undefined : handleContent}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onSelect={updateSel}
                 onMouseUp={updateSel}
                 onKeyUp={updateSel}
@@ -1536,7 +2202,8 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
                   if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
                   reportCurrentLocation(e.target)
                 }}
-                placeholder="Start typing…"
+                placeholder={openApiNote ? 'OpenAPI document JSON' : 'Start typing…'}
+                readOnly={openApiNote}
                 spellCheck={false}
                 className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
               />
@@ -1556,6 +2223,44 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
                     Enter accept · Esc cancel
                   </span>
                 </div>
+              )}
+              {snippetPicker && (
+                <div
+                  className="absolute z-20 w-80 max-w-[calc(100%-32px)]"
+                  style={{
+                    top: `${Math.max(16, snippetPicker.top + 24)}px`,
+                    left: `${Math.max(16, snippetPicker.left)}px`,
+                  }}
+                >
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/95 shadow-2xl shadow-black/40 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/80 flex items-center gap-2">
+                      <span className="text-[10px] text-zinc-600 font-mono">snippets</span>
+                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">!{snippetPicker.query}</span>
+                      {snippetSaved && <span className="ml-auto text-[10px] text-emerald-400 font-mono">saved</span>}
+                    </div>
+                    <div className="max-h-72 overflow-auto">
+                      {snippetResults.length ? snippetResults.map((snippet, index) => (
+                        <button
+                          key={snippet.id}
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => insertSnippet(snippet)}
+                          className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                            index === snippetActiveIndex ? 'bg-zinc-800/80' : 'bg-transparent hover:bg-zinc-900/80'
+                          }`}
+                        >
+                          <div className="text-[12px] text-zinc-200 font-mono truncate">{snippetLabel(snippet)}</div>
+                          <div className="text-[11px] text-zinc-500 note-content whitespace-pre-wrap line-clamp-2">
+                            {snippet.content}
+                          </div>
+                        </button>
+                      )) : (
+                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no snippets</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              </div>
               )}
             </div>
           ) : (
@@ -1579,15 +2284,108 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
               />
             </div>
           )}
+        </>
+        )}
         </div>
       )}
+
+      {/* ── Paste error ── */}
+      {pasteError && (
+        <div className="shrink-0 px-4 py-1.5 text-[11px] font-mono text-red-400 bg-red-950/30 border-t border-red-900/40">
+          {pasteError}
+        </div>
+      )}
+
       {mode === 'markdown' && (
-        <div className="flex-1 overflow-auto p-5">
+        <div ref={markdownPreviewRef} tabIndex={-1} className="flex-1 overflow-auto p-5 outline-none">
           {displayMarkdownHtml ? (
             <div className="md-prose max-w-none" dangerouslySetInnerHTML={{ __html: displayMarkdownHtml }} />
           ) : (
             <span className="text-zinc-700 note-content text-sm">empty</span>
           )}
+        </div>
+      )}
+      {mode === 'sqlite' && (
+        sqliteAssetRef ? (
+          <SQLiteViewer assetId={sqliteAssetRef.assetId} />
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-[12px] font-mono text-zinc-600">
+            No SQLite asset is linked to this note.
+          </div>
+        )
+      )}
+      {mode === 'openapi' && (
+        <OpenApiViewer
+          note={note}
+          onCopyRequestToNewNote={(requestText) => onCreateNoteFromContent?.(requestText)}
+        />
+      )}
+      {outlineOpen && (
+        <div className="absolute inset-0 z-40 bg-black/45 backdrop-blur-[1px] flex items-start justify-center px-4 py-10">
+          <div className="w-full max-w-2xl max-h-[70vh] overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950/98 shadow-2xl shadow-black/50">
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800">
+              <div className="min-w-0">
+                <div className="text-[11px] font-mono text-zinc-400">document outline</div>
+                <div className="text-[10px] font-mono text-zinc-600">shift+wheel moves · enter jumps · esc closes</div>
+              </div>
+              <div className="ml-auto text-[10px] font-mono text-zinc-600">{filteredSections.length}/{sections.length}</div>
+            </div>
+            <div className="px-4 py-3 border-b border-zinc-900">
+              <input
+                ref={outlineInputRef}
+                value={outlineQuery}
+                onChange={e => { setOutlineQuery(e.target.value); setOutlineIndex(0) }}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    closeOutline()
+                    return
+                  }
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setOutlineIndex(idx => Math.min(idx + 1, Math.max(filteredSections.length - 1, 0)))
+                    return
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setOutlineIndex(idx => Math.max(idx - 1, 0))
+                    return
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    commitOutlineSelection()
+                  }
+                }}
+                placeholder="Filter headings..."
+                spellCheck={false}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-600 focus:border-zinc-500"
+              />
+            </div>
+            <div ref={outlineListRef} className="max-h-[52vh] overflow-auto px-2 py-2">
+              {filteredSections.length ? filteredSections.map((section, index) => (
+                <button
+                  key={`${section.startLine}-${section.title}`}
+                  data-outline-index={index}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => commitOutlineSelection(index)}
+                  className={`w-full text-left rounded-lg px-3 py-2 transition-colors ${
+                    index === outlineIndex
+                      ? 'bg-blue-950/50 border border-blue-800/80'
+                      : 'border border-transparent hover:bg-zinc-900/80'
+                  }`}
+                  style={{ paddingLeft: `${12 + section.level * 14}px` }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-[10px] font-mono text-zinc-600 shrink-0">{'#'.repeat(section.level)}</span>
+                    <span className="min-w-0 truncate text-sm text-zinc-200 note-content">{section.title}</span>
+                    <span className="ml-auto shrink-0 text-[10px] font-mono text-zinc-600">L{section.startLine + 1}</span>
+                  </div>
+                </button>
+              )) : (
+                <div className="px-3 py-6 text-center text-[11px] font-mono text-zinc-500">no matching headings</div>
+              )}
+            </div>
+          </div>
         </div>
       )}
       {mode === 'table' && tableSession && (
@@ -1623,6 +2421,11 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
           key={`${note.id}-${httpInstance}`}
           noteContent={content}
           initialText={capturedHttpSelRef.current}
+          onCopyRequestToNewNote={(request) => onCreateNoteFromContent?.(
+            `${request.method} ${request.url}${Object.keys(request.headers ?? {}).length ? '\n' : ''}${
+              Object.entries(request.headers ?? {}).map(([key, value]) => `${key}: ${value}`).join('\n')
+            }${request.body ? `\n\n${request.body}` : ''}`
+          )}
         />
       )}
       {mode === 'diff' && (
@@ -1731,10 +2534,10 @@ export default function NotePanel({ note, aiProcessing, aiEnabled, onUpdate, onD
       {/* ── Footer ── */}
       {mode !== 'regex' && mode !== 'http' && mode !== 'diff' && mode !== 'table' && mode !== 'cron' && mode !== 'diagram' && (
         <div className="px-4 py-2 border-t border-zinc-800 flex items-center gap-1.5 flex-wrap shrink-0 min-h-[36px]">
-          {note.categories.length > 0
-            ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
-            : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'AI will tag when you stop typing…' : 'Add OpenAI key in ⚙ for auto-tagging'}</span>
-          }
+            {note.categories.length > 0
+              ? note.categories.map(c => <CategoryBadge key={c} category={c} />)
+              : <span className="text-[11px] text-zinc-700">{aiEnabled ? 'Server AI search is enabled for this account' : 'Sign in to use server AI features'}</span>
+            }
           <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-700 shrink-0">
             {codeViewActive && <span className="text-blue-600 font-mono">Esc to exit code view</span>}
             {codeViewActive && codeLanguage && <span className="text-zinc-500 font-mono">{codeLanguage}</span>}
