@@ -34,6 +34,21 @@ export function createSnippetDraft({ content, name = '', sourceNoteId = null }) 
   }
 }
 
+export function createImportedDocxNote(fileName, text) {
+  const now = Date.now()
+  return {
+    id: generateId(),
+    content: `${fileName}\n${text}`,
+    categories: [],
+    embedding: null,
+    isPublic: false,
+    noteType: NOTE_TYPE_TEXT,
+    noteData: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 export function createImportedTextNote(fileName, text) {
   const now = Date.now()
 

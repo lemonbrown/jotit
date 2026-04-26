@@ -134,22 +134,55 @@ function AppShell({ user, logout }) {
     clearSearch()
   }, [addNote, clearSearch, recordLocation, showSinglePaneForNote])
 
+  const openFileAsNote = useCallback((fileName, content) => {
+    const existing = notesRef.current.find(n => n.content.startsWith(fileName + '\n'))
+    if (existing) {
+      showSinglePaneForNote(existing.id)
+      recordLocation({ noteId: existing.id }, { replaceCurrent: false })
+      clearSearch()
+    } else {
+      createNoteFromContent(content)
+    }
+  }, [clearSearch, createNoteFromContent, notesRef, recordLocation, showSinglePaneForNote])
+
   useEffect(() => {
     if (!dbReady || createFromUrlHandledRef.current) return
+    createFromUrlHandledRef.current = true
 
     const params = new URLSearchParams(window.location.search)
-    if (params.get('new') !== '1') {
-      createFromUrlHandledRef.current = true
+    const jotParam = params.get('jot')
+
+    if (jotParam) {
+      try {
+        const b64 = jotParam.replace(/-/g, '+').replace(/_/g, '/')
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0))
+        const content = new TextDecoder('utf-8').decode(bytes)
+        const fileName = content.split('\n')[0] ?? ''
+        openFileAsNote(fileName, content)
+      } catch {}
+      params.delete('jot')
+    } else if (params.get('new') === '1') {
+      createNote()
+      params.delete('new')
+    } else {
       return
     }
 
-    createFromUrlHandledRef.current = true
-    createNote()
-    params.delete('new')
     const nextQuery = params.toString()
-    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`
-    window.history.replaceState({}, '', nextUrl)
-  }, [createNote, dbReady])
+    window.history.replaceState({}, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`)
+  }, [createNote, dbReady, openFileAsNote])
+
+  useEffect(() => {
+    if (!dbReady) return
+    const es = new EventSource('/api/events')
+    es.onmessage = (e) => {
+      try {
+        const { type, fileName, content } = JSON.parse(e.data)
+        if (type === 'open-file' && fileName && content) openFileAsNote(fileName, content)
+      } catch {}
+    }
+    return () => es.close()
+  }, [dbReady, openFileAsNote])
 
   const handleSeedDeveloperNotes = useCallback(() => {
     const seeded = seedNotes(createDeveloperSeedNotes())

@@ -9,6 +9,7 @@ import { registerPublicSharing } from './server/publicSharing.js'
 import { registerProxyRoute } from './server/proxy.js'
 import { createSyncPool, registerSyncRoutes } from './server/sync.js'
 import { registerSearchRoutes } from './server/search.js'
+import { registerOpenFileRoutes } from './server/openFile.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -37,6 +38,7 @@ registerPublicSharing(app, {
 })
 registerSyncRoutes(app, { aiService, pgPool, requireAuth })
 registerSearchRoutes(app, { aiService, pgPool, requireAuth })
+registerOpenFileRoutes(app)
 registerProxyRoute(app)
 registerSpaFallback(app, { distIndexFile: join(DIST_DIR, 'index.html') })
 

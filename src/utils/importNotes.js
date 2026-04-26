@@ -1,5 +1,6 @@
 import { csvToNotes } from './csv.js'
-import { createImportedOpenApiNote, createImportedTextNote } from './noteFactories.js'
+import { isDocxFile, parseDocxToText } from './docx.js'
+import { createImportedDocxNote, createImportedOpenApiNote, createImportedTextNote } from './noteFactories.js'
 import { looksLikeOpenApiJsonFile, parseOpenApiJson } from './openapi/parse.js'
 import { createSQLiteAssetFromFile, isSQLiteFileName } from './sqliteAssets.js'
 import { createImportedSQLiteNote } from './sqliteNote.js'
@@ -13,11 +14,14 @@ export async function importFiles(files, maxFileSize, deps = {}) {
   const {
     createTextNote = createImportedTextNote,
     createOpenApiNote = createImportedOpenApiNote,
+    createDocxNote = createImportedDocxNote,
     createSqliteAsset = createSQLiteAssetFromFile,
     createSqliteNote = createImportedSQLiteNote,
     categorizeText = () => [],
     csvToNotesImpl = csvToNotes,
     isSQLiteName = isSQLiteFileName,
+    isDocxName = isDocxFile,
+    parseDocx = parseDocxToText,
     makeId = generateId,
     upsertNote = () => {},
   } = deps
@@ -31,6 +35,17 @@ export async function importFiles(files, maxFileSize, deps = {}) {
       const note = createSqliteNote(file.name, assetId)
       upsertNote(note)
       return [note]
+    }
+
+    if (isDocxName(file.name)) {
+      try {
+        const text = await parseDocx(file)
+        const note = createDocxNote(file.name, text)
+        upsertNote(note)
+        return [note]
+      } catch {
+        return []
+      }
     }
 
     let text

@@ -34,10 +34,6 @@ export default function Settings({
     document.documentElement.dataset.theme = id
   }
 
-  useEffect(() => {
-    loadSharedLinks()
-  }, [])
-
   const handleSave = () => {
     onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), bucketName: bucketName.trim(), theme })
   }
@@ -120,7 +116,7 @@ export default function Settings({
               <div>
                 <label className="block text-xs font-medium text-zinc-400">Route HTTP requests via local agent</label>
                 <p className="text-[11px] text-zinc-600 mt-0.5">
-                  Uses <code className="font-mono">jotit-agent</code> on <code className="font-mono">127.0.0.1:3210</code> for localhost/private-network/dev targets.
+                  Uses <code className="font-mono">jot serve</code> on <code className="font-mono">127.0.0.1:3210</code> for localhost/private-network/dev targets.
                 </p>
                 <p className={`text-[11px] mt-1 ${localAgentStatus.available ? 'text-emerald-400' : 'text-zinc-600'}`}>
                   {localAgentStatus.checking ? 'Checking local agent...' : localAgentStatus.available ? 'Local agent connected' : 'Local agent not detected'}
@@ -145,7 +141,7 @@ export default function Settings({
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
               />
               <p className="text-[11px] text-zinc-600 mt-1.5">
-                Start the side app with <code className="font-mono">node agent/bin/jotit-agent.js</code>, copy the token shown in terminal, and paste it here.
+                Run <code className="font-mono">jot serve</code> to start the agent, copy the token shown in terminal, and paste it here.
               </p>
             </div>
           </div>
@@ -188,77 +184,6 @@ export default function Settings({
             {publishResult?.error && (
               <p className="text-[11px] text-red-400">{publishResult.error}</p>
             )}
-          </div>
-
-          <div className="pt-1 border-t border-zinc-800 space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <label className="block text-xs font-medium text-zinc-400">Shared Links</label>
-                <p className="text-[11px] text-zinc-600 mt-0.5">Every individually published note link across this workspace.</p>
-              </div>
-              <button
-                onClick={loadSharedLinks}
-                disabled={loadingSharedLinks}
-                className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors disabled:opacity-50"
-              >
-                {loadingSharedLinks ? 'Refreshing...' : 'Refresh'}
-              </button>
-            </div>
-            <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
-              {loadingSharedLinks && !sharedLinks.length ? (
-                <div className="px-3 py-4 text-[11px] font-mono text-zinc-500">Loading shared links...</div>
-              ) : sharedLinks.length ? (
-                <div className="divide-y divide-zinc-800">
-                  {sharedLinks.map(link => {
-                    const absoluteUrl = `${window.location.origin}${link.url}`
-                    return (
-                      <div key={link.slug} className="px-3 py-3 space-y-2">
-                        <div className="flex items-start gap-3">
-                          <div className="min-w-0 flex-1">
-                            <div className="text-sm text-zinc-200 truncate">{link.title}</div>
-                            <div className="text-[11px] text-zinc-500 font-mono truncate">{link.url}</div>
-                          </div>
-                          <button
-                            onClick={() => handleRemoveSharedLink(link.slug)}
-                            disabled={removingSlug === link.slug}
-                            className="px-2.5 py-1.5 text-[11px] bg-red-950 hover:bg-red-900 border border-red-900 text-red-200 rounded-md transition-colors disabled:opacity-50"
-                          >
-                            {removingSlug === link.slug ? 'Removing...' : 'Remove'}
-                          </button>
-                        </div>
-                        <div className="text-[11px] text-zinc-600 line-clamp-2">{link.preview || 'No preview'}</div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[10px] text-zinc-600 font-mono">note {link.noteId}</span>
-                          {link.viewMode && <span className="text-[10px] text-zinc-600 font-mono">{link.viewMode}</span>}
-                          {link.publishedAt > 0 && (
-                            <span className="text-[10px] text-zinc-600 font-mono">
-                              {new Date(link.publishedAt).toLocaleString()}
-                            </span>
-                          )}
-                          <button
-                            onClick={() => navigator.clipboard.writeText(absoluteUrl)}
-                            className="ml-auto px-2 py-1 text-[10px] bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 rounded transition-colors"
-                          >
-                            Copy
-                          </button>
-                          <a
-                            href={link.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-2 py-1 text-[10px] bg-blue-950/60 hover:bg-blue-900/70 border border-blue-900 text-blue-200 rounded transition-colors"
-                          >
-                            Open
-                          </a>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="px-3 py-4 text-[11px] font-mono text-zinc-500">No shared note links yet.</div>
-              )}
-            </div>
-            {sharedLinksError && <p className="text-[11px] text-red-400">{sharedLinksError}</p>}
           </div>
 
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">

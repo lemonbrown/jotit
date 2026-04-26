@@ -4,13 +4,13 @@
   "private": true,
   "type": "module",
   "bin": {
-    "jotit-agent": "./bin/jotit-agent.js"
+    "jot": "./bin/jot.js"
   },
   "files": [
     "bin",
     "src"
   ],
   "scripts": {
-    "start": "node ./bin/jotit-agent.js"
+    "start": "node ./bin/jot.js serve"
   }
 }
