@@ -121,7 +121,7 @@ export default function NoteGrid({
 
   if (!notes.length) {
     return (
-      <div className="w-[420px] shrink-0 flex items-center justify-center border-r border-zinc-800 text-zinc-600 text-sm">
+      <div className="w-full h-[34vh] md:h-auto md:w-[420px] shrink-0 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 text-zinc-600 text-sm">
         {searchQuery ? 'No results' : 'No notes yet'}
       </div>
     )
@@ -132,11 +132,11 @@ export default function NoteGrid({
       ref={containerRef}
       onMouseLeave={() => onPeekOpenChange?.(false)}
       className={[
-        'overflow-y-auto overflow-x-hidden border-r border-zinc-800 p-2 bg-zinc-950',
+        'overflow-y-auto overflow-x-hidden border-b md:border-b-0 md:border-r border-zinc-800 p-2 bg-zinc-950',
         'transition-[width,box-shadow,border-color] duration-150 ease-out',
         isPeekOpen
           ? 'absolute inset-0 z-30 w-full border-blue-900/70 shadow-2xl shadow-black/70'
-          : 'relative w-[420px] shrink-0',
+          : 'relative w-full h-[38vh] md:h-auto md:w-[420px] shrink-0',
       ].join(' ')}
       style={{ cursor: 'default' }}
     >

@@ -505,7 +505,7 @@ function AppShell({ user, logout }) {
 
   return (
     <div
-      className="h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden relative"
+      className="h-[100dvh] bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden relative"
       onDragEnter={e => {
         if (draggedNoteId) return
         handleDragEnter(e)
@@ -534,18 +534,18 @@ function AppShell({ user, logout }) {
         </div>
       )}
       {!simpleEditorMode && (
-      <header className="relative z-50 flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur shrink-0">
-        <div className="flex items-center gap-2 shrink-0">
+      <header className="relative z-50 flex flex-wrap items-center gap-2 md:gap-3 px-3 md:px-4 py-2 md:py-2.5 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur shrink-0">
+        <div className="flex items-center gap-2 shrink-0 min-w-0">
           <span className="text-base font-bold tracking-tight text-zinc-100">jot.it</span>
           <span className="text-[11px] text-zinc-600 font-mono tabular-nums">{collectionNotes.length}</span>
         </div>
 
-        <div className="relative flex items-center gap-1 shrink-0">
+        <div className="relative flex items-center gap-1 shrink min-w-0">
           <select
             value={activeCollectionId ?? ''}
             onChange={e => handleSelectCollection(e.target.value)}
             title="Collection"
-            className="h-7 max-w-[180px] bg-zinc-950 border border-zinc-800 text-zinc-300 text-xs rounded-md px-2 outline-none focus:border-blue-700"
+            className="h-7 max-w-[42vw] md:max-w-[180px] bg-zinc-950 border border-zinc-800 text-zinc-300 text-xs rounded-md px-2 outline-none focus:border-blue-700"
           >
             {collections.length > 1 && <option value={ALL_COLLECTION_ID}>All notes</option>}
             {collections.map(collection => (
@@ -582,11 +582,11 @@ function AppShell({ user, logout }) {
           </button>
         </div>
 
-        <div className="flex-1 max-w-sm">
+        <div className="order-3 w-full md:order-none md:flex-1 md:max-w-sm">
           <SearchBar value={searchInput} onChange={handleSearch} isSearching={isSearching} aiEnabled={aiEnabled} inputRef={searchRef} searchMode={searchMode} onToggleMode={toggleSearchMode} />
         </div>
 
-        <div className="flex items-center gap-2 ml-auto shrink-0">
+        <div className="flex items-center gap-1.5 md:gap-2 ml-auto shrink-0 min-w-0">
           {searchResults !== null && (
             <span className="text-[11px] text-zinc-500">
               {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
@@ -594,7 +594,7 @@ function AppShell({ user, logout }) {
           )}
           <div className={`flex items-center gap-1 text-[11px] ${aiEnabled ? 'text-green-500' : 'text-zinc-700'}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${aiEnabled ? 'bg-green-500' : 'bg-zinc-700'}`} />
-            <span>AI</span>
+            <span className="hidden sm:inline">AI</span>
           </div>
           <div className="flex items-center gap-0.5">
             <button
@@ -661,7 +661,7 @@ function AppShell({ user, logout }) {
             title="New note (Alt+N)"
             className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-md transition-colors"
           >
-            + New
+            <span className="sm:hidden">+</span><span className="hidden sm:inline">+ New</span>
           </button>
           {activeNoteId && collections.length > 1 && (
             <select
@@ -671,7 +671,7 @@ function AppShell({ user, logout }) {
                 e.target.value = ''
               }}
               title="Move current note to collection"
-              className="h-7 max-w-[130px] bg-zinc-950 border border-zinc-800 text-zinc-400 text-xs rounded-md px-2 outline-none focus:border-blue-700"
+              className="hidden sm:block h-7 max-w-[130px] bg-zinc-950 border border-zinc-800 text-zinc-400 text-xs rounded-md px-2 outline-none focus:border-blue-700"
             >
               <option value="" disabled>Move to...</option>
               {collections
@@ -684,14 +684,14 @@ function AppShell({ user, logout }) {
           <button
             onClick={() => setShowSnippets(true)}
             title="Manage snippets"
-            className="px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+            className="hidden sm:inline-flex px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
           >
             Snippets
           </button>
           <button
             onClick={() => setShowSharedLinks(true)}
             title="Manage shared links"
-            className="px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+            className="hidden sm:inline-flex px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
           >
             Links
           </button>
@@ -741,8 +741,8 @@ function AppShell({ user, logout }) {
 
       {draggedNoteId && collections.length > 1 && (
         <div
-          className="fixed top-16 z-[100] w-[360px] rounded-md border border-blue-800/70 bg-zinc-950 shadow-2xl shadow-black/70 p-2"
-          style={{ left: shouldShowNotesPane ? 432 : 16 }}
+          className="fixed left-3 right-3 top-24 md:top-16 md:right-auto md:w-[360px] z-[100] rounded-md border border-blue-800/70 bg-zinc-950 shadow-2xl shadow-black/70 p-2"
+          style={{ left: shouldShowNotesPane ? 'clamp(12px, 432px, calc(100vw - 372px))' : 16 }}
           onDragEnter={handleCollectionDragOver}
           onDragOver={handleCollectionDragOver}
           onDrop={(e) => {
@@ -805,7 +805,7 @@ function AppShell({ user, logout }) {
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex flex-col md:flex-row flex-1 overflow-hidden relative">
         {shouldShowNotesPane && (
           <NoteGrid
             notes={displayedNotes}
@@ -834,7 +834,7 @@ function AppShell({ user, logout }) {
           />
         )}
         {openPanes.length ? (
-          <div className="flex flex-1 min-w-0 overflow-x-auto overflow-y-hidden">
+          <div className="flex flex-col md:flex-row flex-1 min-w-0 overflow-y-auto md:overflow-y-hidden md:overflow-x-auto">
             {openPanes.map(({ id: paneId, note }, index) => (
               <div
                 key={paneId}
@@ -843,7 +843,7 @@ function AppShell({ user, logout }) {
                   setActiveNoteId(note.id)
                 }}
                 className={[
-                  'flex flex-col min-w-[520px] flex-1 border-r border-zinc-800 last:border-r-0',
+                  'flex flex-col min-w-0 w-full md:min-w-[520px] flex-1 border-b md:border-b-0 md:border-r border-zinc-800 last:border-r-0',
                   activePaneId === paneId ? 'bg-zinc-950' : 'bg-zinc-950/80',
                 ].join(' ')}
               >
