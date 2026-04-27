@@ -23,8 +23,11 @@ export async function importFiles(files, maxFileSize, deps = {}) {
     isDocxName = isDocxFile,
     parseDocx = parseDocxToText,
     makeId = generateId,
+    collectionId = null,
     upsertNote = () => {},
   } = deps
+
+  const withCollection = note => collectionId ? { ...note, collectionId } : note
 
   const results = await Promise.all(files.map(async (file) => {
     if (file.size > maxFileSize) return []
@@ -32,7 +35,7 @@ export async function importFiles(files, maxFileSize, deps = {}) {
     if (isSQLiteName(file.name)) {
       const assetId = makeId()
       await createSqliteAsset(file, assetId)
-      const note = createSqliteNote(file.name, assetId)
+      const note = withCollection(createSqliteNote(file.name, assetId))
       upsertNote(note)
       return [note]
     }
@@ -40,7 +43,7 @@ export async function importFiles(files, maxFileSize, deps = {}) {
     if (isDocxName(file.name)) {
       try {
         const text = await parseDocx(file)
-        const note = createDocxNote(file.name, text)
+        const note = withCollection(createDocxNote(file.name, text))
         upsertNote(note)
         return [note]
       } catch {
@@ -60,7 +63,7 @@ export async function importFiles(files, maxFileSize, deps = {}) {
     if (looksLikeOpenApiJsonFile(file.name, text)) {
       try {
         const document = parseOpenApiJson(text)
-        const note = createOpenApiNote(file.name, document)
+        const note = withCollection(createOpenApiNote(file.name, document))
         upsertNote(note)
         return [note]
       } catch {
@@ -71,6 +74,7 @@ export async function importFiles(files, maxFileSize, deps = {}) {
     if (file.name.toLowerCase().endsWith('.csv')) {
       const notes = csvToNotesImpl(text).map(note => ({
         ...note,
+        collectionId: collectionId ?? note.collectionId ?? null,
         categories: note.categories.length ? note.categories : categorizeText(note.content),
       }))
 
@@ -78,7 +82,7 @@ export async function importFiles(files, maxFileSize, deps = {}) {
       return notes
     }
 
-    const note = createTextNote(file.name, text)
+    const note = withCollection(createTextNote(file.name, text))
     upsertNote(note)
     return [note]
   }))
@@ -86,11 +90,12 @@ export async function importFiles(files, maxFileSize, deps = {}) {
   return results.flat()
 }
 
-export async function importDroppedFiles(files, maxFileSize) {
+export async function importDroppedFiles(files, maxFileSize, { collectionId = null } = {}) {
   const { upsertNoteSync } = await import('./db.js')
   const { categorizeByPatterns } = await import('./patternCategories.js')
   return importFiles(files, maxFileSize, {
     upsertNote: upsertNoteSync,
     categorizeText: categorizeByPatterns,
+    collectionId,
   })
 }

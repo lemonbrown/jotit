@@ -58,7 +58,7 @@ async function testSyncPushPersistsNonDeletedNotes() {
   await runHandlers(handlers, req, res)
 
   assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.jsonBody, { ok: true, pushed: 1 })
+  assert.deepEqual(res.jsonBody, { ok: true, pushed: 1, collectionsPushed: 0 })
   assert.ok(queries.some(entry => /INSERT INTO notes/.test(entry.sql)))
   assert.ok(queries.some(entry => /INSERT INTO note_chunks/.test(entry.sql)))
   assert.ok(queries.some(entry => /INSERT INTO search_metadata/.test(entry.sql)))
@@ -81,6 +81,7 @@ async function testSyncPullReturnsRowsAndServerTime() {
 
   assert.equal(res.statusCode, 200)
   assert.deepEqual(res.jsonBody.notes, [{ id: 'note-1' }])
+  assert.deepEqual(res.jsonBody.collections, [{ id: 'note-1' }])
   assert.equal(typeof res.jsonBody.serverTime, 'number')
 }
 
@@ -109,9 +110,53 @@ async function testSyncPushDeletedNoteClearsArtifacts() {
   assert.ok(sqls.some(s => s.startsWith('DELETE FROM search_metadata')), 'should delete metadata')
 }
 
+async function testSyncPushPersistsCollectionsAndNoteCollectionId() {
+  const queries = []
+  const pgPool = {
+    async query(sql, params) {
+      queries.push({ sql, params })
+      return { rows: [] }
+    },
+  }
+  const app = createMockApp()
+  registerSyncRoutes(app, { aiService: aiDisabled(), pgPool, requireAuth: allowAuth })
+
+  const handlers = app.routes.post.get('/api/sync/push')
+  const req = {
+    body: {
+      collections: [{
+        id: 'collection-1',
+        name: 'Projects',
+        description: '',
+        created_at: 1,
+        updated_at: 2,
+        is_default: 0,
+      }],
+      notes: [{
+        id: 'note-1',
+        collection_id: 'collection-1',
+        content: 'hello',
+        categories: '[]',
+        created_at: 1,
+        updated_at: 2,
+        is_public: false,
+      }],
+    },
+  }
+  const res = createMockResponse()
+  await runHandlers(handlers, req, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(res.jsonBody, { ok: true, pushed: 1, collectionsPushed: 1 })
+  assert.ok(queries.some(entry => /INSERT INTO collections/.test(entry.sql)))
+  const noteInsert = queries.find(entry => /INSERT INTO notes/.test(entry.sql) && entry.params?.includes('collection-1'))
+  assert.ok(noteInsert, 'should persist note collection id')
+}
+
 export default [
   ['sync push rejects when sync is not configured', testSyncPushRejectsWhenNotConfigured],
   ['sync push persists non-deleted notes', testSyncPushPersistsNonDeletedNotes],
+  ['sync push persists collections and note collection id', testSyncPushPersistsCollectionsAndNoteCollectionId],
   ['sync push deleted note clears artifacts', testSyncPushDeletedNoteClearsArtifacts],
   ['sync pull returns rows and server time', testSyncPullReturnsRowsAndServerTime],
 ]

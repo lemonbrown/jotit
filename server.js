@@ -36,7 +36,7 @@ registerPublicSharing(app, {
   publicNotesFile: PUBLIC_NOTES_FILE,
   pgPool,
 })
-registerSyncRoutes(app, { aiService, pgPool, requireAuth })
+registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb })
 registerSearchRoutes(app, { aiService, pgPool, requireAuth })
 registerOpenFileRoutes(app)
 registerProxyRoute(app)

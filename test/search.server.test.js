@@ -266,6 +266,30 @@ async function testServerSearchQueriesStayUserScoped() {
   assert.ok(seenUserIds.every(id => id === 42))
 }
 
+async function testServerSearchFiltersByCollectionId() {
+  const seen = []
+  const pgPool = {
+    async query(sql, params) {
+      seen.push({ sql, params })
+      if (sql.includes('DISTINCT n.id')) return { rows: [] }
+      return { rows: [] }
+    },
+  }
+
+  const app = createMockApp()
+  registerSearchRoutes(app, { aiService: createAiService(''), pgPool, requireAuth: allowAuth })
+
+  const handlers = app.routes.get.get('/api/search')
+  const res = createMockResponse()
+  await runHandlers(handlers, { query: { q: 'azure token', collectionId: 'collection-1' } }, res)
+
+  assert.equal(res.statusCode, 200)
+  const candidateQuery = seen.find(entry => entry.sql.includes('DISTINCT n.id'))
+  assert.ok(candidateQuery)
+  assert.equal(candidateQuery.params[2], 'collection-1')
+  assert.ok(candidateQuery.sql.includes('n.collection_id = $3'))
+}
+
 async function testAiReindexRebuildsOnlyCurrentUserNotes() {
   const app = createMockApp()
   const queries = []
@@ -308,5 +332,6 @@ export default [
   ['ai status reports configured availability', testAiStatusRequiresConfiguredServerKey],
   ['search requires auth', testSearchRequiresAuth],
   ['server search queries stay user scoped', testServerSearchQueriesStayUserScoped],
+  ['server search filters by collection id', testServerSearchFiltersByCollectionId],
   ['ai reindex rebuilds only current user notes', testAiReindexRebuildsOnlyCurrentUserNotes],
 ]

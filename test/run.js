@@ -6,8 +6,9 @@ import attachmentTests from './attachments.test.js'
 import publicSharingTests from './public-sharing.test.js'
 import sqliteWorkspaceTests from './sqlite-workspace.test.js'
 import openApiTests from './openapi.test.js'
+import collectionTests from './collections.test.js'
 
-const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests]
+const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests]
 
 let failures = 0
 

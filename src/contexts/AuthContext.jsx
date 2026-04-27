@@ -1,8 +1,48 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import {
+  generateAndStoreKeyPair,
+  exportPublicKeyJwk,
+  wrapPrivateKey,
+  getStoredKeyPair,
+  importPublicKeyJwk,
+  storeKeys,
+  unwrapPrivateKey,
+  clearStoredKeyPair,
+} from '../utils/e2eEncryption'
 
 const AuthContext = createContext(null)
 
 const TOKEN_KEY = 'jotit_auth_token'
+
+async function setupE2EKeysAfterRegister(token, password) {
+  try {
+    const keyPair = await generateAndStoreKeyPair()
+    const publicKeyJwk = await exportPublicKeyJwk(keyPair.publicKey)
+    const encryptedPrivateKey = await wrapPrivateKey(keyPair.privateKey, password)
+    await fetch('/api/auth/public-key', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ publicKey: publicKeyJwk, encryptedPrivateKey }),
+    })
+  } catch (e) {
+    console.warn('[jot.it] E2E key setup failed:', e)
+  }
+}
+
+async function restoreE2EKeysAfterLogin(user, password) {
+  try {
+    const existing = await getStoredKeyPair()
+    if (existing) return  // Already have keys on this device
+
+    if (user.encryptedPrivateKey && user.publicKey) {
+      const privateKey = await unwrapPrivateKey(user.encryptedPrivateKey, password)
+      const publicKey = await importPublicKeyJwk(user.publicKey)
+      await storeKeys(privateKey, publicKey)
+    }
+  } catch (e) {
+    console.warn('[jot.it] E2E key restore failed:', e)
+  }
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
@@ -24,10 +64,11 @@ export function AuthProvider({ children }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     })
-    const data = await res.json()
+    const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data.error ?? 'Registration failed')
     localStorage.setItem(TOKEN_KEY, data.token)
     setUser(data.user)
+    await setupE2EKeysAfterRegister(data.token, password)
   }, [])
 
   const login = useCallback(async (email, password) => {
@@ -36,15 +77,17 @@ export function AuthProvider({ children }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error ?? 'Login failed')
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error ?? `Login failed (${res.status})`)
     localStorage.setItem(TOKEN_KEY, data.token)
     setUser(data.user)
+    await restoreE2EKeysAfterLogin(data.user, password)
   }, [])
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY)
     setUser(null)
+    clearStoredKeyPair().catch(() => {})
   }, [])
 
   return (

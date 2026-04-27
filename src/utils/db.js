@@ -1,5 +1,6 @@
 import * as sqlJsModule from 'sql.js'
 import sqlWasm from 'sql.js/dist/sql-wasm.wasm?url'
+import { createDefaultCollectionDraft, DEFAULT_COLLECTION_NAME, LEGACY_DEFAULT_COLLECTION_NAME } from './collectionFactories.js'
 
 const initSqlJs = sqlJsModule.default ?? sqlJsModule
 
@@ -48,15 +49,17 @@ async function saveBytes(data) {
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS notes (
-    id          TEXT PRIMARY KEY,
-    content     TEXT    NOT NULL DEFAULT '',
-    categories  TEXT    NOT NULL DEFAULT '[]',
-    embedding   TEXT,
-    note_type   TEXT    NOT NULL DEFAULT 'text',
-    note_data   TEXT,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    is_public   INTEGER NOT NULL DEFAULT 0
+    id               TEXT PRIMARY KEY,
+    collection_id    TEXT,
+    content          TEXT    NOT NULL DEFAULT '',
+    categories       TEXT    NOT NULL DEFAULT '[]',
+    embedding        TEXT,
+    note_type        TEXT    NOT NULL DEFAULT 'text',
+    note_data        TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    is_public        INTEGER NOT NULL DEFAULT 0,
+    encryption_tier  INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS snippets (
@@ -95,6 +98,17 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_note_entities_note_id ON note_entities(note_id);
   CREATE INDEX IF NOT EXISTS idx_note_entities_normalized_value ON note_entities(normalized_value);
 
+  CREATE TABLE IF NOT EXISTS collections (
+    id             TEXT PRIMARY KEY,
+    name           TEXT    NOT NULL,
+    description    TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    is_default     INTEGER NOT NULL DEFAULT 0,
+    dirty          INTEGER NOT NULL DEFAULT 1,
+    pending_delete INTEGER NOT NULL DEFAULT 0
+  );
+
   CREATE TABLE IF NOT EXISTS search_metadata (
     note_id         TEXT PRIMARY KEY,
     keywords        TEXT NOT NULL DEFAULT '[]',
@@ -125,6 +139,11 @@ export async function initDB() {
   try { db.run('ALTER TABLE notes ADD COLUMN pending_delete INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run(`ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'text'`) } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN note_data TEXT') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN encryption_tier INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN collection_id TEXT') } catch {}
+  try { db.run('CREATE INDEX IF NOT EXISTS idx_notes_collection_id ON notes(collection_id)') } catch {}
+
+  ensureDefaultCollection()
 
   // Migrate from localStorage if SQLite is empty and localStorage has data
   const count = db.exec('SELECT COUNT(*) as n FROM notes')[0]?.values[0][0] ?? 0
@@ -181,6 +200,111 @@ export async function persist() {
 
 // ── CRUD ───────────────────────────────────────────────────────────────────────
 
+export function ensureDefaultCollection() {
+  if (!db) return null
+
+  const existingDefault = getDefaultCollection()
+  const collection = existingDefault ?? createDefaultCollectionDraft()
+
+  if (!existingDefault) {
+    upsertCollectionSync(collection)
+  } else if (existingDefault.name === LEGACY_DEFAULT_COLLECTION_NAME) {
+    upsertCollectionSync({ ...existingDefault, name: DEFAULT_COLLECTION_NAME, updatedAt: Date.now() })
+  }
+
+  db.run('UPDATE notes SET collection_id = ? WHERE collection_id IS NULL OR collection_id = ?', [collection.id, ''])
+  return collection
+}
+
+export function getDefaultCollection() {
+  if (!db) return null
+  const result = db.exec(
+    'SELECT * FROM collections WHERE pending_delete = 0 AND is_default = 1 ORDER BY created_at ASC LIMIT 1'
+  )
+  if (!result.length || !result[0].values.length) return null
+  const { columns, values } = result[0]
+  const row = {}
+  columns.forEach((col, i) => { row[col] = values[0][i] })
+  return deserializeCollection(row)
+}
+
+export function getAllCollections() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM collections WHERE pending_delete = 0 ORDER BY is_default DESC, updated_at DESC')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const collection = {}
+    columns.forEach((col, i) => { collection[col] = row[i] })
+    return deserializeCollection(collection)
+  })
+}
+
+export function getDirtyCollections() {
+  if (!db) return []
+  const result = db.exec('SELECT * FROM collections WHERE dirty = 1')
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const collection = {}
+    columns.forEach((col, i) => { collection[col] = row[i] })
+    return deserializeCollection(collection)
+  })
+}
+
+export function upsertCollectionSync(collection, dirty = 1) {
+  if (!db || !collection?.id || !collection.name?.trim()) return
+  db.run(
+    `INSERT OR REPLACE INTO collections
+       (id, name, description, created_at, updated_at, is_default, dirty, pending_delete)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+    [
+      collection.id,
+      collection.name.trim(),
+      collection.description ?? '',
+      collection.createdAt,
+      collection.updatedAt,
+      collection.isDefault ? 1 : 0,
+      dirty,
+    ]
+  )
+}
+
+export function markCollectionPendingDelete(id) {
+  if (!db) return
+  const fallback = getDefaultCollection()
+  if (fallback && fallback.id !== id) {
+    db.run('UPDATE notes SET collection_id = ?, dirty = 1, updated_at = ? WHERE collection_id = ?', [fallback.id, Date.now(), id])
+  }
+  db.run('UPDATE collections SET pending_delete = 1, dirty = 1, updated_at = ? WHERE id = ? AND is_default = 0', [Date.now(), id])
+}
+
+export function deleteCollectionSync(id) {
+  if (!db) return
+  const fallback = getDefaultCollection()
+  if (fallback && fallback.id !== id) {
+    db.run('UPDATE notes SET collection_id = ? WHERE collection_id = ?', [fallback.id, id])
+  }
+  db.run('DELETE FROM collections WHERE id = ? AND is_default = 0', [id])
+}
+
+export function moveNoteToCollection(noteId, collectionId) {
+  if (!db || !noteId || !collectionId) return
+  db.run('UPDATE notes SET collection_id = ?, dirty = 1, updated_at = ? WHERE id = ?', [collectionId, Date.now(), noteId])
+}
+
+export function markCollectionsSynced(ids) {
+  if (!db || !ids.length) return
+  const stmt = db.prepare('UPDATE collections SET dirty = 0 WHERE id = ?')
+  for (const id of ids) stmt.run([id])
+  stmt.free()
+}
+
+export function cleanupPendingCollectionDeletes() {
+  if (!db) return
+  db.run('DELETE FROM collections WHERE pending_delete = 1 AND is_default = 0')
+}
+
 export function getAllNotes() {
   if (!db) return []
   const result = db.exec('SELECT * FROM notes WHERE pending_delete = 0 ORDER BY updated_at DESC')
@@ -193,14 +317,31 @@ export function getAllNotes() {
   })
 }
 
+export function getNotesForCollection(collectionId) {
+  if (!db || !collectionId) return []
+  const result = db.exec(
+    'SELECT * FROM notes WHERE pending_delete = 0 AND collection_id = ? ORDER BY updated_at DESC',
+    [collectionId]
+  )
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map(row => {
+    const note = {}
+    columns.forEach((col, i) => { note[col] = row[i] })
+    return deserialize(note)
+  })
+}
+
 export function upsertNoteSync(note, dirty = 1) {
   if (!db) return
+  const collectionId = note.collectionId ?? getDefaultCollection()?.id ?? 'default'
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     [
       note.id,
+      collectionId,
       note.content,
       JSON.stringify(note.categories ?? []),
       note.embedding ? JSON.stringify(note.embedding) : null,
@@ -210,6 +351,7 @@ export function upsertNoteSync(note, dirty = 1) {
       note.updatedAt,
       note.isPublic ? 1 : 0,
       dirty,
+      note.encryptionTier ?? 0,
     ]
   )
 }
@@ -446,16 +588,31 @@ export function exportSQLite() {
 
 function deserialize(row) {
   return {
-    id:            row.id,
-    content:       row.content,
-    categories:    JSON.parse(row.categories ?? '[]'),
-    embedding:     row.embedding ? JSON.parse(row.embedding) : null,
-    noteType:      row.note_type ?? 'text',
-    noteData:      row.note_data ? JSON.parse(row.note_data) : null,
-    createdAt:     row.created_at,
-    updatedAt:     row.updated_at,
-    isPublic:      row.is_public === 1,
-    dirty:         row.dirty,
+    id:             row.id,
+    collectionId:   row.collection_id ?? 'default',
+    content:        row.content,
+    categories:     JSON.parse(row.categories ?? '[]'),
+    embedding:      row.embedding ? JSON.parse(row.embedding) : null,
+    noteType:       row.note_type ?? 'text',
+    noteData:       row.note_data ? JSON.parse(row.note_data) : null,
+    createdAt:      row.created_at,
+    updatedAt:      row.updated_at,
+    isPublic:       row.is_public === 1,
+    dirty:          row.dirty,
+    pendingDelete:  row.pending_delete === 1,
+    encryptionTier: Number(row.encryption_tier ?? 0),
+  }
+}
+
+function deserializeCollection(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    isDefault: row.is_default === 1,
+    dirty: row.dirty,
     pendingDelete: row.pending_delete === 1,
   }
 }

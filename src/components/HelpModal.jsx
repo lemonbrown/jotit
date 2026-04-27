@@ -53,10 +53,15 @@ export default function HelpModal({ onClose }) {
             [['Alt+Mouse wheel'],    'Pan through the note grid with coasting'],
             [['Alt+Left'],           'Back through note locations'],
             [['Alt+Right'],          'Forward through note locations'],
+            [['Ctrl+Alt+Up'],        'Switch to previous collection'],
+            [['Ctrl+Alt+Down'],      'Switch to next collection'],
             [['Click'],              'Select a note'],
             [['Ctrl+Click'],         'Open note in another editor pane'],
             [['Alt+N'],              'Create a new note'],
             [['Ctrl+F'],             'Focus the search bar'],
+            [['Ctrl+\\'],            'Show or hide the notes pane'],
+            [['Ctrl+Alt+\\'],        'Show or hide command toolbars'],
+            [['Ctrl+Shift+\\'],      'Toggle simple editor mode'],
             [['Esc'],                'Clear search / close modals'],
           ]} />
 

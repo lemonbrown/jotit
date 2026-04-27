@@ -60,6 +60,8 @@ async function testRegisterLoginAndMeFlow() {
     assert.deepEqual(meRes.jsonBody.user, {
       id: decoded.userId,
       email: decoded.email,
+      publicKey: null,
+      encryptedPrivateKey: null,
     })
   } finally {
     userDb.close()

@@ -256,6 +256,68 @@ async function testDeveloperCorpusBenchmarksRankExpectedTopNotes() {
   }
 }
 
+async function testCredentialSearchDoesNotOverrankUnrelatedFormEntities() {
+  const githubToken = {
+    id: 'github-token',
+    content: `GitHub Personal Access Token
+ghp_1234567890123456789012345
+
+Scopes: repo, workflow, read:org
+Created for CI/CD pipeline`,
+    categories: ['github', 'token', 'api-key', 'credentials'],
+    createdAt: 10,
+    updatedAt: 10,
+  }
+  const medicalForm = {
+    id: 'medical-form',
+    content: `Pepper Medical Log Feburary.docx
+
+MISSOURI DEPARTMENT OF SOCIAL SERVICES
+CHILDREN'S DIVISION
+Monthly Medical Log
+
+DCN: 65888693
+DVN: 002918347
+
+PHYSICIAN VISIT
+Date
+Name / Clinic
+Address / Contact Info
+Purpose of Visit
+Current Medication Change
+Including Dosages
+
+THERAPIST VISIT
+2/7
+connected counseling 1335 e republic rd
+therapy
+
+MEDICATION LIST
+Medication Name
+Dosage
+Reason for Taking
+Prescriber
+amoxicillin
+twice daily for 7 days
+ear infections
+dr burnson`,
+    categories: ['document'],
+    createdAt: 20,
+    updatedAt: 20,
+  }
+
+  const notes = [medicalForm, githubToken]
+  const artifacts = buildCorpusArtifacts(notes)
+  const results = searchNotesWithArtifacts(notes, 'github token', artifacts)
+
+  assert.ok(results.length > 0, 'expected search results for github token')
+  assert.equal(results[0].noteId, githubToken.id)
+  assert.ok(
+    !results.find(result => result.noteId === medicalForm.id)?.entityHits.some(entity => entity.entityType === 'env_var'),
+    'unrelated form labels should not count as credential entity hits'
+  )
+}
+
 async function testRedactCredentialPreviewMasksTokens() {
   const preview = 'Use token ghp_abcdefghij1234567890abcde to publish. npm_secret1234567890abcdefghijk for registry.'
   const redacted = redactCredentialPreview(preview)
@@ -278,6 +340,7 @@ export default [
   ['searchNotesWithArtifacts returns structured chunk-aware matches', testSearchNotesWithArtifactsReturnsStructuredChunkAwareMatches],
   ['searchNotesWithArtifacts uses query understanding boosts', testSearchNotesWithArtifactsUsesQueryUnderstandingBoosts],
   ['developer corpus benchmarks rank expected top notes', testDeveloperCorpusBenchmarksRankExpectedTopNotes],
+  ['credential search does not overrank unrelated form entities', testCredentialSearchDoesNotOverrankUnrelatedFormEntities],
   ['mergeChunkSemanticResults adds semantic chunk reason and preview', testMergeChunkSemanticResultsAddsSemanticChunkReasonAndPreview],
   ['mergeSemanticSearchResults preserves local matches and appends fallbacks', testMergeSemanticSearchResultsPreservesLocalMatchesAndAppendsFallbacks],
   ['redactCredentialPreview masks token patterns', testRedactCredentialPreviewMasksTokens],

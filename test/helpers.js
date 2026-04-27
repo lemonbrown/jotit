@@ -3,6 +3,7 @@ export function createMockApp() {
     routes: {
       get: new Map(),
       post: new Map(),
+      put: new Map(),
       delete: new Map(),
     },
     get(path, ...handlers) {
@@ -10,6 +11,9 @@ export function createMockApp() {
     },
     post(path, ...handlers) {
       this.routes.post.set(path, handlers)
+    },
+    put(path, ...handlers) {
+      this.routes.put.set(path, handlers)
     },
     delete(path, ...handlers) {
       this.routes.delete.set(path, handlers)

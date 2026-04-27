@@ -1,13 +1,16 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useRef, useState } from 'react'
 import { searchNotesLocallyDetailed } from '../utils/search'
+import { searchNotesPlainText } from '../utils/plainSearch'
 
 const TOKEN_KEY = 'jotit_auth_token'
+const EXACT_PREFIX = 'em:'
 
-export function useNoteSearch(notesRef, user) {
+export function useNoteSearch(notesRef, user, collectionId = null) {
   const [searchInput, setSearchInput] = useState('')
   const deferredSearchInput = useDeferredValue(searchInput)
   const [searchResults, setSearchResults] = useState(null)
   const [isSearching, setIsSearching] = useState(false)
+  const [searchMode, setSearchMode] = useState('smart')
   const searchSequenceRef = useRef(0)
 
   const clearSearch = useCallback(() => {
@@ -21,14 +24,31 @@ export function useNoteSearch(notesRef, user) {
     setSearchInput(query)
   }, [])
 
+  const toggleSearchMode = useCallback(() => {
+    setSearchMode(m => m === 'smart' ? 'plain' : 'smart')
+  }, [])
+
   useEffect(() => {
-    const query = deferredSearchInput.trim()
+    const raw = deferredSearchInput.trim()
+    const hasPrefix = raw.startsWith(EXACT_PREFIX)
+    const query = hasPrefix ? raw.slice(EXACT_PREFIX.length).trim() : raw
+    const effectiveMode = hasPrefix ? 'plain' : searchMode
+
     const sequence = searchSequenceRef.current + 1
     searchSequenceRef.current = sequence
 
     if (!query) {
       startTransition(() => {
         setSearchResults(null)
+        setIsSearching(false)
+      })
+      return
+    }
+
+    if (effectiveMode === 'plain') {
+      const results = searchNotesPlainText(notesRef.current, query)
+      startTransition(() => {
+        setSearchResults(results)
         setIsSearching(false)
       })
       return
@@ -56,7 +76,9 @@ export function useNoteSearch(notesRef, user) {
         const token = localStorage.getItem(TOKEN_KEY)
         if (!token) return
 
-        const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+        const params = new URLSearchParams({ q: query })
+        if (collectionId) params.set('collectionId', collectionId)
+        const response = await fetch(`/api/search?${params.toString()}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!response.ok || cancelled || searchSequenceRef.current !== sequence) return
@@ -79,13 +101,22 @@ export function useNoteSearch(notesRef, user) {
       cancelled = true
       clearTimeout(localSearchTimer)
     }
-  }, [deferredSearchInput, notesRef, user])
+  }, [collectionId, deferredSearchInput, notesRef, searchMode, user])
+
+  const strippedInput = searchInput.trim()
+  const effectiveSearchMode = strippedInput.startsWith(EXACT_PREFIX) ? 'plain' : searchMode
+  const searchQuery = strippedInput.startsWith(EXACT_PREFIX)
+    ? strippedInput.slice(EXACT_PREFIX.length).trim()
+    : strippedInput
 
   return {
     clearSearch,
     handleSearch,
     isSearching,
     searchInput,
+    searchMode: effectiveSearchMode,
+    searchQuery,
     searchResults,
+    toggleSearchMode,
   }
 }

@@ -20,7 +20,17 @@ const ENTITY_TYPE_LABELS = {
   status_code: 'status',
 }
 
-function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, searchQuery, expanded = false }) {
+function NoteCard({
+  note,
+  isActive,
+  isProcessing,
+  onSelect,
+  searchMatch = null,
+  searchQuery,
+  expanded = false,
+  onDragStart,
+  onDragEnd,
+}) {
   const lines = note.content.split('\n').filter(l => l.trim())
   const firstLine = lines[0] ?? ''
   const defaultRest = lines.slice(1, expanded ? 10 : 4).join('\n')
@@ -37,11 +47,11 @@ function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, 
     : null
   const entityTypePills = [...new Set((searchMatch?.entityHits ?? []).map(e => e.entityType))].slice(0, 2)
   const isSemantic = ['semantic', 'hybrid-semantic', 'semantic-chunk'].includes(searchMatch?.matchType)
-  const fallbackReasons = (!chunkKindBadge && !entityTypePills.length && !isSemantic)
-    ? (searchMatch?.reasons ?? []).filter(r => !r.startsWith('section:')).slice(0, 2)
-    : []
-  const showMatchContext = searchMatch && (chunkKindBadge || entityTypePills.length || isSemantic || fallbackReasons.length)
+  const reasons = (searchMatch?.reasons ?? []).filter(r => !r.startsWith('section:')).slice(0, 2)
+  const matchCount = searchMatch?.matchType === 'plain' ? (searchMatch.matchCount ?? null) : null
+  const showMatchContext = searchMatch && (chunkKindBadge || entityTypePills.length || isSemantic || reasons.length || matchCount != null)
   const documentBadge = isOpenApiNote(note) ? 'openapi' : isSQLiteNote(note) ? 'sqlite' : null
+  const isE2EEncrypted = Number(note.encryptionTier ?? 0) === 2
 
   const highlight = (text, query) => {
     if (!query || !text) return text
@@ -59,7 +69,15 @@ function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, 
   return (
     <div
       id={`note-card-${note.id}`}
+      draggable
       onClick={(e) => onSelect(note.id, { newPane: e.ctrlKey || e.metaKey })}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'all'
+        e.dataTransfer.setData('text/plain', note.id)
+        e.dataTransfer.setData('application/x-jotit-note-id', note.id)
+        onDragStart?.(note.id)
+      }}
+      onDragEnd={() => onDragEnd?.()}
       className={[
         'relative flex flex-col p-3 rounded-lg border cursor-pointer select-none',
         'transition-all duration-150 overflow-hidden',
@@ -81,6 +99,17 @@ function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, 
         <div className={`note-content text-[12px] font-medium truncate flex-1 min-w-0 ${firstLine ? 'text-zinc-200' : 'text-zinc-700 italic'}`}>
           {searchHeading ? highlight(searchHeading, searchQuery) : 'empty'}
         </div>
+        {isE2EEncrypted && (
+          <span
+            className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded border border-amber-800/70 bg-amber-950/40 text-amber-300"
+            title="End-to-end encrypted"
+            aria-label="End-to-end encrypted"
+          >
+            <svg className="w-2.5 h-2.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+            </svg>
+          </span>
+        )}
         {chunkKindBadge && (
           <span className="shrink-0 text-[9px] px-1 py-px rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono leading-none">
             {chunkKindBadge}
@@ -98,9 +127,14 @@ function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, 
         {rest ? highlight(rest, searchQuery) : null}
       </div>
 
-      {/* Chunk-aware match context */}
+      {/* Match context */}
       {showMatchContext && (
         <div className="flex items-center gap-1 mt-1 flex-wrap">
+          {matchCount != null && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 font-mono">
+              {matchCount}×
+            </span>
+          )}
           {entityTypePills.map(type => (
             <span
               key={type}
@@ -114,7 +148,7 @@ function NoteCard({ note, isActive, isProcessing, onSelect, searchMatch = null, 
               ≈ semantic
             </span>
           )}
-          {fallbackReasons.map(reason => (
+          {reasons.map(reason => (
             <span
               key={reason}
               className="text-[10px] px-1.5 py-0.5 rounded bg-blue-950/40 text-blue-200 border border-blue-900/60"
@@ -144,5 +178,7 @@ export default memo(NoteCard, (prevProps, nextProps) => (
   prevProps.onSelect === nextProps.onSelect &&
   prevProps.searchMatch === nextProps.searchMatch &&
   prevProps.searchQuery === nextProps.searchQuery &&
-  prevProps.expanded === nextProps.expanded
+  prevProps.expanded === nextProps.expanded &&
+  prevProps.onDragStart === nextProps.onDragStart &&
+  prevProps.onDragEnd === nextProps.onDragEnd
 ))

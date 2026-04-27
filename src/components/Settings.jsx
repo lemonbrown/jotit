@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useLocalAgentStatus } from '../hooks/useLocalAgentStatus'
+import { getStoredKeyPair } from '../utils/e2eEncryption'
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$|^[a-z0-9]{2,40}$/
 
@@ -18,8 +19,10 @@ export default function Settings({
   onExportDB,
   onPublish,
   onSeedNotes,
+  onRegenerateKeys,
   publicNoteCount,
   noteCount = 0,
+  user,
 }) {
   const [serverProxy, setServerProxy] = useState(settings.serverProxy ?? false)
   const [localAgentToken, setLocalAgentToken] = useState(settings.localAgentToken ?? '')
@@ -28,6 +31,32 @@ export default function Settings({
   const [publishing, setPublishing] = useState(false)
   const [publishResult, setPublishResult] = useState(null)
   const localAgentStatus = useLocalAgentStatus()
+
+  const [hasE2EKeys, setHasE2EKeys] = useState(false)
+  const [regenMode, setRegenMode] = useState(false)
+  const [regenPassword, setRegenPassword] = useState('')
+  const [regenState, setRegenState] = useState(null) // 'loading' | 'ok' | 'error'
+  const [regenError, setRegenError] = useState('')
+
+  useEffect(() => {
+    if (user) getStoredKeyPair().then(kp => setHasE2EKeys(!!kp))
+  }, [user])
+
+  const handleRegenerate = async () => {
+    if (!regenPassword) return
+    setRegenState('loading')
+    setRegenError('')
+    try {
+      await onRegenerateKeys(regenPassword)
+      setHasE2EKeys(true)
+      setRegenState('ok')
+      setRegenMode(false)
+      setRegenPassword('')
+    } catch (e) {
+      setRegenState('error')
+      setRegenError(e.message ?? 'Failed to regenerate keys')
+    }
+  }
 
   const handleThemeChange = (id) => {
     setTheme(id)
@@ -185,6 +214,64 @@ export default function Settings({
               <p className="text-[11px] text-red-400">{publishResult.error}</p>
             )}
           </div>
+
+          {user && (
+            <div className="pt-1 border-t border-zinc-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400">End-to-end encryption</label>
+                  <p className={`text-[11px] mt-0.5 ${hasE2EKeys ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                    {hasE2EKeys ? 'Key pair active on this device' : 'No key pair on this device'}
+                  </p>
+                </div>
+                {!regenMode && (
+                  <button
+                    onClick={() => { setRegenMode(true); setRegenState(null); setRegenError('') }}
+                    className="ml-4 px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors shrink-0"
+                  >
+                    {hasE2EKeys ? 'Regenerate key pair' : 'Set up key pair'}
+                  </button>
+                )}
+              </div>
+
+              {regenMode && (
+                <div className="bg-zinc-800/60 border border-zinc-700/50 rounded-lg p-3 space-y-2">
+                  <p className="text-[11px] text-amber-400">
+                    Generating new keys will make any E2E-encrypted notes unreadable on other devices until those devices log out and back in.
+                  </p>
+                  <input
+                    type="password"
+                    value={regenPassword}
+                    onChange={e => setRegenPassword(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleRegenerate()}
+                    placeholder="Enter your account password"
+                    autoFocus
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+                  />
+                  {regenError && <p className="text-[11px] text-red-400">{regenError}</p>}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleRegenerate}
+                      disabled={!regenPassword || regenState === 'loading'}
+                      className="px-3 py-1.5 text-xs bg-amber-700 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md transition-colors font-medium"
+                    >
+                      {regenState === 'loading' ? 'Generating…' : 'Generate'}
+                    </button>
+                    <button
+                      onClick={() => { setRegenMode(false); setRegenPassword(''); setRegenState(null) }}
+                      className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {regenState === 'ok' && !regenMode && (
+                <p className="text-[11px] text-emerald-400">Key pair generated and uploaded successfully.</p>
+              )}
+            </div>
+          )}
 
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
             <span className="text-[11px] text-zinc-600">Database</span>

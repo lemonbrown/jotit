@@ -1,10 +1,28 @@
 import { understandQuery } from './queryUnderstanding.js'
 
-function countTermHits(text, terms) {
+const SIMPLE_TERM_RE = /^[a-z0-9_]+$/
+const SEPARATOR_RE = /[_-]+/g
+const HIGH_CONFIDENCE_BOOST_ENTITY_TYPES = new Set(['api_key_like', 'jwt_like'])
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function termAppearsInText(text, term) {
   const haystack = String(text ?? '').toLowerCase()
+  const needle = String(term ?? '').toLowerCase().trim()
+  if (!needle) return false
+
+  if (!SIMPLE_TERM_RE.test(needle)) return haystack.includes(needle)
+
+  const pattern = new RegExp(`(^|[^a-z0-9_])${escapeRegExp(needle)}($|[^a-z0-9_])`)
+  return pattern.test(haystack)
+}
+
+function countTermHits(text, terms) {
   let hits = 0
   for (const term of terms) {
-    if (haystack.includes(term)) hits += 1
+    if (termAppearsInText(text, term)) hits += 1
   }
   return hits
 }
@@ -70,6 +88,24 @@ function mergeReasonLists(...reasonSets) {
   return [...new Set(reasonSets.flat().filter(Boolean))].slice(0, 4)
 }
 
+function entityValueMatchesTerms(entity, terms) {
+  const normalizedValue = String(entity.normalizedValue ?? '')
+  const separatedValue = normalizedValue.replace(SEPARATOR_RE, ' ')
+  return terms.some(term => (
+    termAppearsInText(normalizedValue, term) ||
+    termAppearsInText(separatedValue, term)
+  ))
+}
+
+function isEntityRelevantToQuery(entity, queryInfo) {
+  if (entityValueMatchesTerms(entity, queryInfo.expandedTerms)) return true
+  if (!queryInfo.entityTypesToBoost.includes(entity.entityType)) return false
+
+  // Form imports can create many env_var-like entities from uppercase labels.
+  // Only type-boost high-confidence credential entities without a value match.
+  return HIGH_CONFIDENCE_BOOST_ENTITY_TYPES.has(entity.entityType)
+}
+
 export function searchNotesWithArtifacts(notes, query, artifacts = {}) {
   const queryInfo = understandQuery(query)
   if (!queryInfo.normalizedQuery) return []
@@ -86,31 +122,28 @@ export function searchNotesWithArtifacts(notes, query, artifacts = {}) {
       const metadata = metadataByNote.get(note.id)
 
       const exactCategory = categories.some(category => category === queryInfo.normalizedQuery)
-      const coreCategoryHits = categories.reduce((sum, category) => sum + (queryInfo.coreTerms.some(term => category.includes(term)) ? 1 : 0), 0)
-      const categoryHit = categories.some(category => terms.some(term => category.includes(term)))
+      const coreCategoryHits = categories.reduce((sum, category) => sum + (queryInfo.coreTerms.some(term => termAppearsInText(category, term)) ? 1 : 0), 0)
+      const categoryHit = categories.some(category => terms.some(term => termAppearsInText(category, term)))
       const coreContentHits = countTermHits(content, queryInfo.coreTerms)
       const contentTermHits = countTermHits(content, terms)
       const bestChunk = findBestChunk(noteChunks, terms)
       const chunkHits = bestChunk ? bestChunk.score / 18 : 0
-      const entityMatches = noteEntities.filter(entity => {
-        if (terms.some(term => entity.normalizedValue.includes(term))) return true
-        if (queryInfo.entityTypesToBoost.includes(entity.entityType)) return true
-        return false
-      })
+      const entityMatches = noteEntities.filter(entity => isEntityRelevantToQuery(entity, queryInfo))
       const entityHitCount = entityMatches.length
+      const entityScoreHits = Math.min(entityHitCount, 6)
       const facetHits = (metadata?.facets ?? []).reduce(
-        (sum, facet) => sum + (queryInfo.facets.includes(facet) || terms.some(term => facet.includes(term)) ? 1 : 0),
+        (sum, facet) => sum + (queryInfo.facets.includes(facet) || terms.some(term => termAppearsInText(facet, term)) ? 1 : 0),
         0
       )
-      const keywordHits = (metadata?.keywords ?? []).reduce((sum, keyword) => sum + (terms.some(term => keyword.includes(term) || term.includes(keyword)) ? 1 : 0), 0)
-      const providerHits = queryInfo.providerHints.reduce((sum, provider) => sum + (content.includes(provider) ? 1 : 0), 0)
-      const providerCategoryHits = queryInfo.providerHints.reduce((sum, provider) => sum + (categories.some(category => category.includes(provider)) ? 1 : 0), 0)
+      const keywordHits = (metadata?.keywords ?? []).reduce((sum, keyword) => sum + (terms.some(term => termAppearsInText(keyword, term) || termAppearsInText(term, keyword)) ? 1 : 0), 0)
+      const providerHits = queryInfo.providerHints.reduce((sum, provider) => sum + (termAppearsInText(content, provider) ? 1 : 0), 0)
+      const providerCategoryHits = queryInfo.providerHints.reduce((sum, provider) => sum + (categories.some(category => termAppearsInText(category, provider)) ? 1 : 0), 0)
       const intentBoost =
         (queryInfo.intent === 'find-credentials' && entityHitCount ? 35 : 0) +
         (queryInfo.intent === 'find-config' && bestChunk?.kind === 'config' ? 24 : 0) +
         (queryInfo.intent === 'find-command' && bestChunk?.kind === 'command' ? 24 : 0) +
         (queryInfo.intent === 'debug-issue' && ['log', 'config'].includes(bestChunk?.kind) ? 24 : 0) +
-        (queryInfo.intent === 'ci-workflow' && (categories.some(category => ['github', 'ci'].includes(category)) || content.includes('workflow')) ? 28 : 0)
+        (queryInfo.intent === 'ci-workflow' && (categories.some(category => ['github', 'ci'].includes(category)) || termAppearsInText(content, 'workflow')) ? 28 : 0)
 
       const score =
         (exactCategory ? 140 : 0) +
@@ -119,7 +152,7 @@ export function searchNotesWithArtifacts(notes, query, artifacts = {}) {
         (coreContentHits * 26) +
         (contentTermHits * 16) +
         (chunkHits * 18) +
-        (entityHitCount * 38) +
+        (entityScoreHits * 38) +
         (facetHits * 20) +
         (providerHits * 18) +
         (providerCategoryHits * 42) +

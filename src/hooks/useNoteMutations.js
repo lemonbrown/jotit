@@ -12,6 +12,7 @@ import {
 import { scheduleSyncPush } from '../utils/sync'
 import { createSnippetDraft } from '../utils/noteFactories'
 import { buildNoteSearchArtifacts } from '../utils/searchIndex'
+import { ALL_COLLECTION_ID } from '../utils/collectionFactories'
 
 export function useNoteMutations({
   notesRef,
@@ -20,6 +21,8 @@ export function useNoteMutations({
   setNotes,
   setSnippets,
   user,
+  activeCollectionId,
+  newNoteCollectionId,
 }) {
   const updateNote = useCallback((id, updates) => {
     setNotes(prev => {
@@ -92,7 +95,11 @@ export function useNoteMutations({
   }, [removeNoteFromWorkspace, setNotes, user])
 
   const deleteAllNotes = useCallback(() => {
-    const currentNotes = notesRef.current
+    const currentNotes = notesRef.current.filter(note => (
+      !activeCollectionId ||
+      activeCollectionId === ALL_COLLECTION_ID ||
+      note.collectionId === activeCollectionId
+    ))
     if (!currentNotes.length) return
 
     if (user) {
@@ -108,19 +115,26 @@ export function useNoteMutations({
     }
 
     schedulePersist()
-    setNotes([])
+    setNotes(prev => activeCollectionId === ALL_COLLECTION_ID
+      ? []
+      : prev.filter(note => activeCollectionId && note.collectionId !== activeCollectionId)
+    )
     resetWorkspace()
-  }, [notesRef, resetWorkspace, setNotes, user])
+  }, [activeCollectionId, notesRef, resetWorkspace, setNotes, user])
 
   const addNote = useCallback((note) => {
-    upsertNoteSync(note)
+    const prepared = { ...note, collectionId: note.collectionId ?? newNoteCollectionId ?? activeCollectionId ?? 'default' }
+    upsertNoteSync(prepared)
     schedulePersist()
     scheduleSyncPush()
-    setNotes(prev => [note, ...prev])
-  }, [setNotes])
+    setNotes(prev => [prepared, ...prev])
+    return prepared
+  }, [activeCollectionId, newNoteCollectionId, setNotes])
 
   const seedNotes = useCallback((seedNotesInput) => {
-    const prepared = (seedNotesInput ?? []).filter(note => note?.id && note.content?.trim())
+    const prepared = (seedNotesInput ?? [])
+      .filter(note => note?.id && note.content?.trim())
+      .map(note => ({ ...note, collectionId: note.collectionId ?? newNoteCollectionId ?? activeCollectionId ?? 'default' }))
     if (!prepared.length) return []
 
     for (const note of prepared) {
@@ -133,7 +147,7 @@ export function useNoteMutations({
     scheduleSyncPush()
     setNotes(prev => [...prepared, ...prev])
     return prepared
-  }, [setNotes])
+  }, [activeCollectionId, newNoteCollectionId, setNotes])
 
   return {
     addNote,

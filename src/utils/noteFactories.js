@@ -1,7 +1,7 @@
 import { generateId } from './helpers.js'
 import { NOTE_TYPE_OPENAPI, NOTE_TYPE_TEXT } from './noteTypes.js'
 
-export function createEmptyNote() {
+export function createEmptyNote({ collectionId = null } = {}) {
   const now = Date.now()
 
   return {
@@ -10,6 +10,7 @@ export function createEmptyNote() {
     categories: [],
     embedding: null,
     isPublic: false,
+    collectionId,
     noteType: NOTE_TYPE_TEXT,
     noteData: null,
     createdAt: now,
@@ -42,6 +43,7 @@ export function createImportedDocxNote(fileName, text) {
     categories: [],
     embedding: null,
     isPublic: false,
+    collectionId: null,
     noteType: NOTE_TYPE_TEXT,
     noteData: null,
     createdAt: now,
@@ -58,6 +60,7 @@ export function createImportedTextNote(fileName, text) {
     categories: [],
     embedding: null,
     isPublic: false,
+    collectionId: null,
     noteType: NOTE_TYPE_TEXT,
     noteData: null,
     createdAt: now,
@@ -83,6 +86,7 @@ export function createImportedOpenApiNote(fileName, document) {
     categories: ['openapi', 'api-spec'],
     embedding: null,
     isPublic: false,
+    collectionId: null,
     noteType: NOTE_TYPE_OPENAPI,
     noteData: {
       fileName,

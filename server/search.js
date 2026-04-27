@@ -11,6 +11,9 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
 
     const limit = Math.min(parseInt(req.query.limit ?? '20', 10) || 20, 50)
     const userId = req.user.userId
+    const collectionId = typeof req.query.collectionId === 'string' && req.query.collectionId.trim()
+      ? req.query.collectionId.trim()
+      : null
 
     try {
       const queryInfo = understandQuery(query)
@@ -25,6 +28,7 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
         LEFT JOIN search_metadata sm ON sm.note_id = n.id AND sm.user_id = $1
         WHERE n.user_id = $1
           AND n.deleted_at IS NULL
+          AND ($3::text IS NULL OR n.collection_id = $3)
           AND (
             n.content ILIKE ANY($2)
             OR n.categories ILIKE ANY($2)
@@ -34,7 +38,7 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
             OR sm.facets ILIKE ANY($2)
           )
         LIMIT 200
-      `, [userId, termPatterns])
+      `, [userId, termPatterns, collectionId])
 
       const noteIds = [...new Set(candidateRows.map(r => r.id))]
       const shouldAddSemanticCandidates = aiService?.isConfigured()
@@ -50,10 +54,11 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
            FROM notes
            WHERE user_id = $1
              AND deleted_at IS NULL
+             AND ($2::text IS NULL OR collection_id = $2)
              AND embedding IS NOT NULL
            ORDER BY updated_at DESC
            LIMIT 200`,
-          [userId]
+          [userId, collectionId]
         )
         for (const row of semanticCandidateRows) {
           if (!noteIds.includes(row.id)) noteIds.push(row.id)
@@ -62,7 +67,10 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
 
       // Fetch full note data + all artifacts for candidates
       const [notesResult, chunksResult, chunkEmbeddingsResult, entitiesResult, metadataResult] = await Promise.all([
-        pgPool.query('SELECT * FROM notes WHERE user_id = $1 AND id = ANY($2)', [userId, noteIds]),
+        pgPool.query(
+          'SELECT * FROM notes WHERE user_id = $1 AND id = ANY($2) AND ($3::text IS NULL OR collection_id = $3)',
+          [userId, noteIds, collectionId]
+        ),
         pgPool.query('SELECT * FROM note_chunks WHERE user_id = $1 AND note_id = ANY($2)', [userId, noteIds]),
         pgPool.query('SELECT * FROM note_chunk_embeddings WHERE user_id = $1 AND note_id = ANY($2)', [userId, noteIds]),
         pgPool.query('SELECT * FROM note_entities WHERE user_id = $1 AND note_id = ANY($2)', [userId, noteIds]),
@@ -137,6 +145,7 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
           createdAt: r.note.createdAt,
           updatedAt: r.note.updatedAt,
           isPublic: r.note.isPublic,
+          collectionId: r.note.collectionId,
         },
       }))
 
@@ -159,6 +168,7 @@ function deserializeNote(row) {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     isPublic: row.is_public === 1,
+    collectionId: row.collection_id ?? null,
   }
 }
 

@@ -48,6 +48,7 @@ import SQLiteViewer from './SQLiteViewer'
 import OpenApiViewer from './OpenApiViewer'
 import { extractSQLiteAssetRef } from '../utils/sqliteNote'
 import { NOTE_TYPE_OPENAPI, isOpenApiNote } from '../utils/noteTypes'
+import { getStoredKeyPair } from '../utils/e2eEncryption'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -62,6 +63,35 @@ hljs.registerLanguage('dockerfile', dockerfile)
 hljs.registerLanguage('ini', ini)
 
 const HINT_LANGS = ['json','javascript','typescript','python','sql','bash','yaml','xml','css','dockerfile','ini']
+const HELP_COMMAND = '/tips'
+const HELP_NOTE_CONTENT = `jot.it quick start
+
+Useful habits
+- Press Alt+N to create a note quickly.
+- Use Ctrl+F to search the current collection.
+- Create collections for projects, clients, investigations, or recurring work.
+- Drag notes from the notes pane into a collection drop target to organize them.
+- Use Ctrl+Alt+Up and Ctrl+Alt+Down to switch collections.
+
+Writing notes
+- Start with a clear first line. Jot.it uses it like the note title.
+- Use markdown headings to create an outline.
+- Paste images directly into notes when screenshots help.
+- Save reusable text as snippets with Alt+S after selecting text.
+
+Working with technical text
+- Write HTTP requests directly in a note, then use the HTTP tool to run them.
+- Import OpenAPI JSON to browse operations and generate requests.
+- Drop SQLite files into Jot.it to inspect tables and run read-only queries.
+- Select JSON, Base64, URLs, JWTs, timestamps, or hex text and use the transform tools.
+
+Search and navigation
+- Search is local-first. Signed-in users can use server-backed semantic search when available.
+- Use Alt+Left and Alt+Right to move through note locations.
+- Use Shift+Mouse wheel over the notes pane for expanded previews.
+
+Tip
+Keep this note around as a reference, or delete it once the shortcuts feel familiar.`
 
 function escapeHtml(text) {
   return String(text ?? '')
@@ -125,7 +155,7 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
-export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onCreateNoteFromContent, focusNonce, restoreLocation, onLocationChange, notes, onDiffModeChange }) {
+export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -145,6 +175,11 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const [interactiveTx, setInteractiveTx] = useState(null) // { id, opName, param } | null
   const [guidCopied, setGuidCopied] = useState(false)
   const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
+  const [hasE2EKeys, setHasE2EKeys] = useState(false)
+
+  useEffect(() => {
+    if (user) getStoredKeyPair().then(kp => setHasE2EKeys(!!kp))
+  }, [user])
   const [diffInstance, setDiffInstance] = useState(0)
   const [diffPendingNote, setDiffPendingNote] = useState(null)
   const [codeBefore, setCodeBefore] = useState('')
@@ -166,6 +201,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
   const textareaRef = useRef(null)
+  const searchBackdropRef = useRef(null)
   const codeEditRef = useRef(null)
   const codePreRef = useRef(null)
   const interactiveInputRef = useRef(null)
@@ -205,6 +241,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const hasInlineImages = attachments.length > 0 && /\[img:\/\/[^\]]+\]/.test(content)
   const openApiNote = useMemo(() => isOpenApiNote(note), [note])
   const editorDisplayContent = openApiNote ? (note.noteData?.rawText ?? content) : content
+  const helpCommandReady = !openApiNote && content.trim() === HELP_COMMAND
   const charCount = editorDisplayContent.length
   const lineCount = editorDisplayContent.split('\n').length
 
@@ -1207,6 +1244,12 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       cancelPendingCalc()
       return
     }
+    if (helpCommandReady && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      if (onCreateTipsNote) onCreateTipsNote(HELP_NOTE_CONTENT)
+      else onCreateNoteFromContent?.(HELP_NOTE_CONTENT)
+      return
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
       e.preventDefault()
       openFind()
@@ -1460,25 +1503,32 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   }, [findOpen, findParsed, findQuery, findMode, findRegexError, content])
 
   const displayMarkdownHtml = useMemo(() => {
-    if (!findOpen || !findParsed.term || findRegexError || !markdownHtml) return markdownHtml
+    if (!markdownHtml) return markdownHtml
+    // FindBar takes precedence; fall back to global searchQuery when bar is closed
+    const activeQuery = (findOpen && !findRegexError && findParsed.term)
+      ? findParsed.term
+      : (!findOpen && searchQuery)
+        ? searchQuery
+        : null
+    if (!activeQuery) return markdownHtml
     const wrapText = (text) => {
       try {
-        if (findMode === 'exact') {
-          const escaped = findParsed.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        if (!findOpen || findMode === 'exact') {
+          const escaped = activeQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
           return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark class="find-mark">$1</mark>')
         }
         if (findMode === 'regex') {
-          return text.replace(new RegExp(`(${findParsed.term})`, 'gi'), '<mark class="find-mark">$1</mark>')
+          return text.replace(new RegExp(`(${activeQuery})`, 'gi'), '<mark class="find-mark">$1</mark>')
         }
       } catch {}
       return text
     }
-    if (findParsed.scope === 'code') {
+    if (findOpen && findParsed.scope === 'code') {
       // Only highlight inside <pre><code>…</code></pre> blocks
       return markdownHtml.replace(/(<pre><code[^>]*>)([\s\S]*?)(<\/code><\/pre>)/gi,
         (_, open, body, close) => open + wrapText(body) + close)
     }
-    if (findParsed.scope === 'text') {
+    if (findOpen && findParsed.scope === 'text') {
       // Highlight everywhere except inside <pre><code>…</code></pre> blocks
       return markdownHtml.replace(/(<pre>[\s\S]*?<\/pre>)|(<[^>]+>)|([^<]*)/g, (_, pre, tag, text) => {
         if (pre || tag) return pre ?? tag
@@ -1486,13 +1536,28 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
         return wrapText(text)
       })
     }
-    // scope === 'all': highlight everywhere
+    // scope === 'all' (or global search): highlight everywhere
     return markdownHtml.replace(/(<[^>]+>)|([^<]*)/g, (_, tag, text) => {
       if (tag) return tag
       if (!text) return ''
       return wrapText(text)
     })
-  }, [markdownHtml, findOpen, findParsed, findMode, findRegexError])
+  }, [markdownHtml, findOpen, findParsed, findMode, findRegexError, searchQuery])
+
+  const searchHighlightHtml = useMemo(() => {
+    if (!searchQuery || findOpen) return null
+    const matches = findMatches(editorDisplayContent, searchQuery, 'exact')
+    if (!matches.length) return null
+    let html = ''
+    let last = 0
+    for (const { start, end } of matches) {
+      html += escapeHtml(editorDisplayContent.slice(last, start))
+      html += `<mark class="find-mark">${escapeHtml(editorDisplayContent.slice(start, end))}</mark>`
+      last = end
+    }
+    html += escapeHtml(editorDisplayContent.slice(last))
+    return html
+  }, [searchQuery, editorDisplayContent, findOpen])
 
   const sectionMatches = useMemo(() => {
     if (!findOpen || !findResults.length) return []
@@ -1562,12 +1627,14 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     const date = detectTimestamp(sel.text)
     return date ? getTimestampFormats(date) : null
   }, [sel.text, hasSelection])
+  const showCommandToolbars = !simpleEditor && !hideCommandToolbars
 
   return (
     <div ref={panelRef} className="flex flex-col flex-1 min-w-0 overflow-hidden relative" onKeyDown={handlePanelKeyDown}>
 
       {/* ── Main toolbar ── */}
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
+      {showCommandToolbars && (
+      <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0">
         {jsonValid && (
           <button
             onClick={() => jsonSession ? setJsonSession(null) : openJsonViewer(false)}
@@ -1800,6 +1867,39 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           </svg>
           {note.isPublic ? 'Public' : 'Private'}
         </button>
+        {user && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => {
+              if (!hasE2EKeys) return
+              onUpdate({ encryptionTier: note.encryptionTier === 2 ? 0 : 2 })
+            }}
+            title={
+              !hasE2EKeys
+                ? 'No encryption keys — log out and back in to set up'
+                : note.encryptionTier === 2
+                  ? 'End-to-end encrypted — click to remove encryption'
+                  : 'Click to enable end-to-end encryption'
+            }
+            disabled={!hasE2EKeys}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              note.encryptionTier === 2
+                ? 'text-amber-300 bg-amber-950/40 border-amber-800 hover:bg-amber-950/60'
+                : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600 disabled:opacity-30 disabled:cursor-not-allowed'
+            }`}
+          >
+            {note.encryptionTier === 2 ? (
+              <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+              </svg>
+            ) : (
+              <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 2a5 5 0 00-5 5v2a2 2 0 00-2 2v5a2 2 0 002 2h10a2 2 0 002-2v-5a2 2 0 00-2-2H7V7a3 3 0 015.905-.75 1 1 0 001.937-.5A5.002 5.002 0 0010 2z" />
+              </svg>
+            )}
+            {note.encryptionTier === 2 ? 'E2E' : 'E2E'}
+          </button>
+        )}
         <button
           onMouseDown={e => e.preventDefault()}
           onClick={sharePublicNote}
@@ -1813,13 +1913,13 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
         >
           {sharing ? 'Sharing…' : shareState?.ok ? 'Link copied' : 'Share'}
         </button>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
           {shareState?.ok && (
             <a
               href={shareState.url}
               target="_blank"
               rel="noreferrer"
-              className="text-[11px] text-emerald-400 hover:text-emerald-300 font-mono"
+              className="min-w-0 max-w-[min(32rem,100%)] truncate text-[11px] text-emerald-400 hover:text-emerald-300 font-mono"
               onMouseDown={e => e.stopPropagation()}
             >
               {shareState.url}
@@ -1830,7 +1930,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           )}
           <button
             onClick={handleDelete}
-            className={`text-xs transition-colors px-2 py-1 rounded ${
+            className={`shrink-0 whitespace-nowrap text-xs transition-colors px-2 py-1 rounded ${
               confirmDelete
                 ? 'bg-red-900/60 text-red-300 border border-red-700'
                 : 'text-zinc-600 hover:text-red-400'
@@ -1840,9 +1940,10 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           </button>
         </div>
       </div>
+      )}
 
       {/* ── Find bar ── */}
-      {findOpen && (mode === 'edit' || mode === 'markdown') && (
+      {showCommandToolbars && findOpen && (mode === 'edit' || mode === 'markdown') && (
         <FindBar
           inputRef={findInputRef}
           query={findQuery}
@@ -1862,7 +1963,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       )}
 
       {/* ── Transform strip ── */}
-      {mode === 'edit' && !interactiveTx && (
+      {showCommandToolbars && mode === 'edit' && !interactiveTx && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/60 shrink-0 flex flex-wrap gap-1">
           {hasSelection && (
             <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">
@@ -1939,7 +2040,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       )}
 
       {/* ── Date format strip ── */}
-      {mode === 'edit' && !interactiveTx && dateFmtPopup && (
+      {showCommandToolbars && mode === 'edit' && !interactiveTx && dateFmtPopup && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">date</span>
           {dateFmtPopup.map(f => (
@@ -1957,7 +2058,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       )}
 
       {/* ── Timezone conversion strip ── */}
-      {mode === 'edit' && !interactiveTx && tzPopup && (
+      {showCommandToolbars && mode === 'edit' && !interactiveTx && tzPopup && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">tz</span>
           {tzPopup.map(c => (
@@ -1979,7 +2080,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       )}
 
       {/* ── Timestamp conversion strip ── */}
-      {mode === 'edit' && !interactiveTx && tsPopup && (
+      {showCommandToolbars && mode === 'edit' && !interactiveTx && tsPopup && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">ts</span>
           {tsPopup.map(f => (
@@ -2000,7 +2101,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
         </div>
       )}
 
-      {mode === 'edit' && gotoOpen && (
+      {showCommandToolbars && mode === 'edit' && gotoOpen && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-950/60 shrink-0">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0">
             go to line
@@ -2188,6 +2289,14 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
                 </div>
               ) : (
               <div className="relative flex-1 min-w-0 overflow-hidden">
+              {searchHighlightHtml && (
+                <div
+                  ref={searchBackdropRef}
+                  aria-hidden
+                  className="absolute inset-0 w-full h-full note-content p-4 text-transparent whitespace-pre-wrap break-words overflow-hidden pointer-events-none select-none"
+                  dangerouslySetInnerHTML={{ __html: searchHighlightHtml }}
+                />
+              )}
               <textarea
                 ref={textareaRef}
                 value={editorDisplayContent}
@@ -2200,13 +2309,21 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
                 onClick={clearSelIfEmpty}
                 onScroll={e => {
                   if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
+                  if (searchBackdropRef.current) searchBackdropRef.current.scrollTop = e.target.scrollTop
                   reportCurrentLocation(e.target)
                 }}
-                placeholder={openApiNote ? 'OpenAPI document JSON' : 'Start typing…'}
+                placeholder={openApiNote ? 'OpenAPI document JSON' : tipsCreated ? 'Start typing...' : '/tips'}
                 readOnly={openApiNote}
                 spellCheck={false}
                 className="absolute inset-0 w-full h-full bg-transparent text-zinc-300 note-content p-4 resize-none outline-none placeholder-zinc-800 overflow-y-auto"
               />
+              {helpCommandReady && (
+                <div className="absolute top-4 left-4 z-10 pointer-events-none">
+                  <div className="rounded-md border border-blue-800/70 bg-blue-950/90 px-2.5 py-1.5 text-[11px] text-blue-100 shadow-lg shadow-black/30">
+                    Press Enter to create a jot.it tips note
+                  </div>
+                </div>
+              )}
               {pendingCalc && pendingCalcInline?.visible && (
                 <div
                   className="absolute z-10 pointer-events-none flex items-start gap-2"

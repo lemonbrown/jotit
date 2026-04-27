@@ -4,6 +4,7 @@ import { scheduleSyncPush } from '../utils/sync'
 import { importDroppedFiles } from '../utils/importNotes'
 
 export function useNoteDropImport({
+  activeCollectionId,
   clearSearch,
   maxFileSize,
   setActiveNoteId,
@@ -38,7 +39,7 @@ export function useNoteDropImport({
     const files = Array.from(e.dataTransfer.files)
     if (!files.length) return
 
-    const created = await importDroppedFiles(files, maxFileSize)
+    const created = await importDroppedFiles(files, maxFileSize, { collectionId: activeCollectionId })
     if (!created.length) return
 
     setNotes(prev => [...created, ...prev])
@@ -46,7 +47,7 @@ export function useNoteDropImport({
     clearSearch()
     schedulePersist()
     scheduleSyncPush()
-  }, [clearSearch, maxFileSize, setActiveNoteId, setNotes])
+  }, [activeCollectionId, clearSearch, maxFileSize, setActiveNoteId, setNotes])
 
   return {
     handleDragEnter,

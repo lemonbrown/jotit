@@ -14,6 +14,7 @@ import {
 } from '../utils/patternCategories'
 import { NOTE_TYPE_TEXT } from '../utils/noteTypes'
 import { buildNoteSearchArtifacts } from '../utils/searchIndex'
+import { ALL_COLLECTION_ID } from '../utils/collectionFactories'
 
 export function useAppLifecycle({
   dbReady,
@@ -25,19 +26,26 @@ export function useAppLifecycle({
   showSinglePaneForNote,
   snippetsRef,
   user,
+  loadCollections,
+  refreshCollections,
 }) {
   useEffect(() => {
     initDB().then(() => {
+      const collectionState = loadCollections?.()
       const loaded = getAllNotes()
       setNotes(loaded)
       setSnippets(getAllSnippets())
-      showSinglePaneForNote(loaded[0]?.id ?? null)
+      const activeCollectionId = collectionState?.activeCollectionId
+      const firstNote = activeCollectionId && activeCollectionId !== ALL_COLLECTION_ID
+        ? loaded.find(note => note.collectionId === activeCollectionId)
+        : loaded[0]
+      showSinglePaneForNote(firstNote?.id ?? null)
       setDbReady(true)
     }).catch(err => {
       console.error('[jot.it] DB init failed:', err)
       setDbReady(true)
     })
-  }, [setDbReady, setNotes, setSnippets, showSinglePaneForNote])
+  }, [loadCollections, setDbReady, setNotes, setSnippets, showSinglePaneForNote])
 
   useEffect(() => {
     if (!dbReady) return
@@ -102,13 +110,19 @@ export function useAppLifecycle({
 
   useEffect(() => {
     if (!dbReady || !user) return
-    syncAll().then(() => setNotes(getAllNotes()))
-  }, [dbReady, setNotes, user])
+    syncAll().then(() => {
+      refreshCollections?.()
+      setNotes(getAllNotes())
+    })
+  }, [dbReady, refreshCollections, setNotes, user])
 
   useEffect(() => {
     if (!user) return
-    const onFocus = () => syncPull().then(() => setNotes(getAllNotes()))
+    const onFocus = () => syncPull().then(() => {
+      refreshCollections?.()
+      setNotes(getAllNotes())
+    })
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [setNotes, user])
+  }, [refreshCollections, setNotes, user])
 }
