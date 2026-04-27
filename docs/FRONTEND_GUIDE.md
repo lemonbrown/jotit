@@ -27,6 +27,8 @@ The main state buckets are:
 - `src/hooks/useNoteMutations.js`: write/delete/update paths
 - `src/hooks/useServerAiStatus.js`: signed-in account check for server AI availability
 - `src/hooks/useLocalAgentStatus.js`: local `jotit-agent` health detection for HTTP execution
+- `src/pages/PublicPages.jsx`: public `/n` and `/b` page routing/rendering
+- `src/components/public/*`: public note, bucket, collection, and markdown display components
 
 Supporting utilities:
 
@@ -38,6 +40,7 @@ Supporting utilities:
 - `src/utils/importNotes.js`: dropped-file import rules
 - `src/utils/attachments.js`: image validation, resize pipeline, marker helpers
 - `src/utils/openapi/*`: OpenAPI parsing, normalization, request generation, and validation helpers
+- `src/utils/publicContent.js`: public markdown, diagram, heading, CSV, and timestamp helpers
 
 ## App flow
 
@@ -107,6 +110,13 @@ Image attachments:
 8. A content-change effect also removes orphaned DB rows if a marker was deleted by hand.
 9. Attachments are local-only for now — they are not synced to Postgres.
 
+Public sharing pages:
+
+1. `/n/:slug`, `/b/:bucket`, and `/b/:bucket/:collectionSlug` are frontend-rendered routes.
+2. Public pages load data from `/api/public-pages/*`.
+3. Public page rendering should stay in `src/pages/PublicPages.jsx`, `src/components/public/*`, and shared content utilities.
+4. Do not put public page fetch/rendering behavior into `src/App.jsx`; the authenticated app shell is separate from public pages.
+
 ## Key invariants
 
 - `App.jsx` composes; it should not become the new home for deep behavior.
@@ -114,6 +124,7 @@ Image attachments:
 - Persistence happens close to mutation logic.
 - Search uses a local-first strategy for guests and a server-backed account search path for signed-in users.
 - OpenAPI documents are dedicated note types, not plain text notes with ad hoc parsing scattered through the UI.
+- Public pages are rendered from normal Vite assets, not server-generated HTML strings.
 - AI behavior is additive, not required for the app to function.
 - Guest users should only get local, non-AI search behavior.
 - Signed-in AI access should be mediated by the server, not by a user-provided client key.

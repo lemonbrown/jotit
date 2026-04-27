@@ -28,10 +28,20 @@ import { useAuth } from './contexts/AuthContext'
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
 const COMMAND_TOOLBARS_HIDDEN_KEY = 'jotit_command_toolbars_hidden'
+const NOTE_LIST_METADATA_HIDDEN_KEY = 'jotit_note_list_metadata_hidden'
 const TIPS_CREATED_KEY = 'jotit_tips_created'
 
+function normalizeCollectionSlug(name) {
+  return String(name ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 export default function App() {
-  const { user, loading: authLoading, logout } = useAuth()
+  const { user, loading: authLoading, logout, refreshUser, bucketName } = useAuth()
 
   if (authLoading) {
     return (
@@ -44,10 +54,10 @@ export default function App() {
     )
   }
 
-  return <AppShell user={user} logout={logout} />
+  return <AppShell user={user} logout={logout} refreshUser={refreshUser} bucketName={bucketName} />
 }
 
-function AppShell({ user, logout }) {
+function AppShell({ user, logout, refreshUser, bucketName }) {
   const [dbReady, setDbReady] = useState(false)
   const [notes, setNotes] = useState([])
   const [snippets, setSnippets] = useState([])
@@ -69,6 +79,9 @@ function AppShell({ user, logout }) {
   const [simpleEditorMode, setSimpleEditorMode] = useState(false)
   const [commandToolbarsHidden, setCommandToolbarsHidden] = useState(() => (
     localStorage.getItem(COMMAND_TOOLBARS_HIDDEN_KEY) !== 'false'
+  ))
+  const [noteListMetadataHidden, setNoteListMetadataHidden] = useState(() => (
+    localStorage.getItem(NOTE_LIST_METADATA_HIDDEN_KEY) === 'true'
   ))
   const [tipsCreated, setTipsCreated] = useState(() => localStorage.getItem(TIPS_CREATED_KEY) === 'true')
   const [editorFocusNonce, setEditorFocusNonce] = useState(0)
@@ -110,6 +123,7 @@ function AppShell({ user, logout }) {
     refreshCollections,
     renameCollection,
     setActiveCollectionId,
+    setCollectionPublic,
   } = useCollectionCatalog({
     notesRef,
     resetWorkspace,
@@ -343,6 +357,47 @@ function AppShell({ user, logout }) {
     setShowSettings(false)
   }, [])
 
+  const handleLoadBucketInfo = useCallback(async () => {
+    const token = localStorage.getItem('jotit_auth_token')
+    if (!token) return { ok: true, bucketName: '', publicCollections: [], publicNotes: [] }
+
+    try {
+      const res = await fetch('/api/bucket/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to load bucket info' }
+      await refreshUser().catch(() => {})
+      return {
+        ok: true,
+        bucketName: data.bucketName ?? '',
+        publicCollections: data.publicCollections ?? [],
+        publicNotes: data.publicNotes ?? [],
+      }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [refreshUser])
+
+  const handleSaveBucketName = useCallback(async (nextBucketName) => {
+    const token = localStorage.getItem('jotit_auth_token')
+    if (!token) return { error: 'Sign in required' }
+
+    try {
+      const res = await fetch('/api/bucket/name', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bucketName: nextBucketName }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to save bucket name' }
+      await refreshUser().catch(() => {})
+      return { ok: true, bucketName: data.bucketName ?? nextBucketName }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [refreshUser])
+
   const handleRegenerateKeys = useCallback(async (password) => {
     const token = localStorage.getItem('jotit_auth_token')
     if (!token) throw new Error('Not logged in')
@@ -358,21 +413,50 @@ function AppShell({ user, logout }) {
     if (!res.ok) throw new Error(data.error ?? 'Failed to upload keys')
   }, [])
 
-  const handlePublish = useCallback(async (bucketName) => {
-    const publicNotes = notesRef.current.filter(note => note.isPublic)
+  const handleSetCollectionVisibility = useCallback(async (collection, isPublic) => {
+    if (!user) {
+      setShowAuth(true)
+      return { error: 'Sign in required' }
+    }
+    if (!collection?.id || collection.isVirtual) return { error: 'Select a collection first' }
+
     try {
-      const res = await fetch('/api/bucket/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bucketName, notes: publicNotes }),
+      const res = await fetch(`/api/collections/${encodeURIComponent(collection.id)}/visibility`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('jotit_auth_token')}` },
+        body: JSON.stringify({ isPublic }),
       })
-      const data = await res.json()
-      if (!res.ok) return { error: data.error ?? 'Publish failed' }
-      return { ok: true, count: data.count, url: data.url }
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to update collection visibility' }
+      setCollectionPublic(collection.id, isPublic)
+      await refreshUser().catch(() => {})
+      return { ok: true, collection: data.collection ?? null }
     } catch (e) {
       return { error: e.message ?? 'Network error' }
     }
-  }, [])
+  }, [refreshUser, setCollectionPublic, user])
+
+  const handleSetNoteCollectionVisibility = useCallback(async (note, collectionExcluded) => {
+    if (!user) {
+      setShowAuth(true)
+      return { error: 'Sign in required' }
+    }
+    if (!note?.id) return { error: 'Note not found' }
+
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(note.id)}/collection-visibility`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('jotit_auth_token')}` },
+        body: JSON.stringify({ collectionExcluded }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to update note visibility' }
+      updateNote(note.id, { collectionExcluded })
+      return { ok: true, note: data.note ?? null }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [updateNote, user])
 
   const handlePublishNote = useCallback(async (note, viewMode) => {
     try {
@@ -455,9 +539,17 @@ function AppShell({ user, logout }) {
     setCommandToolbarsHidden(hidden => !hidden)
   }, [])
 
+  const toggleNoteListMetadata = useCallback(() => {
+    setNoteListMetadataHidden(hidden => !hidden)
+  }, [])
+
   useEffect(() => {
     localStorage.setItem(COMMAND_TOOLBARS_HIDDEN_KEY, commandToolbarsHidden ? 'true' : 'false')
   }, [commandToolbarsHidden])
+
+  useEffect(() => {
+    localStorage.setItem(NOTE_LIST_METADATA_HIDDEN_KEY, noteListMetadataHidden ? 'true' : 'false')
+  }, [noteListMetadataHidden])
 
   useEffect(() => {
     const handler = (e) => {
@@ -469,7 +561,8 @@ function AppShell({ user, logout }) {
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navigateLocationHistory(-1) }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navigateLocationHistory(1) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); searchRef.current?.focus() }
-      if (isBackslashShortcut && e.shiftKey) { e.preventDefault(); toggleSimpleEditorMode() }
+      if (isBackslashShortcut && e.shiftKey && e.altKey) { e.preventDefault(); toggleNoteListMetadata() }
+      else if (isBackslashShortcut && e.shiftKey) { e.preventDefault(); toggleSimpleEditorMode() }
       else if (isBackslashShortcut && e.altKey) { e.preventDefault(); toggleCommandToolbars() }
       else if (isBackslashShortcut) { e.preventDefault(); toggleNotesPane() }
       if (e.key === 'Escape') { clearSearch(); setShowSettings(false); setShowHelp(false); setShowSnippets(false); setShowSharedLinks(false) }
@@ -477,7 +570,7 @@ function AppShell({ user, logout }) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [clearSearch, createNote, cycleCollection, navigateLocationHistory, toggleNotesPane, toggleSimpleEditorMode, toggleCommandToolbars])
+  }, [clearSearch, createNote, cycleCollection, navigateLocationHistory, toggleNotesPane, toggleSimpleEditorMode, toggleCommandToolbars, toggleNoteListMetadata])
 
   const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? collectionNotes, [collectionNotes, searchResults])
   const searchMatches = useMemo(
@@ -488,6 +581,10 @@ function AppShell({ user, logout }) {
     .map(pane => ({ ...pane, note: notes.find(note => note.id === pane.noteId) }))
     .filter(pane => pane.note)
   const publicNoteCount = notes.filter(note => note.isPublic).length
+  const publicCollectionCount = collections.filter(collection => collection.isPublic).length
+  const activeCollectionPublicUrl = activeCollection && !activeCollection.isVirtual && activeCollection.isPublic && bucketName
+    ? `/b/${bucketName}/${normalizeCollectionSlug(activeCollection.name)}`
+    : ''
   const canGoBack = locationHistoryIndex > 0
   const canGoForward = locationHistoryIndex >= 0 && locationHistoryIndex < locationHistory.length - 1
   const shouldShowNotesPane = !notesPaneHidden && !simpleEditorMode
@@ -549,7 +646,7 @@ function AppShell({ user, logout }) {
           >
             {collections.length > 1 && <option value={ALL_COLLECTION_ID}>All notes</option>}
             {collections.map(collection => (
-              <option key={collection.id} value={collection.id}>{collection.name}</option>
+              <option key={collection.id} value={collection.id}>{collection.isPublic ? `[public] ${collection.name}` : collection.name}</option>
             ))}
           </select>
           <button
@@ -580,6 +677,33 @@ function AppShell({ user, logout }) {
               <path fillRule="evenodd" d="M8.75 1A1.75 1.75 0 007 2.75V3H4.75a.75.75 0 000 1.5h10.5a.75.75 0 000-1.5H13v-.25A1.75 1.75 0 0011.25 1h-2.5zM8.5 3v-.25a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3zM6 6a.75.75 0 01.75.75v8.5a.75.75 0 001.5 0v-8.5A.75.75 0 016 6zm4 .75a.75.75 0 00-1.5 0v8.5a.75.75 0 001.5 0v-8.5zm2.75-.75a.75.75 0 00-.75.75v8.5a.75.75 0 001.5 0v-8.5a.75.75 0 00-.75-.75z" clipRule="evenodd" />
             </svg>
           </button>
+          <button
+            onClick={async () => {
+              const nextPublic = !activeCollection?.isPublic
+              const result = await handleSetCollectionVisibility(activeCollection, nextPublic)
+              if (result?.error) window.alert(result.error)
+            }}
+            disabled={!activeCollection || activeCollection.isVirtual}
+            title={activeCollection?.isPublic ? 'Make collection private' : 'Make collection public'}
+            className={`h-7 px-2.5 text-[11px] rounded-md border transition-colors disabled:text-zinc-800 disabled:border-zinc-900 disabled:hover:bg-transparent ${
+              activeCollection?.isPublic
+                ? 'text-emerald-300 border-emerald-800 bg-emerald-950/40 hover:bg-emerald-950/60'
+                : 'text-zinc-400 border-zinc-800 hover:text-zinc-200 hover:bg-zinc-800'
+            }`}
+          >
+            {activeCollection?.isPublic ? 'Public' : 'Private'}
+          </button>
+          {activeCollectionPublicUrl && (
+            <button
+              onClick={async () => {
+                try { await navigator.clipboard.writeText(`${window.location.origin}${activeCollectionPublicUrl}`) } catch {}
+              }}
+              title={activeCollectionPublicUrl}
+              className="hidden md:inline-flex h-7 items-center px-2.5 text-[11px] rounded-md border border-blue-900/70 text-blue-300 bg-blue-950/30 hover:bg-blue-950/50 transition-colors font-mono"
+            >
+              {activeCollectionPublicUrl}
+            </button>
+          )}
         </div>
 
         <div className="order-3 w-full md:order-none md:flex-1 md:max-w-sm">
@@ -823,6 +947,8 @@ function AppShell({ user, logout }) {
             diffActive={diffActive}
             isPeekOpen={notePeekOpen}
             onPeekOpenChange={setNotePeekOpen}
+            noteMetadataHidden={noteListMetadataHidden}
+            onToggleNoteMetadata={toggleNoteListMetadata}
             onNoteDragStart={(noteId) => {
               setDraggedNoteId(noteId)
               setDragOverCollectionId(null)
@@ -868,15 +994,19 @@ function AppShell({ user, logout }) {
                 <NotePanel
                   key={`${paneId}:${note.id}`}
                   note={note}
+                  collection={collections.find(collection => collection.id === note.collectionId) ?? null}
+                  bucketName={bucketName}
                   snippets={snippets}
                   aiEnabled={aiEnabled}
                   user={user}
                   onRequireAuth={() => setShowAuth(true)}
                   onUpdate={(updates) => updateNote(note.id, updates)}
+                  onReplaceInNotes={(updates) => updates.forEach(({ id, content }) => updateNote(id, { content }))}
                   onDelete={() => deleteNote(note.id)}
                   onCreateSnippet={createSnippet}
                   onSearchSnippets={searchSnippets}
                   onPublishNote={(mode) => handlePublishNote(note, mode)}
+                  onToggleCollectionExcluded={(collectionExcluded) => handleSetNoteCollectionVisibility(note, collectionExcluded)}
                   onCreateNoteFromContent={createNoteFromContent}
                   onCreateTipsNote={createTipsNote}
                   tipsCreated={tipsCreated}
@@ -915,12 +1045,15 @@ function AppShell({ user, logout }) {
           onClose={() => setShowSettings(false)}
           onDeleteAllNotes={deleteAllNotes}
           onExportDB={exportSQLite}
-          onPublish={handlePublish}
+          onLoadBucketInfo={handleLoadBucketInfo}
+          onSaveBucketName={handleSaveBucketName}
           onSeedNotes={handleSeedDeveloperNotes}
           onRegenerateKeys={handleRegenerateKeys}
           publicNoteCount={publicNoteCount}
+          publicCollectionCount={publicCollectionCount}
           noteCount={collectionNotes.length}
           user={user}
+          bucketName={bucketName}
         />
       )}
       {showSnippets && (

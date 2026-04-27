@@ -20,27 +20,30 @@ export function createSyncPool(databaseUrl) {
     `ALTER TABLE notes ADD COLUMN IF NOT EXISTS note_data_iv TEXT`,
     `ALTER TABLE notes ADD COLUMN IF NOT EXISTS note_data_tag TEXT`,
     `ALTER TABLE notes ADD COLUMN IF NOT EXISTS collection_id TEXT`,
+    `ALTER TABLE notes ADD COLUMN IF NOT EXISTS collection_excluded INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE collections ADD COLUMN IF NOT EXISTS is_public INTEGER NOT NULL DEFAULT 0`,
   ]
 
   pgPool.query(`
     CREATE TABLE IF NOT EXISTS notes (
-      id              TEXT    NOT NULL,
-      user_id         INTEGER NOT NULL,
-      collection_id   TEXT,
-      content         TEXT    NOT NULL DEFAULT '',
-      categories      TEXT    NOT NULL DEFAULT '[]',
-      embedding       TEXT,
-      note_type       TEXT    NOT NULL DEFAULT 'text',
-      note_data       TEXT,
-      created_at      BIGINT  NOT NULL,
-      updated_at      BIGINT  NOT NULL,
-      is_public       INTEGER NOT NULL DEFAULT 0,
-      deleted_at      BIGINT,
-      encryption_tier INTEGER NOT NULL DEFAULT 0,
-      content_iv      TEXT,
-      content_tag     TEXT,
-      note_data_iv    TEXT,
-      note_data_tag   TEXT,
+      id                  TEXT    NOT NULL,
+      user_id             INTEGER NOT NULL,
+      collection_id       TEXT,
+      content             TEXT    NOT NULL DEFAULT '',
+      categories          TEXT    NOT NULL DEFAULT '[]',
+      embedding           TEXT,
+      note_type           TEXT    NOT NULL DEFAULT 'text',
+      note_data           TEXT,
+      created_at          BIGINT  NOT NULL,
+      updated_at          BIGINT  NOT NULL,
+      is_public           INTEGER NOT NULL DEFAULT 0,
+      deleted_at          BIGINT,
+      encryption_tier     INTEGER NOT NULL DEFAULT 0,
+      content_iv          TEXT,
+      content_tag         TEXT,
+      note_data_iv        TEXT,
+      note_data_tag       TEXT,
+      collection_excluded INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (id, user_id)
     );
     ALTER TABLE notes ADD COLUMN IF NOT EXISTS collection_id TEXT;
@@ -56,6 +59,7 @@ export function createSyncPool(databaseUrl) {
       created_at  BIGINT  NOT NULL,
       updated_at  BIGINT  NOT NULL,
       is_default  INTEGER NOT NULL DEFAULT 0,
+      is_public   INTEGER NOT NULL DEFAULT 0,
       deleted_at  BIGINT,
       PRIMARY KEY (id, user_id)
     );
@@ -164,13 +168,14 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
 
         await pgPool.query(
           `INSERT INTO collections
-             (id, user_id, name, description, created_at, updated_at, is_default, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+             (id, user_id, name, description, created_at, updated_at, is_default, is_public, deleted_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)
            ON CONFLICT (id, user_id) DO UPDATE SET
              name        = EXCLUDED.name,
              description = EXCLUDED.description,
              updated_at  = EXCLUDED.updated_at,
              is_default  = EXCLUDED.is_default,
+             is_public   = EXCLUDED.is_public,
              deleted_at  = NULL
            WHERE collections.updated_at < EXCLUDED.updated_at`,
           [
@@ -181,6 +186,7 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
             collection.created_at ?? Date.now(),
             collection.updated_at ?? Date.now(),
             collection.is_default ? 1 : 0,
+            collection.is_public ? 1 : 0,
           ]
         )
       }
@@ -190,8 +196,8 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
 
         if (note.deleted) {
           await pgPool.query(
-            `INSERT INTO notes (id, user_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, deleted_at)
-             VALUES ($1, $2, '', '[]', NULL, 'text', NULL, $3, $3, 0, $3)
+            `INSERT INTO notes (id, user_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, deleted_at, collection_excluded)
+             VALUES ($1, $2, '', '[]', NULL, 'text', NULL, $3, $3, 0, $3, 0)
              ON CONFLICT (id, user_id) DO UPDATE SET deleted_at = $3, updated_at = $3`,
             [note.id, userId, Date.now()]
           )
@@ -211,6 +217,7 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
           created_at: note.created_at ?? Date.now(),
           updated_at: note.updated_at ?? Date.now(),
           is_public: note.is_public ? 1 : 0,
+          collection_excluded: note.collection_excluded ? 1 : 0,
           encryption_tier: 0,
           content_iv: null,
           content_tag: null,
@@ -243,8 +250,8 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
           `INSERT INTO notes
              (id, user_id, content, categories, embedding, note_type, note_data,
               created_at, updated_at, is_public, encryption_tier, collection_id,
-              content_iv, content_tag, note_data_iv, note_data_tag)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+              content_iv, content_tag, note_data_iv, note_data_tag, collection_excluded)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
            ON CONFLICT (id, user_id) DO UPDATE SET
              content         = EXCLUDED.content,
              categories      = EXCLUDED.categories,
@@ -259,12 +266,13 @@ export function registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb
              content_iv      = EXCLUDED.content_iv,
              content_tag     = EXCLUDED.content_tag,
              note_data_iv    = EXCLUDED.note_data_iv,
-             note_data_tag   = EXCLUDED.note_data_tag
+             note_data_tag   = EXCLUDED.note_data_tag,
+             collection_excluded = EXCLUDED.collection_excluded
            WHERE notes.updated_at < EXCLUDED.updated_at`,
           [
             row.id, userId, row.content, row.categories, null,
             row.note_type, row.note_data, row.created_at, row.updated_at, row.is_public,
-            row.encryption_tier, row.collection_id, row.content_iv, row.content_tag, row.note_data_iv, row.note_data_tag,
+            row.encryption_tier, row.collection_id, row.content_iv, row.content_tag, row.note_data_iv, row.note_data_tag, row.collection_excluded,
           ]
         )
 

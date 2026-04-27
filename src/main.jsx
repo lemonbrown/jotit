@@ -3,9 +3,10 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import Landing from './components/Landing.jsx'
+import PublicPages, { getPublicRoute } from './pages/PublicPages.jsx'
 import { AuthProvider } from './contexts/AuthContext.jsx'
 
-function Root() {
+function InteractiveRoot() {
   const [showApp, setShowApp] = useState(
     () => window.location.pathname !== '/'
   )
@@ -24,6 +25,12 @@ function Root() {
       <App />
     </AuthProvider>
   )
+}
+
+function Root() {
+  const publicRoute = getPublicRoute()
+  if (publicRoute) return <PublicPages />
+  return <InteractiveRoot />
 }
 
 createRoot(document.getElementById('root')).render(

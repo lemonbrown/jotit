@@ -4,12 +4,15 @@ import jwt from 'jsonwebtoken'
 import { sendJsonError } from './http.js'
 import { generateUserDataKey, hasMasterKey } from './encryption.js'
 
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$|^[a-z0-9]{2,40}$/
+
 export function createUserStore(userDbPath) {
   const userDb = new Database(userDbPath)
   userDb.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id                    INTEGER PRIMARY KEY AUTOINCREMENT,
       email                 TEXT UNIQUE NOT NULL,
+      bucket_name           TEXT UNIQUE,
       password_hash         TEXT NOT NULL,
       encrypted_data_key    TEXT,
       data_key_iv           TEXT,
@@ -21,6 +24,7 @@ export function createUserStore(userDbPath) {
 
   // Migrations for existing databases
   const migrations = [
+    `ALTER TABLE users ADD COLUMN bucket_name TEXT`,
     `ALTER TABLE users ADD COLUMN encrypted_data_key TEXT`,
     `ALTER TABLE users ADD COLUMN data_key_iv TEXT`,
     `ALTER TABLE users ADD COLUMN public_key TEXT`,
@@ -29,6 +33,7 @@ export function createUserStore(userDbPath) {
   for (const sql of migrations) {
     try { userDb.exec(sql) } catch {}
   }
+  try { userDb.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_bucket_name ON users(bucket_name)') } catch {}
 
   return userDb
 }
@@ -56,10 +61,60 @@ function createAuthToken(jwtSecret, userId, email) {
   return jwt.sign({ userId, email }, jwtSecret, { expiresIn: '30d' })
 }
 
+export function sanitizeBucketName(value) {
+  const normalized = String(value ?? '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+
+  if (!normalized) return ''
+  if (BUCKET_NAME_RE.test(normalized)) return normalized
+
+  const compact = normalized.replace(/-/g, '')
+  if (BUCKET_NAME_RE.test(compact)) return compact
+  return ''
+}
+
+function generateUniqueBucketName(userDb, seed, excludeUserId = null) {
+  const baseSeed = sanitizeBucketName(seed) || 'user'
+  let candidate = baseSeed
+  let suffix = 2
+
+  while (candidate) {
+    const existing = userDb.prepare('SELECT id FROM users WHERE bucket_name = ?').get(candidate)
+    if (!existing || existing.id === excludeUserId) return candidate
+
+    const suffixText = `-${suffix}`
+    const nextBase = baseSeed.slice(0, Math.max(1, 40 - suffixText.length)).replace(/-+$/g, '') || 'user'
+    candidate = `${nextBase}${suffixText}`
+    suffix += 1
+  }
+
+  return ''
+}
+
+export function ensureUserBucketName(userDb, userId) {
+  const user = userDb.prepare('SELECT id, email, bucket_name FROM users WHERE id = ?').get(userId)
+  if (!user) return null
+  if (user.bucket_name) return user.bucket_name
+
+  const emailPrefix = String(user.email ?? '').split('@')[0] || `user-${user.id}`
+  const bucketName = generateUniqueBucketName(userDb, emailPrefix, user.id)
+  if (!bucketName) return null
+
+  userDb.prepare('UPDATE users SET bucket_name = ? WHERE id = ?').run(bucketName, user.id)
+  return bucketName
+}
+
 function userPublicFields(user) {
   return {
     id: user.id,
     email: user.email,
+    bucketName: user.bucket_name ?? null,
     publicKey: user.public_key ?? null,
     encryptedPrivateKey: user.encrypted_private_key ?? null,
   }
@@ -99,7 +154,7 @@ export function registerAuthRoutes(app, { jwtSecret, requireAuth, userDb }) {
       const token = createAuthToken(jwtSecret, result.lastInsertRowid, normalizedEmail)
       res.json({
         token,
-        user: { id: result.lastInsertRowid, email: normalizedEmail, publicKey: null, encryptedPrivateKey: null },
+        user: { id: result.lastInsertRowid, email: normalizedEmail, bucketName: null, publicKey: null, encryptedPrivateKey: null },
       })
     } catch (e) {
       if (e.message?.includes('UNIQUE')) {

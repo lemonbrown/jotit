@@ -35,6 +35,36 @@ export function createSnippetDraft({ content, name = '', sourceNoteId = null }) 
   }
 }
 
+export function createPublicCloneNote({ shared, slug, collectionId = null }) {
+  const note = shared?.note ?? shared
+  const now = Date.now()
+  const sourceUpdatedAt = Number(note?.updatedAt ?? 0)
+  const publishedAt = Number(shared?.publishedAt ?? 0)
+
+  return {
+    id: generateId(),
+    content: String(note?.content ?? ''),
+    categories: Array.isArray(note?.categories) ? note.categories : [],
+    embedding: null,
+    isPublic: false,
+    collectionId,
+    noteType: note?.noteType ?? NOTE_TYPE_TEXT,
+    noteData: {
+      ...(note?.noteData && typeof note.noteData === 'object' ? note.noteData : {}),
+      publicClone: {
+        slug,
+        url: slug ? `/n/${slug}` : null,
+        sourceNoteId: note?.id ?? null,
+        publishedAt,
+        sourceUpdatedAt,
+        clonedAt: now,
+      },
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 export function createImportedDocxNote(fileName, text) {
   const now = Date.now()
   return {

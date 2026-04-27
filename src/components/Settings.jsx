@@ -17,19 +17,24 @@ export default function Settings({
   onClose,
   onDeleteAllNotes,
   onExportDB,
-  onPublish,
+  onLoadBucketInfo,
+  onSaveBucketName,
   onSeedNotes,
   onRegenerateKeys,
   publicNoteCount,
+  publicCollectionCount = 0,
   noteCount = 0,
   user,
+  bucketName: initialBucketName = '',
 }) {
   const [serverProxy, setServerProxy] = useState(settings.serverProxy ?? false)
   const [localAgentToken, setLocalAgentToken] = useState(settings.localAgentToken ?? '')
-  const [bucketName, setBucketName] = useState(settings.bucketName ?? '')
+  const [bucketName, setBucketName] = useState(initialBucketName || settings.bucketName || '')
   const [theme, setTheme] = useState(settings.theme ?? 'dark')
-  const [publishing, setPublishing] = useState(false)
-  const [publishResult, setPublishResult] = useState(null)
+  const [bucketSaving, setBucketSaving] = useState(false)
+  const [bucketStatus, setBucketStatus] = useState(null)
+  const [bucketCollections, setBucketCollections] = useState([])
+  const [bucketNotes, setBucketNotes] = useState([])
   const localAgentStatus = useLocalAgentStatus()
 
   const [hasE2EKeys, setHasE2EKeys] = useState(false)
@@ -41,6 +46,28 @@ export default function Settings({
   useEffect(() => {
     if (user) getStoredKeyPair().then(kp => setHasE2EKeys(!!kp))
   }, [user])
+
+  useEffect(() => {
+    setBucketName(initialBucketName || settings.bucketName || '')
+  }, [initialBucketName, settings.bucketName])
+
+  useEffect(() => {
+    if (!user || !onLoadBucketInfo) return
+    let cancelled = false
+
+    onLoadBucketInfo().then(result => {
+      if (cancelled || !result) return
+      if (result.ok) {
+        setBucketName(result.bucketName ?? '')
+        setBucketCollections(result.publicCollections ?? [])
+        setBucketNotes(result.publicNotes ?? [])
+      } else if (result.error) {
+        setBucketStatus({ error: result.error })
+      }
+    }).catch(() => {})
+
+    return () => { cancelled = true }
+  }, [onLoadBucketInfo, user?.id])
 
   const handleRegenerate = async () => {
     if (!regenPassword) return
@@ -64,19 +91,20 @@ export default function Settings({
   }
 
   const handleSave = () => {
-    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), bucketName: bucketName.trim(), theme })
+    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), theme })
   }
 
-  const handlePublish = async () => {
+  const handleSaveBucketName = async () => {
     const slug = bucketName.trim()
-    if (!SLUG_RE.test(slug)) return
-    setPublishing(true)
-    setPublishResult(null)
+    if (!SLUG_RE.test(slug) || !onSaveBucketName) return
+    setBucketSaving(true)
+    setBucketStatus(null)
     try {
-      const result = await onPublish(slug)
-      setPublishResult(result)
+      const result = await onSaveBucketName(slug)
+      setBucketStatus(result)
+      if (result?.ok) setBucketName(result.bucketName ?? slug)
     } finally {
-      setPublishing(false)
+      setBucketSaving(false)
     }
   }
 
@@ -178,40 +206,64 @@ export default function Settings({
           <div className="pt-1 border-t border-zinc-800 space-y-2">
             <div className="flex items-center justify-between">
               <label className="block text-xs font-medium text-zinc-400">Public Bucket</label>
-              {publicNoteCount > 0 ? (
-                <span className="text-[11px] text-emerald-500">{publicNoteCount} public note{publicNoteCount !== 1 ? 's' : ''}</span>
+              {publicCollectionCount > 0 ? (
+                <span className="text-[11px] text-emerald-500">
+                  {publicCollectionCount} public collection{publicCollectionCount !== 1 ? 's' : ''} · {bucketNotes.length} direct note{bucketNotes.length !== 1 ? 's' : ''}
+                </span>
               ) : (
-                <span className="text-[11px] text-zinc-600">no public notes - toggle notes to make them public</span>
+                <span className="text-[11px] text-zinc-600">
+                  {bucketNotes.length ? `${bucketNotes.length} direct note${bucketNotes.length !== 1 ? 's' : ''} in bucket` : 'no public collections yet'}
+                </span>
               )}
             </div>
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={bucketName}
-                onChange={e => { setBucketName(e.target.value.toLowerCase()); setPublishResult(null) }}
+                onChange={e => { setBucketName(e.target.value.toLowerCase()); setBucketStatus(null) }}
                 placeholder="your-bucket-name"
                 spellCheck={false}
                 className="flex-1 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
               />
               <button
-                onClick={handlePublish}
-                disabled={publishing || !SLUG_RE.test(bucketName.trim()) || publicNoteCount === 0}
+                onClick={handleSaveBucketName}
+                disabled={bucketSaving || !SLUG_RE.test(bucketName.trim())}
                 className="px-3 py-2 text-xs bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md transition-colors font-medium whitespace-nowrap"
               >
-                {publishing ? 'Publishing...' : 'Publish'}
+                {bucketSaving ? 'Saving...' : 'Save'}
               </button>
             </div>
             {!SLUG_RE.test(bucketName.trim()) && bucketName.trim().length > 0 && (
               <p className="text-[11px] text-red-400">Use 2-40 lowercase letters, numbers, or hyphens</p>
             )}
-            {publishResult?.ok && (
-              <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                Published {publishResult.count} note{publishResult.count !== 1 ? 's' : ''} {'->'} <span className="font-mono text-emerald-300">/b/{bucketName.trim()}</span>
+            {bucketName.trim() && SLUG_RE.test(bucketName.trim()) && (
+              <p className="text-[11px] text-zinc-500">
+                Bucket URL: <span className="font-mono text-zinc-300">/b/{bucketName.trim()}</span>
               </p>
             )}
-            {publishResult?.error && (
-              <p className="text-[11px] text-red-400">{publishResult.error}</p>
+            {bucketCollections.length > 0 && (
+              <p className="text-[11px] text-zinc-600">
+                Live now: {bucketCollections.map(collection => collection.slug).join(', ')}
+              </p>
+            )}
+            {bucketNotes.length > 0 && (
+              <p className="text-[11px] text-zinc-600">
+                Direct notes: {bucketNotes.slice(0, 4).map(note => note.title ?? 'untitled').join(', ')}{bucketNotes.length > 4 ? ` +${bucketNotes.length - 4} more` : ''}
+              </p>
+            )}
+            {bucketStatus?.ok && (
+              <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                Bucket name saved
+              </p>
+            )}
+            {bucketStatus?.error && (
+              <p className="text-[11px] text-red-400">{bucketStatus.error}</p>
+            )}
+            {publicNoteCount > 0 && (
+              <p className="text-[11px] text-zinc-600">
+                {publicNoteCount} individually shared note{publicNoteCount !== 1 ? 's' : ''} now also appear under <span className="font-mono text-zinc-300">/b/{bucketName.trim() || 'your-bucket'}</span>.
+              </p>
             )}
           </div>
 

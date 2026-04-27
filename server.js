@@ -35,6 +35,8 @@ registerPublicSharing(app, {
   bucketsFile: BUCKETS_FILE,
   publicNotesFile: PUBLIC_NOTES_FILE,
   pgPool,
+  requireAuth,
+  userDb,
 })
 registerSyncRoutes(app, { aiService, pgPool, requireAuth, userDb })
 registerSearchRoutes(app, { aiService, pgPool, requireAuth })

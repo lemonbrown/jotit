@@ -48,15 +48,32 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
+  const refreshUser = useCallback(async () => {
+    const token = localStorage.getItem(TOKEN_KEY)
+    if (!token) {
+      setUser(null)
+      return null
+    }
+
+    const res = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) {
+      localStorage.removeItem(TOKEN_KEY)
+      setUser(null)
+      throw new Error('Failed to refresh user')
+    }
+
+    const data = await res.json()
+    setUser(data.user)
+    return data.user
+  }, [])
+
   useEffect(() => {
     const token = localStorage.getItem(TOKEN_KEY)
     if (!token) { setLoading(false); return }
-    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => setUser(data.user))
-      .catch(() => localStorage.removeItem(TOKEN_KEY))
+    refreshUser()
+      .catch(() => {})
       .finally(() => setLoading(false))
-  }, [])
+  }, [refreshUser])
 
   const register = useCallback(async (email, password) => {
     const res = await fetch('/api/auth/register', {
@@ -69,7 +86,8 @@ export function AuthProvider({ children }) {
     localStorage.setItem(TOKEN_KEY, data.token)
     setUser(data.user)
     await setupE2EKeysAfterRegister(data.token, password)
-  }, [])
+    await refreshUser().catch(() => {})
+  }, [refreshUser])
 
   const login = useCallback(async (email, password) => {
     const res = await fetch('/api/auth/login', {
@@ -82,7 +100,8 @@ export function AuthProvider({ children }) {
     localStorage.setItem(TOKEN_KEY, data.token)
     setUser(data.user)
     await restoreE2EKeysAfterLogin(data.user, password)
-  }, [])
+    await refreshUser().catch(() => {})
+  }, [refreshUser])
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY)
@@ -91,7 +110,7 @@ export function AuthProvider({ children }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser, bucketName: user?.bucketName ?? null }}>
       {children}
     </AuthContext.Provider>
   )

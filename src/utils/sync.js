@@ -49,6 +49,7 @@ export async function syncPush() {
         updated_at: n.updatedAt,
         is_public: n.isPublic ? 1 : 0,
         encryption_tier: n.encryptionTier ?? 0,
+        collection_excluded: n.collectionExcluded ? 1 : 0,
       }
 
       if (n.encryptionTier === 2 && keyPair?.publicKey) {
@@ -73,6 +74,7 @@ export async function syncPush() {
         created_at: collection.createdAt,
         updated_at: collection.updatedAt,
         is_default: collection.isDefault ? 1 : 0,
+        is_public: collection.isPublic ? 1 : 0,
       }
     })
 
@@ -115,6 +117,7 @@ export async function syncPull() {
         createdAt: Number(sc.created_at),
         updatedAt: Number(sc.updated_at),
         isDefault: sc.is_default === 1,
+        isPublic: sc.is_public === 1,
       }, 0)
     }
 
@@ -172,6 +175,7 @@ export async function syncPull() {
         updatedAt: Number(sn.updated_at),
         isPublic: sn.is_public === 1,
         encryptionTier: Number(sn.encryption_tier ?? 0),
+        collectionExcluded: sn.collection_excluded === 1,
       }, 0)
     }
 

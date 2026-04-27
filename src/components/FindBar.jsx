@@ -4,8 +4,11 @@ export default function FindBar({
   regexError, inputRef,
   sectionMatches, onJumpToSection,
   scope,
+  showReplace, replaceQuery, onReplaceQueryChange,
+  onReplace, onReplaceAll,
+  replaceScope, onReplaceScopeChange,
+  replaceInputRef, replaceCount,
 }) {
-  // Show in:code / in:text autocomplete while the user is still typing the directive
   const typingDirective = query.toLowerCase().startsWith('in:') && !query.slice(3).includes(' ')
   const directivePrefix = typingDirective ? query.slice(3).toLowerCase() : ''
   const scopeOptions = typingDirective
@@ -15,11 +18,10 @@ export default function FindBar({
   return (
     <div className="flex flex-col border-b border-zinc-800 bg-zinc-950/80 shrink-0">
 
-      {/* ── Main row ── */}
+      {/* ── Find row ── */}
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="text-[10px] text-zinc-600 font-mono shrink-0">find</span>
 
-        {/* Input + scope autocomplete */}
         <div className="relative">
           <input
             ref={inputRef}
@@ -29,6 +31,7 @@ export default function FindBar({
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onNext() }
               if (e.key === 'Enter' && e.shiftKey)  { e.preventDefault(); onPrev() }
               if (e.key === 'Escape') { e.preventDefault(); onClose() }
+              if (e.key === 'Tab' && showReplace) { e.preventDefault(); replaceInputRef?.current?.focus() }
             }}
             placeholder="search… or in:code / in:text"
             spellCheck={false}
@@ -63,7 +66,6 @@ export default function FindBar({
           )}
         </div>
 
-        {/* Scope badge — shown when an in:code or in:text scope is active */}
         {scope && scope !== 'all' && (
           <span
             title={`Searching ${scope === 'code' ? 'inside' : 'outside'} code blocks. Clear query to remove.`}
@@ -77,7 +79,6 @@ export default function FindBar({
           </span>
         )}
 
-        {/* Mode pills */}
         <div className="flex items-center border border-zinc-700 rounded overflow-hidden shrink-0">
           {[
             { id: 'exact', label: 'Aa', title: 'Exact match (case-insensitive)' },
@@ -108,28 +109,87 @@ export default function FindBar({
             : `${matchIndex + 1} / ${matchCount}`}
         </span>
 
-        <button
-          onMouseDown={e => e.preventDefault()}
-          onClick={onPrev}
-          disabled={matchCount === 0}
+        <button onMouseDown={e => e.preventDefault()} onClick={onPrev} disabled={matchCount === 0}
           title="Previous match (Shift+Enter)"
-          className="text-zinc-500 hover:text-zinc-200 disabled:text-zinc-700 transition-colors shrink-0 text-base leading-none"
-        >↑</button>
-        <button
-          onMouseDown={e => e.preventDefault()}
-          onClick={onNext}
-          disabled={matchCount === 0}
+          className="text-zinc-500 hover:text-zinc-200 disabled:text-zinc-700 transition-colors shrink-0 text-base leading-none">↑</button>
+        <button onMouseDown={e => e.preventDefault()} onClick={onNext} disabled={matchCount === 0}
           title="Next match (Enter)"
-          className="text-zinc-500 hover:text-zinc-200 disabled:text-zinc-700 transition-colors shrink-0 text-base leading-none"
-        >↓</button>
+          className="text-zinc-500 hover:text-zinc-200 disabled:text-zinc-700 transition-colors shrink-0 text-base leading-none">↓</button>
 
-        <button
-          onMouseDown={e => e.preventDefault()}
-          onClick={onClose}
-          title="Close (Esc)"
-          className="ml-1 text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
-        >✕</button>
+        <button onMouseDown={e => e.preventDefault()} onClick={onClose} title="Close (Esc)"
+          className="ml-1 text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0">✕</button>
       </div>
+
+      {/* ── Replace row ── */}
+      {showReplace && (
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-zinc-800/60">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0">replace</span>
+
+          <input
+            ref={replaceInputRef}
+            value={replaceQuery}
+            onChange={e => onReplaceQueryChange(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); onReplace() }
+              if (e.key === 'Escape') { e.preventDefault(); onClose() }
+              if (e.key === 'Tab') { e.preventDefault(); inputRef?.current?.focus() }
+            }}
+            placeholder="replace with…"
+            spellCheck={false}
+            className="w-60 bg-zinc-800 border border-zinc-700 focus:border-zinc-500 rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700"
+          />
+
+          <div className="flex items-center border border-zinc-700 rounded overflow-hidden shrink-0">
+            {[
+              { id: 'note', label: 'note', title: 'Replace in current note' },
+              { id: 'collection', label: 'collection', title: 'Replace in all notes in this collection' },
+              { id: 'all', label: 'all notes', title: 'Replace in every note' },
+            ].map(({ id, label, title }, i) => (
+              <button
+                key={id}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => onReplaceScopeChange(id)}
+                title={title}
+                className={`px-2 py-0.5 text-[10px] font-mono transition-colors ${
+                  i > 0 ? 'border-l border-zinc-700' : ''
+                } ${
+                  replaceScope === id
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={onReplace}
+            disabled={!matchCount || replaceScope !== 'note'}
+            title="Replace current match and advance (Enter)"
+            className="px-2 py-0.5 text-[10px] font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800/60 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
+          >
+            replace
+          </button>
+
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={onReplaceAll}
+            disabled={!query || regexError}
+            title={`Replace all in: ${replaceScope}`}
+            className="px-2 py-0.5 text-[10px] font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 rounded bg-zinc-800/60 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
+          >
+            replace all
+          </button>
+
+          {replaceCount != null && (
+            <span className={`text-[10px] font-mono shrink-0 ${replaceCount === 0 ? 'text-zinc-600' : 'text-emerald-400'}`}>
+              {replaceCount === 0 ? 'no matches' : `${replaceCount} replaced`}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ── Section breakdown ── */}
       {sectionMatches && sectionMatches.length > 0 && (

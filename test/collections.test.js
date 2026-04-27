@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { createCollectionDraft, createDefaultCollectionDraft, DEFAULT_COLLECTION_NAME } from '../src/utils/collectionFactories.js'
 import { importFiles } from '../src/utils/importNotes.js'
+import { createPublicCloneNote } from '../src/utils/noteFactories.js'
+import { getPublicCloneInfo, isPublicClone } from '../src/utils/noteTypes.js'
 
 async function testCollectionFactoryCreatesCollectionShape() {
   const collection = createCollectionDraft({ name: ' Projects ', description: ' Client work ' })
@@ -52,9 +54,42 @@ async function testImportFilesAssignsCollectionId() {
   assert.deepEqual(upserted, notes)
 }
 
+async function testPublicCloneNoteStoresCloneMetadata() {
+  const note = createPublicCloneNote({
+    slug: 'shared-1',
+    collectionId: 'collection-1',
+    shared: {
+      publishedAt: 123,
+      note: {
+        id: 'source-note',
+        content: '# Shared\nBody',
+        categories: ['docs'],
+        updatedAt: 456,
+        viewMode: 'markdown',
+      },
+    },
+  })
+
+  assert.ok(note.id)
+  assert.equal(note.collectionId, 'collection-1')
+  assert.equal(note.content, '# Shared\nBody')
+  assert.deepEqual(note.categories, ['docs'])
+  assert.equal(note.isPublic, false)
+  assert.equal(isPublicClone(note), true)
+  assert.deepEqual(getPublicCloneInfo(note), {
+    slug: 'shared-1',
+    url: '/n/shared-1',
+    sourceNoteId: 'source-note',
+    publishedAt: 123,
+    sourceUpdatedAt: 456,
+    clonedAt: note.createdAt,
+  })
+}
+
 export default [
   ['collection factory creates collection shape', testCollectionFactoryCreatesCollectionShape],
   ['collection factory rejects blank name', testCollectionFactoryRejectsBlankName],
   ['default collection factory uses stable id', testDefaultCollectionFactoryUsesStableId],
   ['import files assigns collection id', testImportFilesAssignsCollectionId],
+  ['public clone note stores clone metadata', testPublicCloneNoteStoresCloneMetadata],
 ]

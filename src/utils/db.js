@@ -49,17 +49,18 @@ async function saveBytes(data) {
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS notes (
-    id               TEXT PRIMARY KEY,
-    collection_id    TEXT,
-    content          TEXT    NOT NULL DEFAULT '',
-    categories       TEXT    NOT NULL DEFAULT '[]',
-    embedding        TEXT,
-    note_type        TEXT    NOT NULL DEFAULT 'text',
-    note_data        TEXT,
-    created_at       INTEGER NOT NULL,
-    updated_at       INTEGER NOT NULL,
-    is_public        INTEGER NOT NULL DEFAULT 0,
-    encryption_tier  INTEGER NOT NULL DEFAULT 0
+    id                  TEXT PRIMARY KEY,
+    collection_id       TEXT,
+    content             TEXT    NOT NULL DEFAULT '',
+    categories          TEXT    NOT NULL DEFAULT '[]',
+    embedding           TEXT,
+    note_type           TEXT    NOT NULL DEFAULT 'text',
+    note_data           TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    is_public           INTEGER NOT NULL DEFAULT 0,
+    encryption_tier     INTEGER NOT NULL DEFAULT 0,
+    collection_excluded INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS snippets (
@@ -106,7 +107,8 @@ const SCHEMA = `
     updated_at     INTEGER NOT NULL,
     is_default     INTEGER NOT NULL DEFAULT 0,
     dirty          INTEGER NOT NULL DEFAULT 1,
-    pending_delete INTEGER NOT NULL DEFAULT 0
+    pending_delete INTEGER NOT NULL DEFAULT 0,
+    is_public      INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS search_metadata (
@@ -142,6 +144,8 @@ export async function initDB() {
   try { db.run('ALTER TABLE notes ADD COLUMN encryption_tier INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN collection_id TEXT') } catch {}
   try { db.run('CREATE INDEX IF NOT EXISTS idx_notes_collection_id ON notes(collection_id)') } catch {}
+  try { db.run('ALTER TABLE collections ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN collection_excluded INTEGER NOT NULL DEFAULT 0') } catch {}
 
   ensureDefaultCollection()
 
@@ -256,8 +260,8 @@ export function upsertCollectionSync(collection, dirty = 1) {
   if (!db || !collection?.id || !collection.name?.trim()) return
   db.run(
     `INSERT OR REPLACE INTO collections
-       (id, name, description, created_at, updated_at, is_default, dirty, pending_delete)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+       (id, name, description, created_at, updated_at, is_default, dirty, pending_delete, is_public)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     [
       collection.id,
       collection.name.trim(),
@@ -266,8 +270,19 @@ export function upsertCollectionSync(collection, dirty = 1) {
       collection.updatedAt,
       collection.isDefault ? 1 : 0,
       dirty,
+      collection.isPublic ? 1 : 0,
     ]
   )
+}
+
+export function setCollectionPublic(id, isPublic) {
+  if (!db) return
+  db.run('UPDATE collections SET is_public = ?, dirty = 1, updated_at = ? WHERE id = ?', [isPublic ? 1 : 0, Date.now(), id])
+}
+
+export function setNoteCollectionExcluded(noteId, excluded) {
+  if (!db) return
+  db.run('UPDATE notes SET collection_excluded = ?, dirty = 1, updated_at = ? WHERE id = ?', [excluded ? 1 : 0, Date.now(), noteId])
 }
 
 export function markCollectionPendingDelete(id) {
@@ -337,8 +352,8 @@ export function upsertNoteSync(note, dirty = 1) {
   const collectionId = note.collectionId ?? getDefaultCollection()?.id ?? 'default'
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     [
       note.id,
       collectionId,
@@ -352,6 +367,7 @@ export function upsertNoteSync(note, dirty = 1) {
       note.isPublic ? 1 : 0,
       dirty,
       note.encryptionTier ?? 0,
+      note.collectionExcluded ? 1 : 0,
     ]
   )
 }
@@ -588,31 +604,33 @@ export function exportSQLite() {
 
 function deserialize(row) {
   return {
-    id:             row.id,
-    collectionId:   row.collection_id ?? 'default',
-    content:        row.content,
-    categories:     JSON.parse(row.categories ?? '[]'),
-    embedding:      row.embedding ? JSON.parse(row.embedding) : null,
-    noteType:       row.note_type ?? 'text',
-    noteData:       row.note_data ? JSON.parse(row.note_data) : null,
-    createdAt:      row.created_at,
-    updatedAt:      row.updated_at,
-    isPublic:       row.is_public === 1,
-    dirty:          row.dirty,
-    pendingDelete:  row.pending_delete === 1,
-    encryptionTier: Number(row.encryption_tier ?? 0),
+    id:                 row.id,
+    collectionId:       row.collection_id ?? 'default',
+    content:            row.content,
+    categories:         JSON.parse(row.categories ?? '[]'),
+    embedding:          row.embedding ? JSON.parse(row.embedding) : null,
+    noteType:           row.note_type ?? 'text',
+    noteData:           row.note_data ? JSON.parse(row.note_data) : null,
+    createdAt:          row.created_at,
+    updatedAt:          row.updated_at,
+    isPublic:           row.is_public === 1,
+    dirty:              row.dirty,
+    pendingDelete:      row.pending_delete === 1,
+    encryptionTier:     Number(row.encryption_tier ?? 0),
+    collectionExcluded: row.collection_excluded === 1,
   }
 }
 
 function deserializeCollection(row) {
   return {
-    id: row.id,
-    name: row.name,
-    description: row.description ?? '',
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    isDefault: row.is_default === 1,
-    dirty: row.dirty,
+    id:            row.id,
+    name:          row.name,
+    description:   row.description ?? '',
+    createdAt:     row.created_at,
+    updatedAt:     row.updated_at,
+    isDefault:     row.is_default === 1,
+    isPublic:      row.is_public === 1,
+    dirty:         row.dirty,
     pendingDelete: row.pending_delete === 1,
   }
 }

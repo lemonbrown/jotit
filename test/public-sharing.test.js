@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { registerPublicSharing } from '../server/publicSharing.js'
@@ -142,8 +142,114 @@ async function testRepublishReusesExistingPublicLink() {
   }
 }
 
+async function testPublicNotePageApiReturnsSharedNoteData() {
+  const files = makeTempFiles()
+  try {
+    const app = createMockApp()
+    registerPublicSharing(app, { ...files, pgPool: null })
+
+    const publishHandlers = app.routes.post.get('/api/public-note/publish')
+    const publishRes = createMockResponse()
+    await runHandlers(publishHandlers, {
+      body: {
+        note: {
+          id: 'note-page-1',
+          content: '# Public page\nBody copy',
+          categories: ['docs'],
+          updatedAt: 789,
+          viewMode: 'markdown',
+        },
+      },
+    }, publishRes)
+
+    const pageHandlers = app.routes.get.get('/api/public-pages/n/:slug')
+    const pageRes = createMockResponse()
+    await runHandlers(pageHandlers, { params: { slug: publishRes.jsonBody.slug } }, pageRes)
+
+    assert.equal(pageRes.statusCode, 200)
+    assert.equal(pageRes.jsonBody.kind, 'note')
+    assert.equal(pageRes.jsonBody.slug, publishRes.jsonBody.slug)
+    assert.equal(pageRes.jsonBody.note.id, 'note-page-1')
+    assert.equal(pageRes.jsonBody.note.content, '# Public page\nBody copy')
+    assert.deepEqual(pageRes.jsonBody.note.categories, ['docs'])
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true })
+  }
+}
+
+async function testMissingPublicNotePageApiReturnsJson404() {
+  const files = makeTempFiles()
+  try {
+    const app = createMockApp()
+    registerPublicSharing(app, { ...files, pgPool: null })
+
+    const pageHandlers = app.routes.get.get('/api/public-pages/n/:slug')
+    const pageRes = createMockResponse()
+    await runHandlers(pageHandlers, { params: { slug: 'missing-note' } }, pageRes)
+
+    assert.equal(pageRes.statusCode, 404)
+    assert.deepEqual(pageRes.jsonBody, { error: 'Public note not found' })
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true })
+  }
+}
+
+async function testFileBucketPageApiReturnsDirectNotes() {
+  const files = makeTempFiles()
+  try {
+    const app = createMockApp()
+    registerPublicSharing(app, { ...files, pgPool: null })
+
+    const buckets = {
+      docs: {
+        publishedAt: 1000,
+        notes: [
+          {
+            id: 'bucket-note-1',
+            content: '# Bucket note\nBody',
+            categories: ['bucket'],
+            updatedAt: 999,
+          },
+        ],
+      },
+    }
+    writeFileSync(files.bucketsFile, JSON.stringify(buckets))
+
+    const pageHandlers = app.routes.get.get('/api/public-pages/b/:bucket')
+    const pageRes = createMockResponse()
+    await runHandlers(pageHandlers, { params: { bucket: 'docs' } }, pageRes)
+
+    assert.equal(pageRes.statusCode, 200)
+    assert.equal(pageRes.jsonBody.kind, 'bucket')
+    assert.equal(pageRes.jsonBody.bucket.bucketName, 'docs')
+    assert.equal(pageRes.jsonBody.collections.length, 0)
+    assert.equal(pageRes.jsonBody.directNotes.length, 1)
+    assert.equal(pageRes.jsonBody.directNotes[0].id, 'bucket-note-1')
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true })
+  }
+}
+
+async function testServerDoesNotRegisterPublicHtmlRoutes() {
+  const files = makeTempFiles()
+  try {
+    const app = createMockApp()
+    registerPublicSharing(app, { ...files, pgPool: null })
+
+    assert.equal(app.routes.get.has('/n/:slug'), false)
+    assert.equal(app.routes.get.has('/b/:bucket'), false)
+    assert.equal(app.routes.get.has('/b/:bucket/:collectionSlug'), false)
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true })
+  }
+}
+
 export default [
   ['public sharing lists published note links', testPublicNoteListIncludesPublishedLinks],
   ['public sharing deletes published note links', testDeletePublicNoteRemovesPublishedLink],
   ['public sharing reuses an existing note link on republish', testRepublishReusesExistingPublicLink],
+  ['public note page api returns shared note data', testPublicNotePageApiReturnsSharedNoteData],
+  ['missing public note page api returns json 404', testMissingPublicNotePageApiReturnsJson404],
+  ['file bucket page api returns direct notes', testFileBucketPageApiReturnsDirectNotes],
+  ['public sharing does not register html page routes', testServerDoesNotRegisterPublicHtmlRoutes],
 ]

@@ -34,7 +34,7 @@ import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
 import { detectRequestType } from '../utils/httpParser'
 import CategoryBadge from './CategoryBadge'
 import FindBar from './FindBar'
-import { findMatches, isValidRegex, parseSearchScope, findMatchesScoped } from '../utils/inNoteSearch'
+import { findMatches, isValidRegex, parseSearchScope, findMatchesScoped, applyReplaceAll } from '../utils/inNoteSearch'
 import { parseSections, matchesToSections } from '../utils/parseNoteSections'
 import RegexTester from './RegexTester'
 import HttpRunner from './HttpRunner'
@@ -46,9 +46,13 @@ import JsonBlockViewer from './JsonBlockViewer'
 import InlineImageEditor from './InlineImageEditor'
 import SQLiteViewer from './SQLiteViewer'
 import OpenApiViewer from './OpenApiViewer'
+import NoteScrollMap from './NoteScrollMap'
 import { extractSQLiteAssetRef } from '../utils/sqliteNote'
-import { NOTE_TYPE_OPENAPI, isOpenApiNote } from '../utils/noteTypes'
+import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote } from '../utils/noteTypes'
 import { getStoredKeyPair } from '../utils/e2eEncryption'
+import { useScrollMap } from '../hooks/useScrollMap'
+
+const CODE_LINE_HEIGHT = '1.6'
 
 hljs.registerLanguage('json', json)
 hljs.registerLanguage('javascript', javascript)
@@ -61,6 +65,11 @@ hljs.registerLanguage('xml', xml)
 hljs.registerLanguage('css', css)
 hljs.registerLanguage('dockerfile', dockerfile)
 hljs.registerLanguage('ini', ini)
+hljs.registerAliases?.(['js', 'mjs', 'cjs', 'node'], { languageName: 'javascript' })
+hljs.registerAliases?.(['ts', 'mts', 'cts'], { languageName: 'typescript' })
+hljs.registerAliases?.(['sh', 'zsh', 'shell'], { languageName: 'bash' })
+hljs.registerAliases?.(['yml'], { languageName: 'yaml' })
+hljs.registerAliases?.(['html', 'svg'], { languageName: 'xml' })
 
 const HINT_LANGS = ['json','javascript','typescript','python','sql','bash','yaml','xml','css','dockerfile','ini']
 const HELP_COMMAND = '/tips'
@@ -102,17 +111,208 @@ function escapeHtml(text) {
     .replaceAll("'", '&#39;')
 }
 
+function normalizeCodeLanguage(lang) {
+  const normalized = String(lang ?? '').trim().toLowerCase()
+  if (!normalized) return ''
+
+  if (['js', 'mjs', 'cjs', 'node'].includes(normalized)) return 'javascript'
+  if (['ts', 'mts', 'cts'].includes(normalized)) return 'typescript'
+  if (['sh', 'zsh', 'shell'].includes(normalized)) return 'bash'
+  if (normalized === 'yml') return 'yaml'
+  if (['html', 'svg'].includes(normalized)) return 'xml'
+  return normalized
+}
+
+function scoreJavaScriptLike(text) {
+  const sample = String(text ?? '')
+  if (!sample.trim()) return 0
+
+  let score = 0
+  if (/\b(const|let|var)\s+[A-Za-z_$][\w$]*\s*=/.test(sample)) score += 3
+  if (/\b(function|return|import|export|from|async|await|new)\b/.test(sample)) score += 3
+  if (/=>/.test(sample)) score += 3
+  if (/\b(console\.(log|error|warn|info|debug))\s*\(/.test(sample)) score += 4
+  if (/\b(document|window|Array|Object|Promise|Map|Set|JSON)\b/.test(sample)) score += 2
+  if (/[`$][{(]/.test(sample) || /`[^`]*\$\{/.test(sample)) score += 2
+  if (/[A-Za-z_$][\w$]*\s*\(\s*\)\s*{/.test(sample)) score += 2
+  if (/<[A-Z][A-Za-z0-9]*(\s|>)/.test(sample) || /<\/[A-Z][A-Za-z0-9]*>/.test(sample)) score += 2
+  return score
+}
+
+function detectPreferredCodeLanguage(text) {
+  const sample = String(text ?? '')
+  const jsScore = scoreJavaScriptLike(sample)
+
+  try {
+    const auto = hljs.highlightAuto(sample, HINT_LANGS)
+    const autoLanguage = normalizeCodeLanguage(auto.language)
+
+    if (
+      jsScore >= 6 &&
+      (!autoLanguage || ['ini', 'yaml', 'bash', 'sql'].includes(autoLanguage))
+    ) {
+      return 'javascript'
+    }
+
+    if (
+      jsScore >= 8 &&
+      autoLanguage &&
+      !['javascript', 'typescript', 'json', 'css', 'xml'].includes(autoLanguage)
+    ) {
+      return 'javascript'
+    }
+
+    return autoLanguage
+  } catch {
+    return jsScore >= 6 ? 'javascript' : ''
+  }
+}
+
+function shouldAutoIndentForLanguage(language) {
+  return ['javascript', 'typescript', 'json', 'css'].includes(language)
+}
+
+function isCodeOutlineLanguage(language) {
+  return language === 'javascript' || language === 'typescript'
+}
+
+function classifyCodeSymbol(line) {
+  const trimmed = line.trim()
+  if (!trimmed || !trimmed.includes('{')) return null
+
+  let match = trimmed.match(/^(?:else\s+)?if\b/)
+  if (match) return { kind: 'statement', label: 'if', showInPane: false }
+
+  match = trimmed.match(/^(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)\b/)
+  if (match) return { kind: 'class', label: match[1] }
+
+  match = trimmed.match(/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/)
+  if (match) return { kind: 'function', label: match[1] }
+
+  match = trimmed.match(/^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/)
+  if (match) return { kind: 'function', label: match[1] }
+
+  match = trimmed.match(/^([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/)
+  if (match) return { kind: 'property', label: match[1] }
+
+  match = trimmed.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(/)
+  if (match) {
+    const segments = match[1].split('.')
+    return { kind: 'call', label: segments[segments.length - 1] }
+  }
+
+  match = trimmed.match(/^(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^=]*\)\s*\{/)
+  if (match) return { kind: 'method', label: match[1] }
+
+  match = trimmed.match(/^(for|while|switch|try|catch|finally|do)\b/)
+  if (match) return { kind: 'statement', label: match[1], showInPane: false }
+
+  return null
+}
+
+function parseCodeSymbols(text, language) {
+  if (!isCodeOutlineLanguage(language)) return []
+
+  const lines = String(text ?? '').split('\n')
+  const symbols = []
+  const stack = []
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]
+    const candidate = classifyCodeSymbol(line)
+    let assignedCandidate = false
+
+    for (const char of line) {
+      if (char === '{') {
+        stack.push({
+          candidate: !assignedCandidate ? candidate : null,
+          lineIndex,
+        })
+        if (candidate && !assignedCandidate) assignedCandidate = true
+      } else if (char === '}') {
+        const open = stack.pop()
+        if (!open?.candidate) continue
+        if (lineIndex <= open.lineIndex) continue
+
+        const symbol = {
+          id: `${open.candidate.kind}:${open.lineIndex}:${open.candidate.label}`,
+          kind: open.candidate.kind,
+          label: open.candidate.label,
+          showInPane: open.candidate.showInPane !== false,
+          startLine: open.lineIndex,
+          endLine: lineIndex,
+        }
+        symbols.push(symbol)
+      }
+    }
+  }
+
+  return symbols.sort((a, b) => (
+    a.startLine - b.startLine ||
+    b.endLine - a.endLine
+  ))
+}
+
+function buildCollapsedCodeView(text, symbols, collapsedIds) {
+  const lines = String(text ?? '').split('\n')
+  const collapsed = symbols.filter(symbol => collapsedIds[symbol.id])
+  if (!collapsed.length) {
+    return {
+      foldedSymbols: [],
+      visibleLineNumbers: lines.map((_, index) => index + 1),
+      text: String(text ?? ''),
+    }
+  }
+
+  const collapsedByStartLine = new Map(
+    collapsed
+      .filter(symbol => symbol.endLine > symbol.startLine)
+      .map(symbol => [symbol.startLine, symbol])
+  )
+
+  const visibleLines = []
+  const visibleLineNumbers = []
+
+  for (let lineIndex = 0; lineIndex < lines.length;) {
+    const symbol = collapsedByStartLine.get(lineIndex)
+    if (symbol) {
+      const hiddenCount = symbol.endLine - symbol.startLine
+      visibleLines.push(`// ... ${symbol.kind} ${symbol.label} (${hiddenCount} line${hiddenCount === 1 ? '' : 's'})`)
+      visibleLineNumbers.push(lineIndex + 1)
+      lineIndex = symbol.endLine + 1
+      continue
+    }
+
+    visibleLines.push(lines[lineIndex])
+    visibleLineNumbers.push(lineIndex + 1)
+    lineIndex += 1
+  }
+
+  return {
+    foldedSymbols: collapsed,
+    visibleLineNumbers,
+    text: visibleLines.join('\n'),
+  }
+}
+
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
   let highlighted = ''
-  if (lang && hljs.getLanguage(lang)) {
-    try { highlighted = hljs.highlight(text, { language: lang }).value } catch {}
+  const normalizedLang = normalizeCodeLanguage(lang)
+  if (normalizedLang && hljs.getLanguage(normalizedLang)) {
+    try { highlighted = hljs.highlight(text, { language: normalizedLang }).value } catch {}
+  }
+  if (!highlighted) {
+    const preferred = detectPreferredCodeLanguage(text)
+    if (preferred && hljs.getLanguage(preferred)) {
+      try { highlighted = hljs.highlight(text, { language: preferred }).value } catch {}
+    }
   }
   if (!highlighted) {
     try { highlighted = hljs.highlightAuto(text, HINT_LANGS).value } catch {}
   }
   if (!highlighted) highlighted = escapeHtml(text)
-  const cls = lang ? `hljs language-${lang}` : 'hljs'
+  const cls = normalizedLang ? `hljs language-${normalizedLang}` : 'hljs'
   return `<pre><code class="${cls}">${highlighted}</code></pre>`
 }
 marked.use({ renderer: mdRenderer, gfm: true, breaks: true })
@@ -155,7 +355,7 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
-export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -176,6 +376,8 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const [guidCopied, setGuidCopied] = useState(false)
   const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
   const [hasE2EKeys, setHasE2EKeys] = useState(false)
+  const [codeSymbolsOpen, setCodeSymbolsOpen] = useState(false)
+  const [codeCollapsedIds, setCodeCollapsedIds] = useState({})
 
   useEffect(() => {
     if (user) getStoredKeyPair().then(kp => setHasE2EKeys(!!kp))
@@ -200,6 +402,17 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const [snippetActiveIndex, setSnippetActiveIndex] = useState(0)
   const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
+  const isInPublicCollection = Boolean(collection?.isPublic)
+  const publicCloneInfo = getPublicCloneInfo(note)
+  const collectionPublicUrl = isInPublicCollection && bucketName
+    ? `/b/${bucketName}/${String(collection?.name ?? '')
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '')}`
+    : ''
+
   const textareaRef = useRef(null)
   const searchBackdropRef = useRef(null)
   const codeEditRef = useRef(null)
@@ -218,10 +431,15 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const txRangeRef = useRef({ start: 0, end: 0 })
   const [httpInstance, setHttpInstance] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
+  const [showMinimap, setShowMinimap] = useState(() => localStorage.getItem('jotit_minimap') === 'true')
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
   const [findMatchIndex, setFindMatchIndex] = useState(0)
+  const [showReplace, setShowReplace] = useState(false)
+  const [replaceQuery, setReplaceQuery] = useState('')
+  const [replaceScope, setReplaceScope] = useState('note')
+  const [replaceCount, setReplaceCount] = useState(null)
   const [outlineOpen, setOutlineOpen] = useState(false)
   const [outlineQuery, setOutlineQuery] = useState('')
   const [outlineIndex, setOutlineIndex] = useState(0)
@@ -230,6 +448,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
 
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
+  const replaceInputRef = useRef(null)
   const outlineInputRef = useRef(null)
   const outlineListRef = useRef(null)
   const snippetSearchSeqRef = useRef(0)
@@ -244,6 +463,10 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   const helpCommandReady = !openApiNote && content.trim() === HELP_COMMAND
   const charCount = editorDisplayContent.length
   const lineCount = editorDisplayContent.split('\n').length
+
+  const minimapEnabled = showMinimap && mode === 'edit' && !jsonSession && !hasInlineImages
+  const activeEditorRef = codeViewActive ? codeEditRef : textareaRef
+  const scrollMap = useScrollMap(activeEditorRef, content, minimapEnabled)
 
   const pendingCalcInline = useMemo(() => {
     if (!pendingCalc) return null
@@ -271,13 +494,14 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   }, [note.id, onLocationChange])
 
   const focusEditorLine = useCallback((lineNumber) => {
-    const ta = textareaRef.current
+    const ta = codeViewActive ? codeEditRef.current : textareaRef.current
     if (!ta) return
 
     const clampedLine = Math.min(Math.max(lineNumber, 1), lineCount)
+    const activeText = codeViewActive ? ta.value : content
     let pos = 0
     for (let line = 1; line < clampedLine; line++) {
-      const nextBreak = content.indexOf('\n', pos)
+      const nextBreak = activeText.indexOf('\n', pos)
       if (nextBreak === -1) break
       pos = nextBreak + 1
     }
@@ -290,7 +514,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     ta.scrollTop = targetTop
     if (lineNumsRef.current) lineNumsRef.current.scrollTop = targetTop
     reportCurrentLocation(ta)
-  }, [content, lineCount, reportCurrentLocation])
+  }, [codeViewActive, content, lineCount, reportCurrentLocation])
 
   const openGotoLine = useCallback(() => {
     setMode('edit')
@@ -312,15 +536,28 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   }, [focusEditorLine, gotoLine])
 
   const openFind = useCallback(() => {
+    if (sel.text && !sel.text.includes('\n')) setFindQuery(sel.text)
     setFindOpen(true)
     requestAnimationFrame(() => {
       findInputRef.current?.focus()
       findInputRef.current?.select()
     })
-  }, [])
+  }, [sel.text])
+
+  const openFindReplace = useCallback(() => {
+    if (sel.text && !sel.text.includes('\n')) setFindQuery(sel.text)
+    setFindOpen(true)
+    setShowReplace(true)
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus()
+      findInputRef.current?.select()
+    })
+  }, [sel.text])
 
   const closeFind = useCallback(() => {
     setFindOpen(false)
+    setShowReplace(false)
+    setReplaceCount(null)
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [])
 
@@ -474,13 +711,25 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     })
   }, [getCurrentSectionIndex, outlineOpen, sections])
 
+  const toggleMinimap = useCallback(() => {
+    setShowMinimap(v => { const next = !v; localStorage.setItem('jotit_minimap', String(next)); return next })
+  }, [])
+
   const handlePanelKeyDown = useCallback((e) => {
     if (outlineOpen) return
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
       e.preventDefault()
       openFind()
     }
-  }, [openFind, outlineOpen])
+    if ((e.ctrlKey || e.metaKey) && e.key === 'h') {
+      e.preventDefault()
+      openFindReplace()
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'm') {
+      e.preventDefault()
+      toggleMinimap()
+    }
+  }, [openFind, openFindReplace, outlineOpen, toggleMinimap])
 
   useEffect(() => {
     setContent(note.content)
@@ -510,6 +759,8 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     setOutlineQuery('')
     setOutlineIndex(0)
     setCodeViewActive(false)
+    setCodeSymbolsOpen(false)
+    setCodeCollapsedIds({})
     clearTimeout(historyTimerRef.current)
     historyRef.current = [note.content]
     historyIdxRef.current = 0
@@ -1325,7 +1576,8 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       const before = content.slice(0, ta.selectionStart)
       const selected = content.slice(ta.selectionStart, ta.selectionEnd)
       const after = content.slice(ta.selectionEnd)
-      const formatted = autoIndent(selected)
+      const selectedLanguage = detectPreferredCodeLanguage(selected)
+      const formatted = shouldAutoIndentForLanguage(selectedLanguage) ? autoIndent(selected) : selected
       if (formatted !== selected) {
         const next = before + formatted + after
         pushHistoryNow(content)
@@ -1339,7 +1591,8 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       return
     }
     // Whole note: activate syntax-highlighted overlay
-    const formatted = autoIndent(content)
+    const contentLanguage = detectPreferredCodeLanguage(content)
+    const formatted = shouldAutoIndentForLanguage(contentLanguage) ? autoIndent(content) : content
     setCodeBefore('')
     setCodeContent(formatted)
     setCodeAfter('')
@@ -1348,6 +1601,8 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       setContent(formatted)
       onUpdate({ content: formatted })
     }
+    setCodeSymbolsOpen(true)
+    setCodeCollapsedIds({})
     setCodeViewActive(true)
     requestAnimationFrame(() => codeEditRef.current?.focus())
   }
@@ -1362,6 +1617,10 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   }
 
   const handleCodeKeyDown = (e) => {
+    if (codeViewReadOnly && e.key !== 'Escape' && !(e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      return
+    }
     if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
       e.preventDefault()
       undo()
@@ -1457,16 +1716,88 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
   }, [mode])
 
 
-  const { codeHighlighted, codeLanguage } = useMemo(() => {
-    if (!codeViewActive) return { codeHighlighted: '', codeLanguage: '' }
-    if (!codeContent.trim()) return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
+  const codeLanguage = useMemo(() => {
+    if (!codeViewActive || !codeContent.trim()) return ''
     try {
+      const preferred = detectPreferredCodeLanguage(codeContent)
+      if (preferred && hljs.getLanguage(preferred)) return preferred
       const result = hljs.highlightAuto(codeContent, HINT_LANGS)
-      return { codeHighlighted: result.value, codeLanguage: result.language ?? '' }
+      return normalizeCodeLanguage(result.language)
     } catch {
-      return { codeHighlighted: escapeHtml(codeContent), codeLanguage: '' }
+      return ''
     }
   }, [codeContent, codeViewActive])
+
+  const codeSymbols = useMemo(() => (
+    codeViewActive ? parseCodeSymbols(codeContent, codeLanguage) : []
+  ), [codeContent, codeLanguage, codeViewActive])
+  const codePaneSymbols = useMemo(() => (
+    codeSymbols.filter(symbol => symbol.showInPane !== false)
+  ), [codeSymbols])
+
+  useEffect(() => {
+    setCodeCollapsedIds(prev => {
+      const validIds = new Set(codeSymbols.map(symbol => symbol.id))
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([id, enabled]) => enabled && validIds.has(id))
+      )
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next
+    })
+  }, [codeSymbols])
+
+  const collapsedCodeView = useMemo(() => (
+    buildCollapsedCodeView(codeContent, codeSymbols, codeCollapsedIds)
+  ), [codeCollapsedIds, codeContent, codeSymbols])
+
+  const codeDisplayContent = collapsedCodeView.text
+  const codeViewReadOnly = codeViewActive && collapsedCodeView.foldedSymbols.length > 0
+  const displayedLineNumbers = useMemo(() => (
+    codeViewActive ? collapsedCodeView.visibleLineNumbers : Array.from({ length: lineCount }, (_, index) => index + 1)
+  ), [codeViewActive, collapsedCodeView.visibleLineNumbers, lineCount])
+  const codeSymbolsByStartLine = useMemo(() => new Map(
+    codeSymbols.map(symbol => [symbol.startLine, symbol])
+  ), [codeSymbols])
+
+  const toggleCodeSymbolFold = useCallback((symbolId) => {
+    setCodeCollapsedIds(prev => (
+      prev[symbolId]
+        ? Object.fromEntries(Object.entries(prev).filter(([id]) => id !== symbolId))
+        : { ...prev, [symbolId]: true }
+    ))
+  }, [])
+
+  const expandAllCodeSymbols = useCallback(() => {
+    setCodeCollapsedIds({})
+  }, [])
+
+  const collapseAllCodeSymbols = useCallback(() => {
+    setCodeCollapsedIds(Object.fromEntries(codeSymbols.map(symbol => [symbol.id, true])))
+  }, [codeSymbols])
+
+  const jumpToCodeSymbol = useCallback((symbol) => {
+    if (!symbol) return
+    setCodeCollapsedIds(prev => {
+      if (!prev[symbol.id]) return prev
+      const next = { ...prev }
+      delete next[symbol.id]
+      return next
+    })
+    setCodeSymbolsOpen(true)
+    requestAnimationFrame(() => focusEditorLine(symbol.startLine + 1))
+  }, [focusEditorLine])
+
+  const codeHighlighted = useMemo(() => {
+    if (!codeViewActive) return ''
+    if (!codeDisplayContent.trim()) return escapeHtml(codeDisplayContent)
+    try {
+      if (codeLanguage && hljs.getLanguage(codeLanguage)) {
+        return hljs.highlight(codeDisplayContent, { language: codeLanguage }).value
+      }
+      return hljs.highlightAuto(codeDisplayContent, HINT_LANGS).value
+    } catch {
+      return escapeHtml(codeDisplayContent)
+    }
+  }, [codeDisplayContent, codeLanguage, codeViewActive])
 
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
@@ -1501,6 +1832,70 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     if (!findParsed.term || typingDirective) return []
     return findMatchesScoped(content, findParsed.term, findParsed.scope, findMode) ?? []
   }, [findOpen, findParsed, findQuery, findMode, findRegexError, content])
+
+  const handleReplace = useCallback(() => {
+    if (!findResults.length || findMatchIndex >= findResults.length) return
+    const { start, end } = findResults[findMatchIndex]
+    let actual = replaceQuery
+    if (findMode === 'regex') {
+      try { actual = content.slice(start, end).replace(new RegExp(findParsed.term), replaceQuery) } catch {}
+    }
+    const newContent = content.slice(0, start) + actual + content.slice(end)
+    setContent(newContent)
+    onUpdate({ content: newContent })
+    setReplaceCount(null)
+    const newResults = findMatchesScoped(newContent, findParsed.term, findParsed.scope, findMode) ?? []
+    const nextIdx = Math.min(findMatchIndex, Math.max(0, newResults.length - 1))
+    setFindMatchIndex(nextIdx)
+    if (newResults[nextIdx]) {
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current
+        if (!ta) return
+        const { start: ns, end: ne } = newResults[nextIdx]
+        ta.setSelectionRange(ns, ne)
+        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
+        ta.scrollTop = Math.max(0, ta.value.slice(0, ns).split('\n').length * lineHeight - ta.clientHeight * 0.35)
+        if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+      })
+    }
+  }, [findResults, findMatchIndex, replaceQuery, findMode, findParsed, content, onUpdate])
+
+  const handleReplaceAll = useCallback(() => {
+    if (!findParsed.term || findRegexError) return
+    const doReplace = (c) => applyReplaceAll(c, findParsed.term, findParsed.scope, findMode, replaceQuery)
+
+    if (replaceScope === 'note') {
+      const { content: newContent, count } = doReplace(content)
+      setContent(newContent)
+      onUpdate({ content: newContent })
+      setReplaceCount(count)
+      setFindMatchIndex(0)
+      return
+    }
+
+    const targetNotes = replaceScope === 'collection'
+      ? notes.filter(n => n.collectionId === note.collectionId)
+      : notes
+
+    let totalCount = 0
+    const otherUpdates = []
+
+    for (const n of targetNotes) {
+      const src = n.id === note.id ? content : n.content
+      const { content: newContent, count } = doReplace(src)
+      if (!count) continue
+      totalCount += count
+      if (n.id === note.id) {
+        setContent(newContent)
+        onUpdate({ content: newContent })
+      } else {
+        otherUpdates.push({ id: n.id, content: newContent })
+      }
+    }
+    if (otherUpdates.length) onReplaceInNotes?.(otherUpdates)
+    setReplaceCount(totalCount)
+    setFindMatchIndex(0)
+  }, [replaceScope, findParsed, findMode, findRegexError, content, note, notes, replaceQuery, onUpdate, onReplaceInNotes])
 
   const displayMarkdownHtml = useMemo(() => {
     if (!markdownHtml) return markdownHtml
@@ -1559,6 +1954,44 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
     return html
   }, [searchQuery, editorDisplayContent, findOpen])
 
+  const findHighlightHtml = useMemo(() => {
+    if (!findOpen || !findResults.length) return null
+    let html = ''
+    let last = 0
+    for (let i = 0; i < findResults.length; i++) {
+      const { start, end } = findResults[i]
+      html += escapeHtml(editorDisplayContent.slice(last, start))
+      const cls = i === findMatchIndex ? 'find-mark-active' : 'find-mark'
+      html += `<mark class="${cls}">${escapeHtml(editorDisplayContent.slice(start, end))}</mark>`
+      last = end
+    }
+    html += escapeHtml(editorDisplayContent.slice(last))
+    return html
+  }, [findOpen, findResults, findMatchIndex, editorDisplayContent])
+
+  const selMatchData = useMemo(() => {
+    const term = sel.text
+    if (findOpen || !term || term.length < 2 || term.includes('\n') || /^\s+$/.test(term)) return null
+    const matches = []
+    let idx = 0
+    while (matches.length < 500) {
+      const pos = editorDisplayContent.indexOf(term, idx)
+      if (pos === -1) break
+      matches.push({ start: pos, end: pos + term.length })
+      idx = pos + 1
+    }
+    if (matches.length <= 1) return null
+    let html = ''
+    let last = 0
+    for (const { start, end } of matches) {
+      html += escapeHtml(editorDisplayContent.slice(last, start))
+      html += `<mark class="sel-mark">${escapeHtml(editorDisplayContent.slice(start, end))}</mark>`
+      last = end
+    }
+    html += escapeHtml(editorDisplayContent.slice(last))
+    return { html, count: matches.length }
+  }, [sel.text, editorDisplayContent, findOpen])
+
   const sectionMatches = useMemo(() => {
     if (!findOpen || !findResults.length) return []
     return matchesToSections(findResults, sections, content)
@@ -1588,6 +2021,7 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
       const bare = t.replace(/[{}\-()\s]/g, '')
       if (id === 'jwt')      return t.split('.').length === 3 && /^[A-Za-z0-9_-]{10,}$/.test(t.split('.')[0]) ? 10 : 0
       if (id === 'json')     return (t[0] === '{' || t[0] === '[') ? 9 : 0
+      if (id === 'yaml')     return (/^\s*[\w."'-]+\s*:\s*/m.test(t) || /^\s*-\s+/m.test(t)) ? 8 : 0
       if (id === 'jsonpath') return (t[0] === '{' || t[0] === '[') ? 8 : 0
       if (id === 'qs')       return (t.includes('=') && (t.includes('&') || t.includes('?'))) ? 9 : 0
       if (id === 'urld')     return t.includes('%') ? 8 : 0
@@ -1662,6 +2096,38 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           <span className="text-[12px]">&lt;/&gt;</span>
           {codeViewActive ? 'Edit' : 'Code'}
         </button>
+        {codeViewActive && isCodeOutlineLanguage(codeLanguage) && codePaneSymbols.length > 0 && (
+          <>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => setCodeSymbolsOpen(open => !open)}
+              title="Show code symbols and jump targets"
+              className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+                codeSymbolsOpen
+                  ? 'text-cyan-300 bg-cyan-950/50 border-cyan-800'
+                  : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+              }`}
+            >
+              Jump
+            </button>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={collapseAllCodeSymbols}
+              title="Collapse all detected methods, functions, and statements"
+              className="flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600"
+            >
+              Fold
+            </button>
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={expandAllCodeSymbols}
+              title="Expand all collapsed code blocks"
+              className="flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600"
+            >
+              Unfold
+            </button>
+          </>
+        )}
         <button
           onMouseDown={captureSelForModeSwitch}
           onClick={() => switchMode('regex')}
@@ -1811,6 +2277,18 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
         </button>
         <button
           onMouseDown={e => e.preventDefault()}
+          onClick={toggleMinimap}
+          title={showMinimap ? 'Hide scroll map (Alt+M)' : 'Show scroll map (Alt+M)'}
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            showMinimap
+              ? 'text-zinc-300 bg-zinc-800/60 border-zinc-600'
+              : 'text-zinc-600 hover:text-zinc-400 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          map
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
           onClick={openGotoLine}
           title="Go to line (Ctrl+G)"
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
@@ -1867,6 +2345,42 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           </svg>
           {note.isPublic ? 'Public' : 'Private'}
         </button>
+        {publicCloneInfo && (
+          <a
+            href={publicCloneInfo.url ?? '#'}
+            target="_blank"
+            rel="noreferrer"
+            title={publicCloneInfo.url ? `Cloned from ${publicCloneInfo.url}` : 'Cloned from a shared note'}
+            className="flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-blue-900/60 bg-blue-950/40 text-blue-200 transition-colors hover:bg-blue-950/60 font-mono"
+          >
+            cloned
+          </a>
+        )}
+        {isInPublicCollection && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={async () => {
+              if (!onToggleCollectionExcluded) return
+              const result = await onToggleCollectionExcluded(!note.collectionExcluded)
+              if (result?.error) window.alert(result.error)
+            }}
+            title={note.collectionExcluded
+              ? `Hidden from ${collection?.name}${collectionPublicUrl ? ` (${collectionPublicUrl})` : ''}`
+              : `Visible in ${collection?.name}${collectionPublicUrl ? ` (${collectionPublicUrl})` : ''}`}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              note.collectionExcluded
+                ? 'text-amber-300 bg-amber-950/40 border-amber-800 hover:bg-amber-950/60'
+                : 'text-sky-300 bg-sky-950/30 border-sky-900 hover:bg-sky-950/50'
+            }`}
+          >
+            <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+              {note.collectionExcluded
+                ? <path fillRule="evenodd" d="M3.28 2.22a.75.75 0 10-1.06 1.06l2.116 2.116A8.836 8.836 0 001 10c2.333 3.5 5.59 5.25 9 5.25 1.835 0 3.626-.507 5.259-1.52l1.46 1.46a.75.75 0 101.06-1.06l-14.5-14.5zm7.548 7.548a2 2 0 00-2.548-2.548l2.548 2.548zM6.148 7.208l1.156 1.156A2 2 0 0010 10.06l1.792 1.792A3.5 3.5 0 016.148 7.208z" clipRule="evenodd" />
+                : <path d="M10 4.75c-3.41 0-6.667 1.75-9 5.25 2.333 3.5 5.59 5.25 9 5.25s6.667-1.75 9-5.25c-2.333-3.5-5.59-5.25-9-5.25zm0 8a2.75 2.75 0 110-5.5 2.75 2.75 0 010 5.5z" />}
+            </svg>
+            {note.collectionExcluded ? 'Hidden' : 'In bucket'}
+          </button>
+        )}
         {user && (
           <button
             onMouseDown={e => e.preventDefault()}
@@ -1959,6 +2473,15 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           sectionMatches={sectionMatches}
           onJumpToSection={idx => jumpToFindMatch(idx, findResults)}
           scope={findParsed.scope}
+          showReplace={showReplace}
+          replaceQuery={replaceQuery}
+          onReplaceQueryChange={setReplaceQuery}
+          onReplace={handleReplace}
+          onReplaceAll={handleReplaceAll}
+          replaceScope={replaceScope}
+          onReplaceScopeChange={setReplaceScope}
+          replaceInputRef={replaceInputRef}
+          replaceCount={replaceCount}
         />
       )}
 
@@ -2266,14 +2789,31 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
               style={{
                 fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace",
                 fontSize: '13px',
-                lineHeight: '1.6',
+                lineHeight: CODE_LINE_HEIGHT,
                 color: '#3f3f46',
-                width: `${Math.max(String(lineCount).length + 2, 4)}ch`,
+                width: `${Math.max(String(lineCount).length + (codeViewActive && isCodeOutlineLanguage(codeLanguage) ? 6 : 2), 4)}ch`,
               }}
             >
-              {Array.from({ length: lineCount }, (_, i) => (
-                <div key={i + 1}>{i + 1}</div>
-              ))}
+              {displayedLineNumbers.map((lineNumber) => {
+                const sourceIndex = lineNumber - 1
+                const symbol = codeViewActive ? codeSymbolsByStartLine.get(sourceIndex) : null
+                const isCollapsed = symbol ? !!codeCollapsedIds[symbol.id] : false
+                return (
+                  <div key={lineNumber} className="flex items-center justify-end gap-1" style={{ lineHeight: CODE_LINE_HEIGHT }}>
+                    {symbol && (
+                      <button
+                        onMouseDown={e => e.preventDefault()}
+                        onClick={() => toggleCodeSymbolFold(symbol.id)}
+                        title={`${isCollapsed ? 'Unfold' : 'Fold'} ${symbol.kind} ${symbol.label}`}
+                        className="inline-flex h-4 w-4 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-[10px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-200"
+                      >
+                        {isCollapsed ? '+' : '-'}
+                      </button>
+                    )}
+                    <span>{lineNumber}</span>
+                  </div>
+                )
+              })}
             </div>
           )}
           {!codeViewActive ? (
@@ -2288,14 +2828,22 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
                   />
                 </div>
               ) : (
+              <>
               <div className="relative flex-1 min-w-0 overflow-hidden">
-              {searchHighlightHtml && (
+              {(findHighlightHtml || searchHighlightHtml || selMatchData) && (
                 <div
                   ref={searchBackdropRef}
                   aria-hidden
                   className="absolute inset-0 w-full h-full note-content p-4 text-transparent whitespace-pre-wrap break-words overflow-hidden pointer-events-none select-none"
-                  dangerouslySetInnerHTML={{ __html: searchHighlightHtml }}
+                  dangerouslySetInnerHTML={{ __html: findHighlightHtml ?? searchHighlightHtml ?? selMatchData.html }}
                 />
+              )}
+              {selMatchData && (
+                <div className="absolute right-2 top-2 z-10 pointer-events-none">
+                  <div className="rounded border border-zinc-700 bg-zinc-900/95 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400">
+                    {selMatchData.count} matches
+                  </div>
+                </div>
               )}
               <textarea
                 ref={textareaRef}
@@ -2378,27 +2926,94 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
                 </div>
               )}
               </div>
+              {minimapEnabled && (
+                <NoteScrollMap
+                  containerRef={scrollMap.containerRef}
+                  canvasRef={scrollMap.canvasRef}
+                  viewportStyle={scrollMap.viewportStyle}
+                  onPointerDown={scrollMap.handlePointerDown}
+                />
+              )}
+              </>
               )}
             </div>
           ) : (
-            <div className="relative flex-1 overflow-hidden" style={{ background: '#0d1117' }}>
-              <pre
-                ref={codePreRef}
-                aria-hidden="true"
-                className="hljs absolute inset-0 m-0 p-4 overflow-auto pointer-events-none text-[13px] leading-relaxed"
-                style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace" }}
-                dangerouslySetInnerHTML={{ __html: codeHighlighted + '\n' }}
-              />
-              <textarea
-                ref={codeEditRef}
-                value={codeContent}
-                onChange={handleCodeEdit}
-                onKeyDown={handleCodeKeyDown}
-                onScroll={syncCodeScroll}
-                spellCheck={false}
-                className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px] leading-relaxed"
-                style={{ color: 'transparent', caretColor: '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
-              />
+            <div className="flex flex-1 min-w-0 overflow-hidden" style={{ background: '#0d1117' }}>
+              <div className="relative flex-1 overflow-hidden">
+                <pre
+                  ref={codePreRef}
+                  aria-hidden="true"
+                  className="hljs absolute inset-0 m-0 p-4 overflow-auto pointer-events-none text-[13px]"
+                  style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", lineHeight: CODE_LINE_HEIGHT }}
+                  dangerouslySetInnerHTML={{ __html: codeHighlighted + '\n' }}
+                />
+                <textarea
+                  ref={codeEditRef}
+                  value={codeDisplayContent}
+                  onChange={codeViewReadOnly ? undefined : handleCodeEdit}
+                  onKeyDown={handleCodeKeyDown}
+                  onScroll={syncCodeScroll}
+                  readOnly={codeViewReadOnly}
+                  spellCheck={false}
+                  className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px]"
+                  style={{ color: 'transparent', caretColor: codeViewReadOnly ? 'transparent' : '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: CODE_LINE_HEIGHT }}
+                />
+                {codeViewReadOnly && (
+                  <div className="pointer-events-none absolute right-3 top-3 rounded-md border border-amber-800/60 bg-amber-950/85 px-2 py-1 text-[10px] font-mono text-amber-200">
+                    inspect mode: unfold to edit
+                  </div>
+                )}
+              </div>
+              {minimapEnabled && (
+                <NoteScrollMap
+                  containerRef={scrollMap.containerRef}
+                  canvasRef={scrollMap.canvasRef}
+                  viewportStyle={scrollMap.viewportStyle}
+                  onPointerDown={scrollMap.handlePointerDown}
+                />
+              )}
+              {codeViewActive && codeSymbolsOpen && isCodeOutlineLanguage(codeLanguage) && codePaneSymbols.length > 0 && (
+                <div className="w-[260px] shrink-0 border-l border-zinc-800 bg-zinc-950/85 overflow-y-auto">
+                  <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Code symbols</div>
+                    <div className="mt-1 text-[11px] text-zinc-600">{codePaneSymbols.length} jump target{codePaneSymbols.length === 1 ? '' : 's'}</div>
+                  </div>
+                  <div className="p-2 space-y-1.5">
+                    {codePaneSymbols.map(symbol => {
+                      const isCollapsed = !!codeCollapsedIds[symbol.id]
+                      return (
+                        <div key={symbol.id} className="rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-2">
+                          <button
+                            onMouseDown={e => e.preventDefault()}
+                            onClick={() => jumpToCodeSymbol(symbol)}
+                            className="w-full text-left"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500">
+                                {symbol.kind}
+                              </span>
+                              <span className="truncate text-[12px] font-mono text-zinc-200">{symbol.label}</span>
+                            </div>
+                            <div className="mt-1 text-[10px] font-mono text-zinc-600">L{symbol.startLine + 1}-L{symbol.endLine + 1}</div>
+                          </button>
+                          <div className="mt-2 flex items-center gap-2">
+                            <button
+                              onMouseDown={e => e.preventDefault()}
+                              onClick={() => jumpToCodeSymbol(symbol)}
+                              className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                            >
+                              jump
+                            </button>
+                            <span className="text-[10px] font-mono text-zinc-600">
+                              {isCollapsed ? 'collapsed inline' : 'toggle inline'}
+                            </span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>
@@ -2658,6 +3273,10 @@ export default function NotePanel({ note, snippets = [], aiEnabled, user, onRequ
           <div className="ml-auto flex items-center gap-3 text-[11px] text-zinc-700 shrink-0">
             {codeViewActive && <span className="text-blue-600 font-mono">Esc to exit code view</span>}
             {codeViewActive && codeLanguage && <span className="text-zinc-500 font-mono">{codeLanguage}</span>}
+            {codeViewActive && isCodeOutlineLanguage(codeLanguage) && codePaneSymbols.length > 0 && (
+              <span className="text-zinc-600 font-mono">{codePaneSymbols.length} symbols</span>
+            )}
+            {codeViewReadOnly && <span className="text-amber-500 font-mono">folded view is read-only</span>}
             {mode === 'markdown' && <span className="text-emerald-700 font-mono">markdown</span>}
             <span>{lineCount}L · {charCount}C</span>
             <span>{timeAgo(note.updatedAt)}</span>

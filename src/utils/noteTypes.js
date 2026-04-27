@@ -16,6 +16,15 @@ export function isOpenApiNote(note) {
   return normalizeNoteType(note?.noteType) === NOTE_TYPE_OPENAPI
 }
 
+export function getPublicCloneInfo(note) {
+  const clone = note?.noteData?.publicClone
+  return clone && typeof clone === 'object' ? clone : null
+}
+
+export function isPublicClone(note) {
+  return Boolean(getPublicCloneInfo(note))
+}
+
 export function getOpenApiDocument(note) {
   if (!isOpenApiNote(note) || !note?.noteData || typeof note.noteData !== 'object') return null
   return note.noteData

@@ -103,6 +103,28 @@ export function splitCodeBlocks(content) {
   return segments
 }
 
+// Replace all occurrences of term in content within the given scope.
+// Returns { content: string, count: number }.
+export function applyReplaceAll(content, term, scope, mode, replacement) {
+  const matches = findMatchesScoped(content, term, scope, mode) ?? []
+  if (!matches.length) return { content, count: 0 }
+  let result = ''
+  let last = 0
+  for (const { start, end } of matches) {
+    result += content.slice(last, start)
+    if (mode === 'regex') {
+      try {
+        result += content.slice(start, end).replace(new RegExp(term), replacement)
+      } catch { result += replacement }
+    } else {
+      result += replacement
+    }
+    last = end
+  }
+  result += content.slice(last)
+  return { content: result, count: matches.length }
+}
+
 // Like findMatches but restricts to 'code' or 'text' segments.
 // scope 'all' delegates directly to findMatches.
 export function findMatchesScoped(content, term, scope, mode) {

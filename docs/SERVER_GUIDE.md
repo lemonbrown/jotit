@@ -13,7 +13,7 @@ The server is now modular by responsibility.
 - `server/auth.js`: user DB, JWT middleware, auth endpoints
 - `server/search.js`: authenticated search routes and ranking
 - `server/sync.js`: Postgres setup plus sync push/pull endpoints
-- `server/publicSharing.js`: bucket/public-note APIs and public HTML pages
+- `server/publicSharing.js`: bucket/public-note management APIs and public page JSON APIs
 - `server/proxy.js`: generic outbound HTTP proxy route
 - `server/infra.js`: env route and SPA fallback
 - `server/http.js`: shared response/logging helpers
@@ -49,7 +49,7 @@ Public sharing:
 - routes live in `server/publicSharing.js`
 - file-backed fallback uses `buckets.json` and `public-notes.json`
 - Postgres-backed shared notes are used when `pgPool` exists
-- HTML page rendering also lives here
+- public pages are rendered by the Vite frontend using `/api/public-pages/*` data APIs
 
 Proxy:
 
@@ -80,7 +80,7 @@ Infra:
 
 - Auth uses SQLite, sync uses Postgres.
 - Public sharing supports both file-backed and Postgres-backed behavior.
-- HTML rendering for public pages is server-generated inline, not template-engine based.
+- HTML rendering for public pages is frontend-owned; the server returns JSON data only.
 - Shared error response shape is normalized through `server/http.js`.
 - AI ownership is moving to the server so users do not bring their own provider key.
 
@@ -93,7 +93,8 @@ If the change is about:
 - authenticated search behavior: `server/search.js`
 - note replication or conflict behavior: `server/sync.js`
 - AI provider access or semantic search policy: dedicated AI/search modules
-- public URLs or rendered shared pages: `server/publicSharing.js`
+- public sharing data APIs: `server/publicSharing.js`
+- public page UI/rendering: `src/pages/PublicPages.jsx` and `src/components/public/*`
 - generic HTTP forwarding: `server/proxy.js`
 - boot/static/fallback mechanics: `server.js` or `server/infra.js`
 
@@ -104,7 +105,7 @@ If the change is about:
 - Prefer `sendJsonError` for consistent JSON error responses.
 - Do not mix sync logic into sharing logic or vice versa.
 - Do not let AI access policy drift into unauthenticated frontend-only checks.
-- If changing public note storage, preserve both API behavior and rendered-page behavior.
+- If changing public note storage, preserve both management API behavior and public page JSON contracts.
 
 ## Common mistakes to avoid
 
@@ -112,7 +113,7 @@ If the change is about:
 - adding per-module one-off error response styles
 - changing JWT payload shape without checking frontend auth assumptions
 - changing sync schema assumptions without checking local client sync code
-- updating public-note API behavior but forgetting the `/n/:slug` HTML route
+- updating public-note API behavior but forgetting the `/api/public-pages/*` public page contracts
 
 ## Validation
 

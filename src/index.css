@@ -191,6 +191,54 @@ textarea, input { font-family: inherit; }
 .md-prose hr { border: none; border-top: 1px solid rgb(var(--zinc-700)); margin: 1.25em 0; }
 .md-prose img { max-width: 100%; border-radius: 4px; }
 
+.public-prose h1[id],
+.public-prose h2[id],
+.public-prose h3[id],
+.public-prose h4[id],
+.public-prose h5[id],
+.public-prose h6[id] {
+  scroll-margin-top: 84px;
+}
+
+.diagram-wrap {
+  margin: 1rem 0;
+  overflow: auto;
+  border: 1px solid rgb(var(--zinc-800));
+  border-radius: 12px;
+  background: #0d1117;
+}
+
+.diagram-wrap svg {
+  min-width: 520px;
+  width: 100%;
+  min-height: 260px;
+}
+
+.diagram-edge {
+  stroke: #71717a;
+  stroke-width: 2;
+}
+
+.diagram-edge-label {
+  fill: #a1a1aa;
+  font-size: 12px;
+}
+
+.diagram-label {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: #e4e4e7;
+  font: 12px/1.35 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  text-align: center;
+}
+
+.diagram-empty {
+  margin: 0.75rem 0;
+  color: rgb(var(--zinc-600));
+}
+
 /* Light theme: inline code uses dark amber so it reads on a light surface */
 [data-theme="light"] .md-prose code { color: #92400e; }
 
@@ -467,5 +515,20 @@ textarea, input { font-family: inherit; }
   color: #fef08a;
   border-radius: 2px;
   outline: 1px solid rgba(250, 204, 21, 0.3);
+  padding: 0 1px;
+}
+
+.find-mark-active {
+  background: rgba(250, 204, 21, 0.55);
+  color: #fef9c3;
+  border-radius: 2px;
+  outline: 2px solid rgba(250, 204, 21, 0.7);
+  padding: 0 1px;
+}
+
+.sel-mark {
+  background: rgba(120, 120, 160, 0.28);
+  border-radius: 2px;
+  outline: 1px solid rgba(160, 160, 200, 0.35);
   padding: 0 1px;
 }

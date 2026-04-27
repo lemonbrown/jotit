@@ -1,24 +1,5 @@
 import { memo } from 'react'
-import { timeAgo } from '../utils/helpers'
-import { redactCredentialPreview } from '../utils/searchCore'
-import CategoryBadge from './CategoryBadge'
-import { isOpenApiNote, isSQLiteNote } from '../utils/noteTypes'
-
-const ENTITY_TYPE_LABELS = {
-  env_var: 'env var',
-  api_key_like: 'api key',
-  jwt_like: 'jwt',
-  url: 'url',
-  cloud_provider: 'cloud',
-  command: 'cmd',
-  port: 'port',
-  ip: 'ip',
-  hostname: 'host',
-  uuid: 'uuid',
-  file_path: 'path',
-  http_method: 'http',
-  status_code: 'status',
-}
+import NotePreviewBody, { buildNotePreviewModel } from './NotePreviewBody'
 
 function NoteCard({
   note,
@@ -28,49 +9,23 @@ function NoteCard({
   searchMatch = null,
   searchQuery,
   expanded = false,
+  showMetadata = true,
+  onHoverStart,
+  onHoverMove,
+  onHoverEnd,
   onDragStart,
   onDragEnd,
 }) {
-  const lines = note.content.split('\n').filter(l => l.trim())
-  const firstLine = lines[0] ?? ''
-  const defaultRest = lines.slice(1, expanded ? 10 : 4).join('\n')
-
-  const rawPreview = searchMatch?.preview ?? defaultRest
-  const rest = searchMatch?.preview ? redactCredentialPreview(rawPreview) : defaultRest
-
-  const badges = note.categories.slice(0, 3)
-  const searchHeading = searchMatch?.matchedSectionTitle || firstLine
-
-  // Chunk-aware search context
-  const chunkKindBadge = searchMatch?.matchedChunkKind && searchMatch.matchedChunkKind !== 'prose'
-    ? searchMatch.matchedChunkKind
-    : null
-  const entityTypePills = [...new Set((searchMatch?.entityHits ?? []).map(e => e.entityType))].slice(0, 2)
-  const isSemantic = ['semantic', 'hybrid-semantic', 'semantic-chunk'].includes(searchMatch?.matchType)
-  const reasons = (searchMatch?.reasons ?? []).filter(r => !r.startsWith('section:')).slice(0, 2)
-  const matchCount = searchMatch?.matchType === 'plain' ? (searchMatch.matchCount ?? null) : null
-  const showMatchContext = searchMatch && (chunkKindBadge || entityTypePills.length || isSemantic || reasons.length || matchCount != null)
-  const documentBadge = isOpenApiNote(note) ? 'openapi' : isSQLiteNote(note) ? 'sqlite' : null
-  const isE2EEncrypted = Number(note.encryptionTier ?? 0) === 2
-
-  const highlight = (text, query) => {
-    if (!query || !text) return text
-    const idx = text.toLowerCase().indexOf(query.toLowerCase())
-    if (idx === -1) return text
-    return (
-      <>
-        {text.slice(0, idx)}
-        <mark className="bg-yellow-400/30 text-yellow-200 rounded-sm">{text.slice(idx, idx + query.length)}</mark>
-        {text.slice(idx + query.length)}
-      </>
-    )
-  }
+  const model = buildNotePreviewModel(note, searchMatch, { expanded })
 
   return (
     <div
       id={`note-card-${note.id}`}
       draggable
       onClick={(e) => onSelect(note.id, { newPane: e.ctrlKey || e.metaKey })}
+      onMouseEnter={(e) => onHoverStart?.(note.id, e.currentTarget, e)}
+      onMouseMove={(e) => onHoverMove?.(note.id, e.currentTarget, e)}
+      onMouseLeave={() => onHoverEnd?.()}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'all'
         e.dataTransfer.setData('text/plain', note.id)
@@ -88,85 +43,15 @@ function NoteCard({
       ].join(' ')}
     >
       {isProcessing && (
-        <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+        <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
       )}
-      {note.isPublic && !isProcessing && (
-        <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-emerald-500" title="Public" />
-      )}
-
-      {/* Heading — matched section title or first line */}
-      <div className="flex items-baseline gap-1.5 mb-1 min-w-0">
-        <div className={`note-content text-[12px] font-medium truncate flex-1 min-w-0 ${firstLine ? 'text-zinc-200' : 'text-zinc-700 italic'}`}>
-          {searchHeading ? highlight(searchHeading, searchQuery) : 'empty'}
-        </div>
-        {isE2EEncrypted && (
-          <span
-            className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded border border-amber-800/70 bg-amber-950/40 text-amber-300"
-            title="End-to-end encrypted"
-            aria-label="End-to-end encrypted"
-          >
-            <svg className="w-2.5 h-2.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-            </svg>
-          </span>
-        )}
-        {chunkKindBadge && (
-          <span className="shrink-0 text-[9px] px-1 py-px rounded bg-zinc-800 text-zinc-500 border border-zinc-700 font-mono leading-none">
-            {chunkKindBadge}
-          </span>
-        )}
-        {documentBadge && (
-          <span className="shrink-0 text-[9px] px-1 py-px rounded bg-cyan-950/40 text-cyan-300 border border-cyan-900/60 font-mono leading-none">
-            {documentBadge}
-          </span>
-        )}
-      </div>
-
-      {/* Preview */}
-      <div className={`note-content text-[11px] text-zinc-500 flex-1 leading-relaxed ${expanded ? 'line-clamp-8' : 'line-clamp-3'}`}>
-        {rest ? highlight(rest, searchQuery) : null}
-      </div>
-
-      {/* Match context */}
-      {showMatchContext && (
-        <div className="flex items-center gap-1 mt-1 flex-wrap">
-          {matchCount != null && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 font-mono">
-              {matchCount}×
-            </span>
-          )}
-          {entityTypePills.map(type => (
-            <span
-              key={type}
-              className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/40 text-emerald-300 border border-emerald-900/40"
-            >
-              {ENTITY_TYPE_LABELS[type] ?? type}
-            </span>
-          ))}
-          {isSemantic && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/40 text-purple-300 border border-purple-900/40">
-              ≈ semantic
-            </span>
-          )}
-          {reasons.map(reason => (
-            <span
-              key={reason}
-              className="text-[10px] px-1.5 py-0.5 rounded bg-blue-950/40 text-blue-200 border border-blue-900/60"
-            >
-              {reason}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Footer */}
-      <div className="flex items-end gap-1 mt-1.5 flex-wrap">
-        {badges.map(c => <CategoryBadge key={c} category={c} size="xs" />)}
-        {note.categories.length > 3 && (
-          <span className="text-[10px] text-zinc-600">+{note.categories.length - 3}</span>
-        )}
-        <span className="ml-auto text-[10px] text-zinc-700 shrink-0">{timeAgo(note.updatedAt)}</span>
-      </div>
+      <NotePreviewBody
+        note={note}
+        model={model}
+        searchQuery={searchQuery}
+        showMetadata={showMetadata}
+        compact
+      />
     </div>
   )
 }
@@ -179,6 +64,10 @@ export default memo(NoteCard, (prevProps, nextProps) => (
   prevProps.searchMatch === nextProps.searchMatch &&
   prevProps.searchQuery === nextProps.searchQuery &&
   prevProps.expanded === nextProps.expanded &&
+  prevProps.showMetadata === nextProps.showMetadata &&
+  prevProps.onHoverStart === nextProps.onHoverStart &&
+  prevProps.onHoverMove === nextProps.onHoverMove &&
+  prevProps.onHoverEnd === nextProps.onHoverEnd &&
   prevProps.onDragStart === nextProps.onDragStart &&
   prevProps.onDragEnd === nextProps.onDragEnd
 ))

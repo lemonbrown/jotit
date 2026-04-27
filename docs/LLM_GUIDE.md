@@ -36,7 +36,7 @@ Server:
 - `server.js`: assembly/bootstrap only
 - `server/auth.js`: user DB, JWT auth, auth routes
 - `server/sync.js`: Postgres sync setup and sync routes
-- `server/publicSharing.js`: bucket/public-note APIs plus public HTML rendering
+- `server/publicSharing.js`: bucket/public-note management APIs plus public page JSON APIs
 - `server/proxy.js`: `/proxy` route
 - `server/infra.js`: env route and SPA fallback
 - `server/http.js`: shared server helpers for JSON errors/logging
@@ -69,7 +69,7 @@ In this repo, the right answer is usually:
 - Prefer changing one hook/module boundary at a time.
 - If a change affects persistence, look at both local DB behavior and sync behavior.
 - If a change affects note content, consider embeddings/categories/search side effects.
-- If a change affects public sharing, check both JSON APIs and HTML rendering paths.
+- If a change affects public sharing, check management APIs, `/api/public-pages/*`, and frontend public routes.
 
 ## Common workflows
 

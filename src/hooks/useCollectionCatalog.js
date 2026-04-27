@@ -6,6 +6,7 @@ import {
   markCollectionPendingDelete,
   moveNoteToCollection as moveNoteToCollectionSync,
   schedulePersist,
+  setCollectionPublic as setCollectionPublicSync,
   upsertCollectionSync,
 } from '../utils/db'
 import { ALL_COLLECTION_ID, createCollectionDraft } from '../utils/collectionFactories'
@@ -114,6 +115,14 @@ export function useCollectionCatalog({ notesRef, setNotes, resetWorkspace, showS
     scheduleSyncPush()
   }, [setNotes])
 
+  const setCollectionPublic = useCallback((id, isPublic) => {
+    const updatedAt = Date.now()
+    setCollectionPublicSync(id, isPublic)
+    setCollections(prev => prev.map(c => c.id === id ? { ...c, isPublic, updatedAt } : c))
+    schedulePersist()
+    scheduleSyncPush()
+  }, [])
+
   return {
     activeCollection,
     activeCollectionId,
@@ -125,5 +134,6 @@ export function useCollectionCatalog({ notesRef, setNotes, resetWorkspace, showS
     refreshCollections,
     renameCollection,
     setActiveCollectionId,
+    setCollectionPublic,
   }
 }
