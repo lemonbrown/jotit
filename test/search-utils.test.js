@@ -4,6 +4,7 @@ import { extractEntities } from '../src/utils/entities.js'
 import { createDeveloperSeedNotes } from '../src/utils/helpers.js'
 import { understandQuery } from '../src/utils/queryUnderstanding.js'
 import { buildNoteSearchArtifacts } from '../src/utils/searchIndex.js'
+import { applyNibRerank, validateNibSearchPlan } from '../src/utils/searchNib.js'
 import {
   mergeChunkSemanticResults,
   mergeSemanticSearchResults,
@@ -110,6 +111,24 @@ async function testUnderstandQueryCoversCiAndDebugLanguage() {
   assert.ok(debugQuery.facets.includes('debugging'))
 }
 
+async function testUnderstandQueryNormalizesPluralCredentialTerms() {
+  const understood = understandQuery('github tokens')
+
+  assert.equal(understood.intent, 'find-credentials')
+  assert.ok(understood.coreTerms.includes('token'))
+  assert.ok(understood.providerHints.includes('github'))
+}
+
+async function testUnderstandQueryReturnsStructuredRankingMetadata() {
+  const understood = understandQuery('"ollama cors" +agent search bug')
+
+  assert.ok(understood.phrases.includes('ollama cors'))
+  assert.ok(understood.mustHave.includes('agent'))
+  assert.ok(understood.shouldHave.includes('error') || understood.shouldHave.includes('debugging'))
+  assert.ok(understood.synonyms.includes('cross origin'))
+  assert.ok(understood.synonyms.includes('nib'))
+}
+
 async function testSearchNotesWithArtifactsReturnsStructuredChunkAwareMatches() {
   const note = {
     id: 'note-1',
@@ -152,6 +171,42 @@ async function testSearchNotesWithArtifactsUsesQueryUnderstandingBoosts() {
   assert.equal(results.length, 1)
   assert.ok(results[0].score > 100)
   assert.ok(results[0].entityHits.length > 0)
+}
+
+async function testSearchRankerPrioritizesExactTitleMatch() {
+  const exactTitle = {
+    id: 'exact',
+    content: 'Ollama CORS issue\nShort note about local model CORS headers.',
+    categories: ['llm'],
+    createdAt: 10,
+    updatedAt: 10,
+  }
+  const noisyBody = {
+    id: 'body',
+    content: 'Random debugging log\nollama cors issue ollama cors issue ollama cors issue with many repeated terms',
+    categories: [],
+    createdAt: 10,
+    updatedAt: 10,
+  }
+
+  const notes = [noisyBody, exactTitle]
+  const artifacts = buildCorpusArtifacts(notes)
+  const results = searchNotesWithArtifacts(notes, 'ollama cors issue', artifacts)
+
+  assert.equal(results[0].noteId, exactTitle.id)
+  assert.ok(results[0].reasons.includes('exact title match'))
+}
+
+async function testSearchRankerRequiresMustHaveTerms() {
+  const notes = [
+    { id: 'missing', content: 'Ollama CORS issue without the required bridge', categories: [], createdAt: 1, updatedAt: 1 },
+    { id: 'matching', content: 'Ollama CORS issue fixed by the local agent bridge', categories: [], createdAt: 1, updatedAt: 1 },
+  ]
+  const artifacts = buildCorpusArtifacts(notes)
+  const results = searchNotesWithArtifacts(notes, 'ollama cors +agent', artifacts)
+
+  assert.equal(results.length, 1)
+  assert.equal(results[0].noteId, 'matching')
 }
 
 async function testMergeSemanticSearchResultsPreservesLocalMatchesAndAppendsFallbacks() {
@@ -330,18 +385,84 @@ async function testRedactCredentialPreviewMasksTokens() {
   assert.ok(redacted.includes('Use token'), 'should preserve surrounding text')
 }
 
+async function testCredentialSearchDoesNotOverrankSearchPlanMetaNote() {
+  const githubToken = {
+    id: 'github-token',
+    content: `GitHub Personal Access Token
+ghp_1234567890123456789012345
+
+Scopes: repo, workflow, read:org`,
+    categories: ['github', 'token', 'api-key', 'credentials'],
+    createdAt: 10,
+    updatedAt: 10,
+  }
+  const searchPlan = {
+    id: 'search-plan',
+    content: `SEARCH_EMBEDDINGS_NIB_RANKING_PLAN.md
+# Search Embeddings and Nib Ranking Plan
+
+Embeddings improve retrieval and ranking. Nib helps interpret query intent and optionally rerank a small candidate set.
+Test cases mention query understanding and developer aliases.`,
+    categories: ['docs', 'search'],
+    createdAt: 20,
+    updatedAt: 20,
+  }
+
+  const notes = [searchPlan, githubToken]
+  const artifacts = buildCorpusArtifacts(notes)
+  const results = searchNotesWithArtifacts(notes, 'github tokens', artifacts)
+
+  assert.equal(results[0].noteId, githubToken.id)
+}
+
+async function testValidateNibSearchPlanFiltersUnknownFacets() {
+  const plan = validateNibSearchPlan({
+    rewrittenQuery: 'ollama cors local agent',
+    synonyms: ['cross origin', 'preflight'],
+    facets: ['llm', 'unknown', 'debugging'],
+    intent: 'debug-issue',
+    mustHave: ['agent'],
+    shouldHave: ['cors'],
+  })
+
+  assert.equal(plan.rewrittenQuery, 'ollama cors local agent')
+  assert.deepEqual(plan.facets, ['llm', 'debugging'])
+  assert.deepEqual(plan.mustHave, ['agent'])
+}
+
+async function testNibRerankCannotPromoteWeakSemanticResultOverStrongTopHit() {
+  const results = [
+    { noteId: 'github-token', note: { id: 'github-token', content: 'GitHub token' }, score: 260, matchType: 'hybrid', reasons: ['credential evidence'] },
+    { noteId: 'search-plan', note: { id: 'search-plan', content: 'Search plan' }, score: 72, matchType: 'semantic', reasons: ['semantic note similarity'] },
+  ]
+
+  const reranked = applyNibRerank(results, [
+    { id: 'search-plan', reason: 'Mentions search ranking' },
+    { id: 'github-token', reason: 'Mentions GitHub token' },
+  ])
+
+  assert.equal(reranked[0].noteId, 'github-token')
+}
+
 export default [
   ['chunkNoteContent preserves developer sections', testChunkNoteContentPreservesDeveloperSections],
   ['extractEntities finds developer signals', testExtractEntitiesFindsDeveloperSignals],
   ['buildNoteSearchArtifacts adds facets and chunk entities', testBuildNoteSearchArtifactsAddsFacetsAndChunkEntities],
   ['understandQuery expands developer aliases and facets', testUnderstandQueryExpandsDeveloperAliasesAndFacets],
   ['understandQuery covers CI and debug language', testUnderstandQueryCoversCiAndDebugLanguage],
+  ['understandQuery normalizes plural credential terms', testUnderstandQueryNormalizesPluralCredentialTerms],
   ['understandQuery covers DB and infra language', testUnderstandQueryCoversDbAndInfraLanguage],
+  ['understandQuery returns structured ranking metadata', testUnderstandQueryReturnsStructuredRankingMetadata],
   ['searchNotesWithArtifacts returns structured chunk-aware matches', testSearchNotesWithArtifactsReturnsStructuredChunkAwareMatches],
   ['searchNotesWithArtifacts uses query understanding boosts', testSearchNotesWithArtifactsUsesQueryUnderstandingBoosts],
+  ['search ranker prioritizes exact title match', testSearchRankerPrioritizesExactTitleMatch],
+  ['search ranker requires must-have terms', testSearchRankerRequiresMustHaveTerms],
   ['developer corpus benchmarks rank expected top notes', testDeveloperCorpusBenchmarksRankExpectedTopNotes],
   ['credential search does not overrank unrelated form entities', testCredentialSearchDoesNotOverrankUnrelatedFormEntities],
+  ['credential search does not overrank search plan meta note', testCredentialSearchDoesNotOverrankSearchPlanMetaNote],
   ['mergeChunkSemanticResults adds semantic chunk reason and preview', testMergeChunkSemanticResultsAddsSemanticChunkReasonAndPreview],
   ['mergeSemanticSearchResults preserves local matches and appends fallbacks', testMergeSemanticSearchResultsPreservesLocalMatchesAndAppendsFallbacks],
   ['redactCredentialPreview masks token patterns', testRedactCredentialPreviewMasksTokens],
+  ['validate Nib search plan filters unknown facets', testValidateNibSearchPlanFiltersUnknownFacets],
+  ['Nib rerank cannot promote weak semantic result over strong top hit', testNibRerankCannotPromoteWeakSemanticResultOverStrongTopHit],
 ]

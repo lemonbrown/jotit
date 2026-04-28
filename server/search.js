@@ -2,6 +2,17 @@ import { understandQuery } from '../src/utils/queryUnderstanding.js'
 import { mergeChunkSemanticResults, mergeSemanticSearchResults, searchNotesWithArtifacts } from '../src/utils/searchCore.js'
 import { logServerError, sendJsonError } from './http.js'
 
+const DEFAULT_SEMANTIC_TIMEOUT_MS = 600
+
+function withTimeout(promise, ms) {
+  let timeoutId
+  const timeout = new Promise(resolve => {
+    timeoutId = setTimeout(() => resolve(null), ms)
+  })
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId))
+}
+
 export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
   app.get('/api/search', requireAuth, async (req, res) => {
     if (!pgPool) return sendJsonError(res, 503, 'Search not configured')
@@ -10,6 +21,10 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
     if (!query) return res.json({ results: [] })
 
     const limit = Math.min(parseInt(req.query.limit ?? '20', 10) || 20, 50)
+    const semanticTimeoutMs = Math.max(
+      0,
+      Math.min(parseInt(req.query.semanticTimeoutMs ?? `${DEFAULT_SEMANTIC_TIMEOUT_MS}`, 10) || DEFAULT_SEMANTIC_TIMEOUT_MS, 5000)
+    )
     const userId = req.user.userId
     const collectionId = typeof req.query.collectionId === 'string' && req.query.collectionId.trim()
       ? req.query.collectionId.trim()
@@ -42,10 +57,21 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
 
       const noteIds = [...new Set(candidateRows.map(r => r.id))]
       const shouldAddSemanticCandidates = aiService?.isConfigured()
-      const queryEmbedding = shouldAddSemanticCandidates ? await aiService.getEmbedding(query) : null
+      const queryEmbeddingPromise = shouldAddSemanticCandidates
+        ? withTimeout(aiService.getEmbedding(query), semanticTimeoutMs)
+        : Promise.resolve(null)
+      let queryEmbedding = null
+
+      if (!noteIds.length && shouldAddSemanticCandidates) {
+        queryEmbedding = await queryEmbeddingPromise
+      }
 
       if (!noteIds.length && !queryEmbedding?.length) {
         return res.json({ results: [], query: queryInfo.normalizedQuery })
+      }
+
+      if (noteIds.length && shouldAddSemanticCandidates) {
+        queryEmbedding = await queryEmbeddingPromise
       }
 
       if (queryEmbedding?.length) {
@@ -122,7 +148,7 @@ export function registerSearchRoutes(app, { aiService, pgPool, requireAuth }) {
             .filter(entry => entry.score > 0.25)
             .sort((a, b) => b.score - a.score)
             .slice(0, Math.max(limit, 10))
-            .map(entry => entry.note)
+            .map(entry => ({ note: entry.note, score: entry.score }))
 
           ranked = mergeSemanticSearchResults(ranked, semanticNotes)
         }

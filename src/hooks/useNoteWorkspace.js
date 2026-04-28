@@ -40,7 +40,7 @@ export function useNoteWorkspace() {
     }
 
     const paneId = generateId()
-    setEditorPanes([{ id: paneId, noteId }])
+    setEditorPanes([{ id: paneId, type: 'note', noteId }])
     setActivePaneId(paneId)
   }, [])
 
@@ -95,7 +95,7 @@ export function useNoteWorkspace() {
 
     setEditorPanes(prev => {
       if (newPane) {
-        const existing = prev.find(pane => pane.noteId === noteId)
+        const existing = prev.find(pane => (pane.type ?? 'note') === 'note' && pane.noteId === noteId)
         if (existing) {
           setActivePaneId(existing.id)
           return prev
@@ -103,22 +103,48 @@ export function useNoteWorkspace() {
 
         const paneId = generateId()
         setActivePaneId(paneId)
-        return [...prev, { id: paneId, noteId }]
+        return [...prev, { id: paneId, type: 'note', noteId }]
       }
 
       if (!prev.length) {
         const paneId = generateId()
         setActivePaneId(paneId)
-        return [{ id: paneId, noteId }]
+        return [{ id: paneId, type: 'note', noteId }]
       }
 
-      const paneId = activePaneId && prev.some(pane => pane.id === activePaneId)
-        ? activePaneId
-        : prev[0].id
+      const activePane = activePaneId ? prev.find(pane => pane.id === activePaneId) : null
+      const fallbackNotePane = prev.find(pane => (pane.type ?? 'note') === 'note')
+      const paneId = activePane && (activePane.type ?? 'note') === 'note'
+        ? activePane.id
+        : fallbackNotePane?.id
+
+      if (!paneId) {
+        const nextPaneId = generateId()
+        setActivePaneId(nextPaneId)
+        return [...prev, { id: nextPaneId, type: 'note', noteId }]
+      }
+
       setActivePaneId(paneId)
-      return prev.map(pane => pane.id === paneId ? { ...pane, noteId } : pane)
+      return prev.map(pane => pane.id === paneId ? { ...pane, type: 'note', noteId } : pane)
     })
   }, [activePaneId, recordLocation])
+
+  const openNibPane = useCallback((payload = {}) => {
+    const sourceNoteId = payload.noteId ?? activeNoteId
+    if (sourceNoteId) setActiveNoteId(sourceNoteId)
+
+    setEditorPanes(prev => {
+      const existing = prev.find(pane => pane.type === 'nib' && pane.sourceNoteId === sourceNoteId)
+      if (existing) {
+        setActivePaneId(existing.id)
+        return prev.map(pane => pane.id === existing.id ? { ...pane, ...payload, type: 'nib', sourceNoteId } : pane)
+      }
+
+      const paneId = generateId()
+      setActivePaneId(paneId)
+      return [...prev, { id: paneId, type: 'nib', sourceNoteId, ...payload }]
+    })
+  }, [activeNoteId])
 
   const closeEditorPane = useCallback((paneId) => {
     setEditorPanes(prev => {
@@ -133,7 +159,7 @@ export function useNoteWorkspace() {
       if (activePaneId === paneId) {
         const replacement = next[Math.max(0, idx - 1)] ?? next[0]
         setActivePaneId(replacement.id)
-        setActiveNoteId(replacement.noteId)
+        if ((replacement.type ?? 'note') === 'note') setActiveNoteId(replacement.noteId)
       }
 
       return next
@@ -142,7 +168,7 @@ export function useNoteWorkspace() {
 
   const removeNoteFromWorkspace = useCallback((noteId, fallbackId) => {
     setEditorPanes(prev => {
-      const remaining = prev.filter(pane => pane.noteId !== noteId)
+      const remaining = prev.filter(pane => pane.noteId !== noteId && pane.sourceNoteId !== noteId)
       if (remaining.length) {
         if (!remaining.some(pane => pane.id === activePaneId)) setActivePaneId(remaining[0].id)
         return remaining
@@ -155,7 +181,7 @@ export function useNoteWorkspace() {
 
       const paneId = generateId()
       setActivePaneId(paneId)
-      return [{ id: paneId, noteId: fallbackId }]
+      return [{ id: paneId, type: 'note', noteId: fallbackId }]
     })
     setActiveNoteId(fallbackId)
   }, [activePaneId])
@@ -173,7 +199,7 @@ export function useNoteWorkspace() {
     setActiveNoteId(location.noteId)
 
     setEditorPanes(prev => {
-      const existing = prev.find(pane => pane.noteId === location.noteId)
+      const existing = prev.find(pane => (pane.type ?? 'note') === 'note' && pane.noteId === location.noteId)
       if (existing) {
         setActivePaneId(existing.id)
         return prev
@@ -182,14 +208,23 @@ export function useNoteWorkspace() {
       if (!prev.length) {
         const paneId = generateId()
         setActivePaneId(paneId)
-        return [{ id: paneId, noteId: location.noteId }]
+        return [{ id: paneId, type: 'note', noteId: location.noteId }]
       }
 
-      const paneId = activePaneId && prev.some(pane => pane.id === activePaneId)
-        ? activePaneId
-        : prev[0].id
+      const activePane = activePaneId ? prev.find(pane => pane.id === activePaneId) : null
+      const fallbackNotePane = prev.find(pane => (pane.type ?? 'note') === 'note')
+      const paneId = activePane && (activePane.type ?? 'note') === 'note'
+        ? activePane.id
+        : fallbackNotePane?.id
+
+      if (!paneId) {
+        const nextPaneId = generateId()
+        setActivePaneId(nextPaneId)
+        return [...prev, { id: nextPaneId, type: 'note', noteId: location.noteId }]
+      }
+
       setActivePaneId(paneId)
-      return prev.map(pane => pane.id === paneId ? { ...pane, noteId: location.noteId } : pane)
+      return prev.map(pane => pane.id === paneId ? { ...pane, type: 'note', noteId: location.noteId } : pane)
     })
 
     setRestoreLocation({ ...location, token: Date.now() })
@@ -204,6 +239,7 @@ export function useNoteWorkspace() {
     locationHistory,
     locationHistoryIndex,
     navigateLocationHistory,
+    openNibPane,
     openNoteInPane,
     recordLocation,
     removeNoteFromWorkspace,

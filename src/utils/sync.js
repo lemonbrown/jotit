@@ -24,6 +24,17 @@ function authHeaders() {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` }
 }
 
+function lastPullKey() {
+  const token = getToken()
+  if (!token) return LAST_PULL_KEY
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1] ?? ''))
+    const userKey = payload?.userId ?? payload?.sub ?? payload?.email
+    if (userKey != null) return `${LAST_PULL_KEY}:${userKey}`
+  } catch {}
+  return LAST_PULL_KEY
+}
+
 export function scheduleSyncPush() {
   clearTimeout(pushTimer)
   pushTimer = setTimeout(syncPush, 800)
@@ -124,7 +135,8 @@ export async function syncPush() {
 
 export async function syncPull() {
   if (!getToken()) return
-  const since = Math.max(0, parseInt(localStorage.getItem(LAST_PULL_KEY) ?? '0', 10) || 0)
+  const pullKey = lastPullKey()
+  const since = Math.max(0, parseInt(localStorage.getItem(pullKey) ?? '0', 10) || 0)
 
   try {
     const res = await fetch(`/api/sync/pull?since=${since}`, {
@@ -209,7 +221,7 @@ export async function syncPull() {
       }, 0)
     }
 
-    localStorage.setItem(LAST_PULL_KEY, String(serverTime))
+    localStorage.setItem(pullKey, String(serverTime))
     schedulePersist()
   } catch {}
 }

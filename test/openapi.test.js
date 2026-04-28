@@ -3,6 +3,8 @@ import { importFiles } from '../src/utils/importNotes.js'
 import { parseOpenApiJson } from '../src/utils/openapi/parse.js'
 import { formatRequestAsHttpBlock, generateRequestFromOperation } from '../src/utils/openapi/examples.js'
 import { validateResponseAgainstOperation } from '../src/utils/openapi/validate.js'
+import { buildOpenApiDiscoveryUrls, extractOpenApiDiscoveryUrls, getOpenApiSpecFileName } from '../src/utils/openapi/discovery.js'
+import { buildAllNotesLLMContext, buildNoteLLMContext } from '../src/utils/llmNoteContext.js'
 import { buildNoteSearchArtifacts } from '../src/utils/searchIndex.js'
 import { NOTE_TYPE_OPENAPI } from '../src/utils/noteTypes.js'
 
@@ -157,6 +159,82 @@ async function testBuildNoteSearchArtifactsIndexesOpenApiOperations() {
   assert.ok(artifacts.chunks.some(chunk => chunk.content.toLowerCase().includes('/users/{id}')))
 }
 
+async function testOpenApiDiscoveryBuildsUrlsForBareLocalhost() {
+  const urls = buildOpenApiDiscoveryUrls('localhost:7026')
+
+  assert.equal(urls[0], 'https://localhost:7026/swagger/v1/swagger.json')
+  assert.ok(urls.includes('https://localhost:7026/openapi/v1.json'))
+  assert.ok(urls.includes('https://localhost:7026/openapi.json'))
+  assert.ok(urls.includes('http://localhost:7026/swagger/v1/swagger.json'))
+  assert.ok(urls.includes('https://localhost:7026/scalar/v1'))
+}
+
+async function testOpenApiDiscoveryKeepsExplicitSpecUrlFirst() {
+  const urls = buildOpenApiDiscoveryUrls('https://localhost:7026/custom/spec.json')
+
+  assert.equal(urls[0], 'https://localhost:7026/custom/spec.json')
+  assert.ok(urls.includes('https://localhost:7026/swagger/v1/swagger.json'))
+}
+
+async function testOpenApiDiscoveryFileNameUsesSpecTitle() {
+  const parsed = parseOpenApiJson(SAMPLE_SPEC)
+
+  assert.equal(getOpenApiSpecFileName('https://localhost:7026/swagger/v1/swagger.json', parsed), 'Users-API-openapi.json')
+}
+
+async function testOpenApiDiscoveryExtractsScalarReferencedSpecUrls() {
+  const html = `
+    <script>
+      Scalar.createApiReference('#app', {
+        url: '/openapi/v1.json'
+      })
+    </script>
+  `
+
+  const urls = extractOpenApiDiscoveryUrls(html, 'https://localhost:7026/scalar/v1')
+
+  assert.ok(urls.includes('https://localhost:7026/openapi/v1.json'))
+}
+
+async function testOpenApiNoteLLMContextIncludesRawSpec() {
+  const parsed = parseOpenApiJson(SAMPLE_SPEC)
+  const note = {
+    id: 'openapi-llm',
+    content: 'Users API\nOpenAPI 1.0.0\n2 operations',
+    noteType: NOTE_TYPE_OPENAPI,
+    noteData: {
+      fileName: 'users-openapi.json',
+      rawText: SAMPLE_SPEC,
+      document: parsed.normalized,
+    },
+  }
+
+  const context = buildNoteLLMContext(note)
+
+  assert.ok(context.includes('OpenAPI note summary:'))
+  assert.ok(context.includes('OpenAPI JSON specification:'))
+  assert.ok(context.includes('"openapi": "3.0.3"'))
+  assert.ok(context.includes('"/users/{id}"'))
+}
+
+async function testAllNotesLLMContextIncludesOpenApiRawSpec() {
+  const parsed = parseOpenApiJson(SAMPLE_SPEC)
+  const context = buildAllNotesLLMContext([
+    {
+      id: 'openapi-llm',
+      content: 'Users API\nOpenAPI 1.0.0\n2 operations',
+      noteType: NOTE_TYPE_OPENAPI,
+      noteData: {
+        rawText: SAMPLE_SPEC,
+        document: parsed.normalized,
+      },
+    },
+  ])
+
+  assert.ok(context.includes('"openapi": "3.0.3"'))
+  assert.ok(context.includes('"getUserById"'))
+}
+
 export default [
   ['parseOpenApiJson normalizes operations', testParseOpenApiJsonNormalizesOperations],
   ['importFiles creates OpenAPI note', testImportFilesCreatesOpenApiNote],
@@ -164,4 +242,10 @@ export default [
   ['generateRequestFromOperation trims server trailing slash', testGenerateRequestFromOperationTrimsServerTrailingSlash],
   ['validateResponseAgainstOperation detects schema mismatch', testValidateResponseAgainstOperationDetectsSchemaMismatch],
   ['buildNoteSearchArtifacts indexes OpenAPI operations', testBuildNoteSearchArtifactsIndexesOpenApiOperations],
+  ['OpenAPI discovery builds URLs for bare localhost', testOpenApiDiscoveryBuildsUrlsForBareLocalhost],
+  ['OpenAPI discovery keeps explicit spec URL first', testOpenApiDiscoveryKeepsExplicitSpecUrlFirst],
+  ['OpenAPI discovery file name uses spec title', testOpenApiDiscoveryFileNameUsesSpecTitle],
+  ['OpenAPI discovery extracts Scalar referenced spec URLs', testOpenApiDiscoveryExtractsScalarReferencedSpecUrls],
+  ['OpenAPI note LLM context includes raw spec', testOpenApiNoteLLMContextIncludesRawSpec],
+  ['All notes LLM context includes OpenAPI raw spec', testAllNotesLLMContextIncludesOpenApiRawSpec],
 ]

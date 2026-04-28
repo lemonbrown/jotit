@@ -21,6 +21,7 @@ export default function NoteGrid({
   onToggleNoteMetadata,
   onNoteDragStart,
   onNoteDragEnd,
+  style,
 }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
@@ -289,7 +290,10 @@ export default function NoteGrid({
 
   if (!notes.length) {
     return (
-      <div className="w-full h-[34vh] md:h-auto md:w-[420px] shrink-0 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 text-zinc-600 text-sm">
+      <div
+        className="w-full h-[34vh] md:h-auto md:w-[420px] shrink-0 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 text-zinc-600 text-sm"
+        style={{ ...style, maxWidth: '100%' }}
+      >
         {searchQuery ? 'No results' : 'No notes yet'}
       </div>
     )
@@ -320,7 +324,7 @@ export default function NoteGrid({
           ? 'absolute inset-0 z-30 w-full border-blue-900/70 shadow-2xl shadow-black/70'
           : 'relative w-full h-[38vh] md:h-auto md:w-[420px] shrink-0',
       ].join(' ')}
-      style={{ cursor: 'default' }}
+      style={{ cursor: 'default', ...(!isPeekOpen && style ? { ...style, maxWidth: '100%' } : {}) }}
     >
       <div className="mb-2 flex items-center gap-2">
         <div className={`min-w-0 flex-1 text-center text-[10px] select-none transition-colors ${diffActive ? 'text-sky-700' : 'text-zinc-700'}`}>

@@ -17,13 +17,20 @@ const PORT = process.env.PORT ?? 3001
 const BUCKETS_FILE = join(__dirname, 'buckets.json')
 const PUBLIC_NOTES_FILE = join(__dirname, 'public-notes.json')
 const USER_DB_FILE = join(__dirname, 'users.db')
+const AI_CONFIG_FILE = join(__dirname, 'ai-config.json')
 const DIST_DIR = join(__dirname, 'dist')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'jotit-dev-secret-change-in-prod'
 
 const pgPool = createSyncPool(process.env.DATABASE_URL)
 const userDb = createUserStore(USER_DB_FILE)
 const requireAuth = createRequireAuth(JWT_SECRET)
-const aiService = createAiService(process.env.OPENAI_API_KEY)
+const aiService = createAiService(process.env.OPENAI_API_KEY, {
+  embeddingProvider: process.env.EMBEDDING_PROVIDER,
+  ollamaEmbedModel: process.env.OLLAMA_EMBED_MODEL,
+  agentUrl: process.env.JOTIT_AGENT_URL ?? 'http://127.0.0.1:3210',
+  agentToken: process.env.JOTIT_AGENT_TOKEN,
+  configFile: AI_CONFIG_FILE,
+})
 
 app.use(express.json({ limit: '10mb' }))
 registerEnvRoute(app)

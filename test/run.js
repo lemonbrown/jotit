@@ -7,8 +7,10 @@ import publicSharingTests from './public-sharing.test.js'
 import sqliteWorkspaceTests from './sqlite-workspace.test.js'
 import openApiTests from './openapi.test.js'
 import collectionTests from './collections.test.js'
+import noteCommandTests from './note-commands.test.js'
+import dateTimeTests from './datetime.test.js'
 
-const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests]
+const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests, ...noteCommandTests, ...dateTimeTests]
 
 let failures = 0
 

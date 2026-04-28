@@ -1,8 +1,42 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-export default function SearchBar({ value, onChange, isSearching, aiEnabled, inputRef: externalRef, searchMode, onToggleMode }) {
+export default function SearchBar({
+  value,
+  onChange,
+  isSearching,
+  aiEnabled,
+  llmEnabled = false,
+  isNibSearching = false,
+  nibSearchApplied = false,
+  inputRef: externalRef,
+  searchMode,
+  onToggleMode,
+  onImproveWithNib,
+}) {
   const internalRef = useRef(null)
   const inputRef = externalRef ?? internalRef
+  const [draftValue, setDraftValue] = useState(value ?? '')
+  const emitTimerRef = useRef(null)
+
+  useEffect(() => {
+    setDraftValue(value ?? '')
+  }, [value])
+
+  useEffect(() => () => clearTimeout(emitTimerRef.current), [])
+
+  const scheduleChange = (nextValue) => {
+    setDraftValue(nextValue)
+    clearTimeout(emitTimerRef.current)
+    emitTimerRef.current = setTimeout(() => {
+      onChange(nextValue)
+    }, 90)
+  }
+
+  const clearSearch = () => {
+    clearTimeout(emitTimerRef.current)
+    setDraftValue('')
+    onChange('')
+  }
 
   return (
     <div className="flex items-center gap-1.5">
@@ -21,14 +55,14 @@ export default function SearchBar({ value, onChange, isSearching, aiEnabled, inp
         <input
           ref={inputRef}
           type="text"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          placeholder={aiEnabled ? 'Search all of your notes…' : 'Search notes…'}
+          value={draftValue}
+          onChange={e => scheduleChange(e.target.value)}
+          placeholder={aiEnabled ? 'Search all of your notes...' : 'Search notes...'}
           className="w-full pl-8 pr-8 py-1.5 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 focus:bg-zinc-800 transition-colors"
         />
-        {value && (
+        {draftValue && (
           <button
-            onClick={() => onChange('')}
+            onClick={clearSearch}
             className="absolute right-2 text-zinc-600 hover:text-zinc-400 transition-colors"
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -37,10 +71,10 @@ export default function SearchBar({ value, onChange, isSearching, aiEnabled, inp
           </button>
         )}
       </div>
-      {value && (
+      {draftValue && (
         <button
           onClick={onToggleMode}
-          title={searchMode === 'plain' ? 'Plain text search — click for smart search' : 'Smart search — click for plain text'}
+          title={searchMode === 'plain' ? 'Plain text search - click for smart search' : 'Smart search - click for plain text'}
           className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
             searchMode === 'plain'
               ? 'border-blue-500 text-blue-400 bg-blue-950/50'
@@ -48,6 +82,22 @@ export default function SearchBar({ value, onChange, isSearching, aiEnabled, inp
           }`}
         >
           Aa
+        </button>
+      )}
+      {draftValue && llmEnabled && searchMode !== 'plain' && (
+        <button
+          onClick={onImproveWithNib}
+          disabled={isNibSearching}
+          title={nibSearchApplied ? 'Nib-ranked results' : 'Improve ranking with Nib'}
+          className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+            nibSearchApplied
+              ? 'border-violet-600 text-violet-300 bg-violet-950/50'
+              : isNibSearching
+                ? 'border-violet-900 text-violet-600 bg-violet-950/20'
+                : 'border-violet-900 text-violet-500 hover:text-violet-300 hover:border-violet-700 bg-violet-950/20'
+          }`}
+        >
+          {isNibSearching ? '...' : 'Nib'}
         </button>
       )}
     </div>

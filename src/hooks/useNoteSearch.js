@@ -1,16 +1,19 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useRef, useState } from 'react'
 import { searchNotesLocallyDetailed } from '../utils/search'
 import { searchNotesPlainText } from '../utils/plainSearch'
+import { rerankResultsWithNib } from '../utils/searchNib'
 
 const TOKEN_KEY = 'jotit_auth_token'
 const EXACT_PREFIX = 'em:'
 
-export function useNoteSearch(notesRef, user, collectionId = null) {
+export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = {}) {
   const [searchInput, setSearchInput] = useState('')
   const deferredSearchInput = useDeferredValue(searchInput)
   const [searchResults, setSearchResults] = useState(null)
   const [isSearching, setIsSearching] = useState(false)
-  const [searchMode, setSearchMode] = useState('smart')
+  const [isNibSearching, setIsNibSearching] = useState(false)
+  const [nibSearchApplied, setNibSearchApplied] = useState(false)
+  const [searchMode, setSearchMode] = useState('plain')
   const searchSequenceRef = useRef(0)
 
   const clearSearch = useCallback(() => {
@@ -18,15 +21,45 @@ export function useNoteSearch(notesRef, user, collectionId = null) {
     setSearchInput('')
     setSearchResults(null)
     setIsSearching(false)
+    setIsNibSearching(false)
+    setNibSearchApplied(false)
   }, [])
 
   const handleSearch = useCallback((query) => {
+    setNibSearchApplied(false)
     setSearchInput(query)
   }, [])
 
   const toggleSearchMode = useCallback(() => {
+    setNibSearchApplied(false)
     setSearchMode(m => m === 'smart' ? 'plain' : 'smart')
   }, [])
+
+  const improveWithNib = useCallback(async () => {
+    const query = searchInput.trim()
+    if (!query || !searchResults?.length || isNibSearching) return
+    if (!nibOptions.llmEnabled || !nibOptions.agentToken || !nibOptions.ollamaModel) return
+
+    const sequence = searchSequenceRef.current
+    setIsNibSearching(true)
+    try {
+      const reranked = await rerankResultsWithNib({
+        token: nibOptions.agentToken,
+        model: nibOptions.ollamaModel,
+        query,
+        results: searchResults,
+      })
+      if (searchSequenceRef.current !== sequence) return
+      startTransition(() => {
+        setSearchResults(reranked)
+        setNibSearchApplied(true)
+      })
+    } catch {
+      if (searchSequenceRef.current === sequence) setNibSearchApplied(false)
+    } finally {
+      if (searchSequenceRef.current === sequence) setIsNibSearching(false)
+    }
+  }, [isNibSearching, nibOptions.agentToken, nibOptions.llmEnabled, nibOptions.ollamaModel, searchInput, searchResults])
 
   useEffect(() => {
     const raw = deferredSearchInput.trim()
@@ -36,6 +69,7 @@ export function useNoteSearch(notesRef, user, collectionId = null) {
 
     const sequence = searchSequenceRef.current + 1
     searchSequenceRef.current = sequence
+    setNibSearchApplied(false)
 
     if (!query) {
       startTransition(() => {
@@ -113,6 +147,9 @@ export function useNoteSearch(notesRef, user, collectionId = null) {
     clearSearch,
     handleSearch,
     isSearching,
+    isNibSearching,
+    improveWithNib,
+    nibSearchApplied,
     searchInput,
     searchMode: effectiveSearchMode,
     searchQuery,

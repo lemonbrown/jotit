@@ -1,11 +1,11 @@
-﻿import { useState, useEffect, useCallback, useRef } from 'react'
+﻿import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
 import { useMemo } from 'react'
-import { exportSQLite, getAttachmentsForNote } from './utils/db'
+import { exportSQLite, getAttachmentsForNote, schedulePersist as scheduleDbPersist, upsertNoteSync } from './utils/db'
 import { scheduleSyncPush, setOnSyncHeld } from './utils/sync'
 import { scanForSecrets, contentHash } from './utils/secretScanner'
 import { generateAndStoreKeyPair, exportPublicKeyJwk, wrapPrivateKey } from './utils/e2eEncryption'
-import { createEmptyNote } from './utils/noteFactories'
+import { createEmptyNote, createImportedOpenApiNote } from './utils/noteFactories'
 import { ALL_COLLECTION_ID } from './utils/collectionFactories'
 import { createDeveloperSeedNotes } from './utils/helpers'
 import { getNoteTitle } from './utils/noteTypes'
@@ -17,8 +17,10 @@ import { useNoteMutations } from './hooks/useNoteMutations'
 import { useNoteWorkspace } from './hooks/useNoteWorkspace'
 import { useCollectionCatalog } from './hooks/useCollectionCatalog'
 import { useServerAiStatus } from './hooks/useServerAiStatus'
+import { useLLMSettings } from './hooks/useLLMSettings'
 import NoteGrid from './components/NoteGrid'
 import NotePanel from './components/NotePanel'
+import LLMChat from './components/LLMChat'
 import SearchBar from './components/SearchBar'
 import Settings from './components/Settings'
 import SharedLinksModal from './components/SharedLinksModal'
@@ -26,11 +28,19 @@ import HelpModal from './components/HelpModal'
 import AuthScreen from './components/AuthScreen'
 import SnippetManager from './components/SnippetManager'
 import { useAuth } from './contexts/AuthContext'
+import { usePaneResize } from './hooks/usePaneResize'
+import PaneResizer from './components/PaneResizer'
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
 const COMMAND_TOOLBARS_HIDDEN_KEY = 'jotit_command_toolbars_hidden'
 const NOTE_LIST_METADATA_HIDDEN_KEY = 'jotit_note_list_metadata_hidden'
 const TIPS_CREATED_KEY = 'jotit_tips_created'
+const NOTEGRID_WIDTH_KEY = 'jotit_notegrid_width'
+const NOTEGRID_DEFAULT_WIDTH = 420
+const NOTEGRID_MIN_WIDTH = 160
+const NOTEGRID_MAX_WIDTH = 720
+const DEFAULT_PANE_WIDTH = 600
+const MIN_PANE_WIDTH = 280
 
 function normalizeCollectionSlug(name) {
   return String(name ?? '')
@@ -64,6 +74,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [snippets, setSnippets] = useState([])
   const [settings, setSettings] = useState(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
+  const { llmEnabled, ollamaModel } = useLLMSettings()
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme ?? 'dark'
@@ -78,6 +89,34 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [notePeekOpen, setNotePeekOpen] = useState(false)
   const [notesPaneHidden, setNotesPaneHidden] = useState(false)
   const [simpleEditorMode, setSimpleEditorMode] = useState(false)
+
+  const { size: noteGridWidth, startDrag: startNoteGridResize } = usePaneResize(
+    NOTEGRID_WIDTH_KEY, NOTEGRID_DEFAULT_WIDTH, NOTEGRID_MIN_WIDTH, NOTEGRID_MAX_WIDTH,
+  )
+  const [paneWidths, setPaneWidths] = useState({})
+  const paneWidthsRef = useRef({})
+  useEffect(() => { paneWidthsRef.current = paneWidths }, [paneWidths])
+
+  const startPaneResize = useCallback((paneId, e) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = paneWidthsRef.current[paneId] ?? DEFAULT_PANE_WIDTH
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = (ev) => {
+      const next = Math.max(MIN_PANE_WIDTH, startWidth + (ev.clientX - startX))
+      setPaneWidths(prev => ({ ...prev, [paneId]: next }))
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [])
+
   const [commandToolbarsHidden, setCommandToolbarsHidden] = useState(() => (
     localStorage.getItem(COMMAND_TOOLBARS_HIDDEN_KEY) !== 'false'
   ))
@@ -90,6 +129,11 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [syncHeldIds, setSyncHeldIds] = useState([])
   const [publishSecretGate, setPublishSecretGate] = useState(null) // { note, viewMode, matches }
   const [dragOverCollectionId, setDragOverCollectionId] = useState(null)
+  const [nibLiveContext, setNibLiveContext] = useState({
+    noteId: null,
+    selectionText: '',
+    selectionRange: { start: 0, end: 0 },
+  })
   const createFromUrlHandledRef = useRef(false)
   const {
     activeNoteId,
@@ -100,6 +144,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     locationHistoryIndex,
     navigateLocationHistory,
     openNoteInPane,
+    openNibPane,
     recordLocation,
     removeNoteFromWorkspace,
     resetWorkspace,
@@ -150,7 +195,23 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     ? activeCollectionId
     : defaultCollectionId
 
-  const { searchInput, searchResults, isSearching, handleSearch, clearSearch, searchMode, toggleSearchMode, searchQuery } = useNoteSearch(collectionNotesRef, user, searchCollectionId)
+  const {
+    searchInput,
+    searchResults,
+    isSearching,
+    isNibSearching,
+    improveWithNib,
+    nibSearchApplied,
+    handleSearch,
+    clearSearch,
+    searchMode,
+    toggleSearchMode,
+    searchQuery,
+  } = useNoteSearch(collectionNotesRef, user, searchCollectionId, {
+    llmEnabled,
+    agentToken: settings.localAgentToken ?? '',
+    ollamaModel,
+  })
   const { isDragging, handleDragEnter, handleDragLeave, handleDragOver, handleDrop } = useNoteDropImport({
     activeCollectionId: writableCollectionId,
     clearSearch,
@@ -200,6 +261,16 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     recordLocation({ noteId: created.id }, { replaceCurrent: false })
     setEditorFocusNonce(n => n + 1)
     clearSearch()
+  }, [addNote, clearSearch, recordLocation, showSinglePaneForNote, writableCollectionId])
+
+  const createOpenApiNote = useCallback((fileName, document) => {
+    const note = createImportedOpenApiNote(fileName, document)
+    note.collectionId = writableCollectionId
+    const created = addNote(note)
+    showSinglePaneForNote(created.id)
+    recordLocation({ noteId: created.id }, { replaceCurrent: false })
+    clearSearch()
+    return created
   }, [addNote, clearSearch, recordLocation, showSinglePaneForNote, writableCollectionId])
 
   const createTipsNote = useCallback((content) => {
@@ -416,6 +487,31 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     if (!res.ok) throw new Error(data.error ?? 'Failed to upload keys')
   }, [])
 
+  const handleLoadAiConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/ai/config')
+      if (!res.ok) return null
+      return res.json()
+    } catch {
+      return null
+    }
+  }, [])
+
+  const handleSaveAiConfig = useCallback(async (config) => {
+    try {
+      const res = await fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to save AI config' }
+      return { ok: true, ...data }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [])
+
   const handleSetCollectionVisibility = useCallback(async (collection, isPublic) => {
     if (!user) {
       setShowAuth(true)
@@ -591,13 +687,54 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [])
 
   const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? collectionNotes, [collectionNotes, searchResults])
+  const displayedNoteById = useMemo(
+    () => new Map(displayedNotes.map(note => [note.id, note])),
+    [displayedNotes]
+  )
+
+  const ensureSelectableNoteIsLocal = useCallback((id) => {
+    if (notesRef.current.some(note => note.id === id)) return
+    const searchNote = displayedNoteById.get(id)
+    if (!searchNote) return
+
+    const hydrated = {
+      ...searchNote,
+      categories: searchNote.categories ?? [],
+      collectionId: searchNote.collectionId ?? defaultCollectionId,
+      createdAt: searchNote.createdAt ?? Date.now(),
+      updatedAt: searchNote.updatedAt ?? Date.now(),
+    }
+    upsertNoteSync(hydrated, 0)
+    scheduleDbPersist()
+    setNotes(prev => prev.some(note => note.id === id) ? prev : [hydrated, ...prev])
+  }, [defaultCollectionId, displayedNoteById, notesRef, setNotes])
+
+  useEffect(() => {
+    if (!activeNoteId) return
+    setNibLiveContext(prev => (
+      prev.noteId === activeNoteId
+        ? prev
+        : { noteId: activeNoteId, selectionText: '', selectionRange: { start: 0, end: 0 } }
+    ))
+  }, [activeNoteId])
+
+  const handleNibContextChange = useCallback((context) => {
+    setNibLiveContext({
+      noteId: context.noteId,
+      selectionText: context.selectionText ?? '',
+      selectionRange: context.selectionRange ?? { start: 0, end: 0 },
+    })
+  }, [])
 
   const cycleNote = useCallback((direction) => {
     if (!displayedNotes.length) return
     const idx = displayedNotes.findIndex(n => n.id === activeNoteId)
     const next = displayedNotes[Math.max(0, Math.min(displayedNotes.length - 1, idx + direction))]
-    if (next && next.id !== activeNoteId) showSinglePaneForNote(next.id)
-  }, [displayedNotes, activeNoteId, showSinglePaneForNote])
+    if (next && next.id !== activeNoteId) {
+      ensureSelectableNoteIsLocal(next.id)
+      showSinglePaneForNote(next.id)
+    }
+  }, [activeNoteId, displayedNotes, ensureSelectableNoteIsLocal, showSinglePaneForNote])
 
   useEffect(() => {
     const handler = (e) => {
@@ -613,9 +750,37 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     () => (searchResults ? new Map(searchResults.map(result => [result.noteId, result])) : null),
     [searchResults]
   )
+  const noteById = useMemo(() => {
+    const map = new Map(displayedNotes.map(note => [note.id, note]))
+    for (const note of notes) map.set(note.id, note)
+    return map
+  }, [displayedNotes, notes])
+
   const openPanes = editorPanes
-    .map(pane => ({ ...pane, note: notes.find(note => note.id === pane.noteId) }))
-    .filter(pane => pane.note)
+    .map(pane => {
+      const type = pane.type ?? 'note'
+      const note = type === 'nib'
+        ? noteById.get(pane.sourceNoteId)
+        : noteById.get(pane.noteId)
+      return { ...pane, type, note }
+    })
+    .filter(pane => pane.type === 'nib' || pane.note)
+
+  const openPaneIdStr = openPanes.map(p => p.id).join(',')
+  useEffect(() => {
+    if (!openPaneIdStr) return
+    const ids = new Set(openPaneIdStr.split(','))
+    setPaneWidths(prev => {
+      const hasStale = Object.keys(prev).some(id => !ids.has(id))
+      if (!hasStale) return prev
+      const cleaned = {}
+      for (const [id, w] of Object.entries(prev)) {
+        if (ids.has(id)) cleaned[id] = w
+      }
+      return cleaned
+    })
+  }, [openPaneIdStr])
+
   const publicNoteCount = notes.filter(note => note.isPublic).length
   const publicCollectionCount = collections.filter(collection => collection.isPublic).length
   const activeCollectionPublicUrl = activeCollection && !activeCollection.isVirtual && activeCollection.isPublic && bucketName
@@ -743,7 +908,19 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
         </div>
 
         <div className="order-3 w-full md:order-none md:flex-1 md:max-w-sm">
-          <SearchBar value={searchInput} onChange={handleSearch} isSearching={isSearching} aiEnabled={aiEnabled} inputRef={searchRef} searchMode={searchMode} onToggleMode={toggleSearchMode} />
+          <SearchBar
+            value={searchInput}
+            onChange={handleSearch}
+            isSearching={isSearching}
+            aiEnabled={aiEnabled}
+            llmEnabled={llmEnabled}
+            isNibSearching={isNibSearching}
+            nibSearchApplied={nibSearchApplied}
+            inputRef={searchRef}
+            searchMode={searchMode}
+            onToggleMode={toggleSearchMode}
+            onImproveWithNib={improveWithNib}
+          />
         </div>
 
         <div className="flex items-center gap-1.5 md:gap-2 ml-auto shrink-0 min-w-0">
@@ -902,7 +1079,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
       {draggedNoteId && collections.length > 1 && (
         <div
           className="fixed left-3 right-3 top-24 md:top-16 md:right-auto md:w-[360px] z-[100] rounded-md border border-blue-800/70 bg-zinc-950 shadow-2xl shadow-black/70 p-2"
-          style={{ left: shouldShowNotesPane ? 'clamp(12px, 432px, calc(100vw - 372px))' : 16 }}
+          style={{ left: shouldShowNotesPane ? `clamp(12px, ${noteGridWidth + 12}px, calc(100vw - 372px))` : 16 }}
           onDragEnter={handleCollectionDragOver}
           onDragOver={handleCollectionDragOver}
           onDrop={(e) => {
@@ -970,11 +1147,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           <NoteGrid
             notes={displayedNotes}
             activeNoteId={activeNoteId}
+            style={{ width: noteGridWidth }}
             onSelectNote={(id, options = {}) => {
               if (diffLoaderRef.current) {
                 const note = notes.find(item => item.id === id)
                 if (note) diffLoaderRef.current(note)
               } else {
+                ensureSelectableNoteIsLocal(id)
                 openNoteInPane(id, options)
               }
             }}
@@ -995,17 +1174,47 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             }}
           />
         )}
+        {shouldShowNotesPane && openPanes.length > 0 && (
+          <PaneResizer onMouseDown={startNoteGridResize} />
+        )}
         {openPanes.length ? (
           <div className="flex flex-col md:flex-row flex-1 min-w-0 overflow-y-auto md:overflow-y-hidden md:overflow-x-auto">
-            {openPanes.map(({ id: paneId, note }, index) => (
+            {openPanes.map((pane, index) => {
+              const { id: paneId, note, type } = pane
+              const isNibPane = type === 'nib'
+              const isMultiPane = openPanes.length > 1
+              const isLast = index === openPanes.length - 1
+              const nibContext = isNibPane && !pane.regexContext
+                ? {
+                    noteId: nibLiveContext.noteId ?? pane.sourceNoteId,
+                    selectionText: nibLiveContext.selectionText || pane.selectionText || '',
+                    selectionRange: nibLiveContext.selectionRange ?? pane.selectionRange,
+                  }
+                : {
+                    noteId: pane.sourceNoteId,
+                    selectionText: pane.selectionText ?? '',
+                    selectionRange: pane.selectionRange,
+                  }
+              const nibNote = isNibPane ? (noteById.get(nibContext.noteId) ?? note) : null
+              return (
+              <Fragment key={paneId}>
               <div
-                key={paneId}
                 onMouseDown={() => {
                   setActivePaneId(paneId)
-                  setActiveNoteId(note.id)
+                  if (!isNibPane && note?.id) setActiveNoteId(note.id)
                 }}
+                style={
+                  isMultiPane && !isLast
+                    ? { flex: 'none', width: paneWidths[paneId] ?? DEFAULT_PANE_WIDTH }
+                    : isMultiPane && isLast
+                      ? { minWidth: MIN_PANE_WIDTH }
+                      : undefined
+                }
                 className={[
-                  'flex flex-col min-w-0 w-full md:min-w-[520px] flex-1 border-b md:border-b-0 md:border-r border-zinc-800 last:border-r-0',
+                  'flex flex-col min-w-0 w-full border-b md:border-b-0 border-zinc-800',
+                  isMultiPane
+                    ? isLast ? 'flex-1' : ''
+                    : 'md:min-w-[520px] flex-1 md:border-r last:border-r-0',
                   activePaneId === paneId ? 'bg-zinc-950' : 'bg-zinc-950/80',
                 ].join(' ')}
               >
@@ -1015,7 +1224,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                   }`}>
                     <span className="text-[10px] text-zinc-600 font-mono shrink-0">pane {index + 1}</span>
                     <span className="text-[11px] text-zinc-400 truncate min-w-0">
-                      {getNoteTitle(note)}
+                      {isNibPane ? `Nib${nibNote ? `: ${getNoteTitle(nibNote)}` : ''}` : getNoteTitle(note)}
                     </span>
                     <button
                       onMouseDown={e => e.stopPropagation()}
@@ -1027,40 +1236,68 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     </button>
                   </div>
                 )}
-                <NotePanel
-                  key={`${paneId}:${note.id}`}
-                  note={note}
-                  collection={collections.find(collection => collection.id === note.collectionId) ?? null}
-                  bucketName={bucketName}
-                  snippets={snippets}
-                  aiEnabled={aiEnabled}
-                  user={user}
-                  onRequireAuth={() => setShowAuth(true)}
-                  onUpdate={(updates) => updateNote(note.id, updates)}
-                  onReplaceInNotes={(updates) => updates.forEach(({ id, content }) => updateNote(id, { content }))}
-                  onDelete={() => deleteNote(note.id)}
-                  onCreateSnippet={createSnippet}
-                  onSearchSnippets={searchSnippets}
-                  onPublishNote={(mode) => handlePublishNote(note, mode)}
-                  onToggleCollectionExcluded={(collectionExcluded) => handleSetNoteCollectionVisibility(note, collectionExcluded)}
-                  onCreateNoteFromContent={createNoteFromContent}
-                  onCreateTipsNote={createTipsNote}
-                  tipsCreated={tipsCreated}
-                  focusNonce={activePaneId === paneId ? editorFocusNonce : 0}
-                  restoreLocation={restoreLocation?.noteId === note.id ? restoreLocation : null}
-                  onLocationChange={recordLocation}
-                  notes={notes}
-                  searchQuery={searchQuery}
-                  simpleEditor={simpleEditorMode}
-                  secretScanEnabled={settings.secretScanEnabled ?? false}
-                  hideCommandToolbars={simpleEditorMode || commandToolbarsHidden}
-                  onDiffModeChange={(loader) => {
-                    diffLoaderRef.current = loader
-                    setDiffActive(!!loader)
-                  }}
-                />
+                {isNibPane ? (
+                  <LLMChat
+                    key={`${paneId}:nib:${pane.sourceNoteId ?? 'none'}`}
+                    note={nibNote}
+                    notes={notes}
+                    selectionText={nibContext.selectionText}
+                    regexContext={pane.regexContext ?? null}
+                    initialMessage={pane.initialMessage ?? ''}
+                    settings={{ localAgentToken: settings.localAgentToken ?? '' }}
+                    model={ollamaModel}
+                    pane
+                    onJumpToSelection={() => {
+                      if (nibContext.noteId) openNoteInPane(nibContext.noteId)
+                    }}
+                    onClose={() => closeEditorPane(paneId)}
+                  />
+                ) : (
+                  <NotePanel
+                    key={`${paneId}:${note.id}`}
+                    note={note}
+                    collection={collections.find(collection => collection.id === note.collectionId) ?? null}
+                    bucketName={bucketName}
+                    snippets={snippets}
+                    aiEnabled={aiEnabled}
+                    user={user}
+                    onRequireAuth={() => setShowAuth(true)}
+                    onUpdate={(updates) => updateNote(note.id, updates)}
+                    onReplaceInNotes={(updates) => updates.forEach(({ id, content }) => updateNote(id, { content }))}
+                    onDelete={() => deleteNote(note.id)}
+                    onCreateSnippet={createSnippet}
+                    onSearchSnippets={searchSnippets}
+                    onPublishNote={(mode) => handlePublishNote(note, mode)}
+                    onToggleCollectionExcluded={(collectionExcluded) => handleSetNoteCollectionVisibility(note, collectionExcluded)}
+                    onCreateNoteFromContent={createNoteFromContent}
+                    onCreateOpenApiNote={createOpenApiNote}
+                    onCreateTipsNote={createTipsNote}
+                    tipsCreated={tipsCreated}
+                    focusNonce={activePaneId === paneId ? editorFocusNonce : 0}
+                    restoreLocation={restoreLocation?.noteId === note.id ? restoreLocation : null}
+                    onLocationChange={recordLocation}
+                    notes={notes}
+                    searchQuery={searchQuery}
+                    simpleEditor={simpleEditorMode}
+                    secretScanEnabled={settings.secretScanEnabled ?? false}
+                    hideCommandToolbars={simpleEditorMode || commandToolbarsHidden}
+                    llmEnabled={llmEnabled}
+                    ollamaModel={ollamaModel}
+                    agentToken={settings.localAgentToken ?? ''}
+                    onOpenNibPane={openNibPane}
+                    onNibContextChange={activePaneId === paneId ? handleNibContextChange : undefined}
+                    onDiffModeChange={(loader) => {
+                      diffLoaderRef.current = loader
+                      setDiffActive(!!loader)
+                    }}
+                  />
+                )}
               </div>
-            ))}
+              {!isLast && isMultiPane && (
+                <PaneResizer onMouseDown={(e) => startPaneResize(paneId, e)} visible />
+              )}
+              </Fragment>
+            )})}
           </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-zinc-700">
@@ -1084,6 +1321,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           onExportDB={exportSQLite}
           onLoadBucketInfo={handleLoadBucketInfo}
           onSaveBucketName={handleSaveBucketName}
+          onLoadAiConfig={handleLoadAiConfig}
+          onSaveAiConfig={handleSaveAiConfig}
           onSeedNotes={handleSeedDeveloperNotes}
           onRegenerateKeys={handleRegenerateKeys}
           publicNoteCount={publicNoteCount}

@@ -193,6 +193,94 @@ export function getTimestampFormats(date) {
   ]
 }
 
+function parseIsoLikeDateTime(text) {
+  const raw = String(text ?? '').trim()
+  if (!raw) return null
+
+  const normalized = raw
+    .replace(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)\s*(Z|[+-]\d{2}:?\d{2}|GMT[+-]\d{2}:?\d{2})?$/i, (_, date, time, zone = '') => {
+      const normalizedZone = zone
+        .replace(/^GMT/i, '')
+        .replace(/^([+-]\d{2})(\d{2})$/, '$1:$2')
+      return `${date}T${time}${normalizedZone}`
+    })
+    .replace(/\s+(UTC|GMT)$/i, 'Z')
+
+  const date = new Date(normalized)
+  const year = date.getFullYear()
+  return Number.isNaN(date.getTime()) || year < 1990 || year > 2100 ? null : date
+}
+
+function formatDateTimeInZone(date, iana) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: iana,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'shortOffset',
+  })
+  const parts = formatter.formatToParts(date)
+  const get = (type) => parts.find(part => part.type === type)?.value ?? ''
+  const zone = get('timeZoneName') || iana
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${zone}`
+}
+
+export function detectDateTimeInstant(text) {
+  const raw = String(text ?? '').trim()
+  if (!raw) return null
+
+  const timestampDate = detectTimestamp(raw)
+  if (timestampDate) return { date: timestampDate, source: 'timestamp' }
+
+  const singleDate = detectSingleDate(raw)
+  if (singleDate) return { date: singleDate, source: 'date' }
+
+  const isoDate = parseIsoLikeDateTime(raw)
+  if (isoDate) return { date: isoDate, source: 'datetime' }
+
+  const zonedTime = detectTimeWithZone(raw)
+  if (zonedTime) return { date: zonedTime.utcDate, source: 'time' }
+
+  return null
+}
+
+export function getDateTimeCommandOptions(date) {
+  if (!date || Number.isNaN(date.getTime())) return null
+
+  const localIana = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  const zones = [
+    { label: 'Local', iana: localIana, isUser: true },
+    { label: 'UTC', iana: 'UTC' },
+    { label: 'Pacific', iana: 'America/Los_Angeles' },
+    { label: 'Mountain', iana: 'America/Denver' },
+    { label: 'Central', iana: 'America/Chicago' },
+    { label: 'Eastern', iana: 'America/New_York' },
+  ]
+  const seen = new Set()
+  const timezoneOptions = []
+  for (const zone of zones) {
+    if (seen.has(zone.iana)) continue
+    seen.add(zone.iana)
+    timezoneOptions.push({
+      ...zone,
+      value: formatDateTimeInZone(date, zone.iana),
+    })
+  }
+
+  return {
+    timezoneOptions,
+    timestampOptions: [
+      { label: 'epoch sec', value: String(Math.floor(date.getTime() / 1000)) },
+      { label: 'epoch ms', value: String(date.getTime()) },
+      { label: 'ISO', value: date.toISOString() },
+    ],
+  }
+}
+
 function looksLikeYaml(text) {
   const lines = String(text ?? '').split(/\r?\n/)
   let signalCount = 0

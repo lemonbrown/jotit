@@ -1,0 +1,4 @@
+{
+  "embeddingProvider": "ollama",
+  "ollamaEmbedModel": "nomic-embed-text"
+}

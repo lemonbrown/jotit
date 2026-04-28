@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { marked } from 'marked'
 import hljs from 'highlight.js/lib/core'
 import json from 'highlight.js/lib/languages/json'
@@ -26,8 +27,7 @@ import {
   deleteAttachment,
   schedulePersist,
 } from '../utils/db'
-import { TRANSFORMS, applyTransform, parseDates, detectSingleDate, getDateFormats,
-         detectTimeWithZone, getTimeConversions, detectTimestamp, getTimestampFormats } from '../utils/transforms'
+import { TRANSFORMS, applyTransform, parseDates, detectDateTimeInstant, getDateTimeCommandOptions } from '../utils/transforms'
 import { analyzeCalculation } from '../utils/calculator'
 import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
 import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
@@ -54,6 +54,8 @@ import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote } from '../utils/n
 import { getStoredKeyPair } from '../utils/e2eEncryption'
 import { useScrollMap } from '../hooks/useScrollMap'
 import SecretAlert from './SecretAlert'
+import { runJsInWorker } from '../utils/jsRunner'
+import { NOW_COMMAND, formatCurrentDateTime, getInlineCommandRange } from '../utils/noteCommands'
 
 const CODE_LINE_HEIGHT = '1.6'
 
@@ -298,6 +300,8 @@ function buildCollapsedCodeView(text, symbols, collapsedIds) {
   }
 }
 
+let _scratchBlockIdx = 0
+
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
   if (lang === 'csv') {
@@ -326,6 +330,18 @@ mdRenderer.code = ({ text, lang }) => {
   }
   if (!highlighted) highlighted = escapeHtml(text)
   const cls = normalizedLang ? `hljs language-${normalizedLang}` : 'hljs'
+  if (normalizedLang === 'javascript' || normalizedLang === 'typescript') {
+    const scratchId = `scratch-${_scratchBlockIdx++}`
+    return [
+      `<div class="jotit-scratch-block">`,
+      `<div class="jotit-scratch-pre-wrap">`,
+      `<button class="jotit-run-btn" data-scratch-id="${scratchId}">&#9654; Run</button>`,
+      `<pre><code class="${cls}">${highlighted}</code></pre>`,
+      `</div>`,
+      `<div class="jotit-scratch-output" data-scratch-id="${scratchId}"></div>`,
+      `</div>`,
+    ].join('')
+  }
   return `<pre><code class="${cls}">${highlighted}</code></pre>`
 }
 marked.use({ renderer: mdRenderer, gfm: true, breaks: true })
@@ -368,7 +384,32 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false }) {
+function ScratchOutput({ output }) {
+  if (!output) return null
+  const { status, logs, result, error } = output
+  if (!logs.length && status !== 'running' && result === undefined && !error) return null
+  return (
+    <div className="mt-1 mb-3 rounded border border-zinc-700/60 bg-zinc-950 text-[11.5px] font-mono overflow-hidden">
+      {status === 'running' && !logs.length && (
+        <div className="px-3 py-2 text-zinc-500">running…</div>
+      )}
+      {logs.map((line, i) => (
+        <div key={i} className="px-3 py-[3px] text-zinc-300 leading-relaxed border-b border-zinc-800/40 last:border-0 whitespace-pre-wrap break-all">{line}</div>
+      ))}
+      {status === 'done' && result !== undefined && (
+        <div className="px-3 py-2 text-emerald-400 border-t border-zinc-800/60 whitespace-pre-wrap break-all">→ {result}</div>
+      )}
+      {status === 'done' && result === undefined && !logs.length && (
+        <div className="px-3 py-2 text-zinc-600">→ (no output)</div>
+      )}
+      {status === 'error' && (
+        <div className="px-3 py-2 text-red-400 border-t border-zinc-800/60 whitespace-pre-wrap break-all">✕ {error}</div>
+      )}
+    </div>
+  )
+}
+
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -378,6 +419,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [publishSecretMatches, setPublishSecretMatches] = useState(null)
   const [regexInstance, setRegexInstance] = useState(0)
   const [codeViewActive, setCodeViewActive] = useState(false)
+  const [codeViewScratchOutput, setCodeViewScratchOutput] = useState(null)
 
   // Selection + transform state
   const [sel, setSel] = useState({ start: 0, end: 0, text: '' })
@@ -388,6 +430,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [calcCopied, setCalcCopied] = useState(false)
   const [interactiveTx, setInteractiveTx] = useState(null) // { id, opName, param } | null
   const [guidCopied, setGuidCopied] = useState(false)
+  const [nowInserted, setNowInserted] = useState(false)
   const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
   const [hasE2EKeys, setHasE2EKeys] = useState(false)
   const [codeSymbolsOpen, setCodeSymbolsOpen] = useState(false)
@@ -449,6 +492,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [shellRunTrigger, setShellRunTrigger] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
   const [showMinimap, setShowMinimap] = useState(() => localStorage.getItem('jotit_minimap') === 'true')
+  const handleAskNib = useCallback(({ request, pattern, flags, testStr, matchCount }) => {
+    onOpenNibPane?.({
+      noteId: note.id,
+      initialMessage: request,
+      regexContext: { pattern, flags, testStr, matchCount },
+      selectionText: '',
+      selectionRange: { start: 0, end: 0 },
+    })
+  }, [note.id, onOpenNibPane])
+
+  useEffect(() => {
+    onNibContextChange?.({
+      noteId: note.id,
+      selectionText: sel.text,
+      selectionRange: { start: sel.start, end: sel.end },
+    })
+  }, [note.id, onNibContextChange, sel.end, sel.start, sel.text])
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
@@ -462,6 +522,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [outlineIndex, setOutlineIndex] = useState(0)
   const [attachments, setAttachments] = useState([])
   const [pasteError, setPasteError] = useState('')
+  const [scratchOutputs, setScratchOutputs] = useState({})
+  const [scratchPortals, setScratchPortals] = useState([])
 
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
@@ -629,6 +691,55 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     focusEditorLine(section.startLine + 1)
   }, [focusEditorLine])
 
+  const runScratch = useCallback((scratchId, code) => {
+    setScratchOutputs(prev => ({
+      ...prev,
+      [scratchId]: { status: 'running', logs: [], result: undefined, error: undefined },
+    }))
+    const snapshot = {
+      notes: (notes ?? []).map(n => ({ id: n.id, content: n.content ?? '' })),
+      currentNote: { id: note.id, content: note.content ?? '' },
+    }
+    runJsInWorker(code, snapshot, (msg) => {
+      if (msg.type === 'log') {
+        setScratchOutputs(prev => {
+          const cur = prev[scratchId] ?? { status: 'running', logs: [], result: undefined, error: undefined }
+          return { ...prev, [scratchId]: { ...cur, logs: [...cur.logs, msg.line] } }
+        })
+      } else if (msg.type === 'done') {
+        setScratchOutputs(prev => ({ ...prev, [scratchId]: { ...prev[scratchId], status: 'done', result: msg.result } }))
+      } else if (msg.type === 'error') {
+        setScratchOutputs(prev => ({ ...prev, [scratchId]: { ...prev[scratchId], status: 'error', error: msg.message } }))
+      }
+    })
+  }, [notes, note.id, note.content])
+
+  const runCodeViewScratch = useCallback(() => {
+    setCodeViewScratchOutput({ status: 'running', logs: [], result: undefined, error: undefined })
+    const snapshot = {
+      notes: (notes ?? []).map(n => ({ id: n.id, content: n.content ?? '' })),
+      currentNote: { id: note.id, content: note.content ?? '' },
+    }
+    runJsInWorker(codeContent, snapshot, (msg) => {
+      if (msg.type === 'log') {
+        setCodeViewScratchOutput(prev => ({ ...prev, logs: [...(prev?.logs ?? []), msg.line] }))
+      } else if (msg.type === 'done') {
+        setCodeViewScratchOutput(prev => ({ ...prev, status: 'done', result: msg.result }))
+      } else if (msg.type === 'error') {
+        setCodeViewScratchOutput(prev => ({ ...prev, status: 'error', error: msg.message }))
+      }
+    })
+  }, [codeContent, notes, note.id, note.content])
+
+  const handleMarkdownClick = useCallback((e) => {
+    const btn = e.target.closest('.jotit-run-btn[data-scratch-id]')
+    if (!btn) return
+    const scratchId = btn.dataset.scratchId
+    const codeEl = btn.closest('.jotit-scratch-block')?.querySelector('pre code')
+    if (!codeEl) return
+    runScratch(scratchId, codeEl.textContent ?? '')
+  }, [runScratch])
+
   const jumpToPreviewSection = useCallback((section, sectionIndex) => {
     const preview = markdownPreviewRef.current
     if (!preview) return
@@ -746,7 +857,17 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       e.preventDefault()
       toggleMinimap()
     }
-  }, [openFind, openFindReplace, outlineOpen, toggleMinimap])
+    if (llmEnabled && (e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault()
+      onOpenNibPane?.({
+        noteId: note.id,
+        selectionText: sel.text,
+        selectionRange: { start: sel.start, end: sel.end },
+        regexContext: null,
+        initialMessage: '',
+      })
+    }
+  }, [openFind, openFindReplace, outlineOpen, toggleMinimap, llmEnabled, note.id, onOpenNibPane, sel])
 
   useEffect(() => {
     setContent(note.content)
@@ -836,7 +957,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [openOutline, sections.length])
 
   useEffect(() => {
-    if (mode !== 'edit') setCodeViewActive(false)
+    if (mode !== 'edit') { setCodeViewActive(false); setCodeViewScratchOutput(null) }
   }, [mode])
 
   useEffect(() => {
@@ -1396,18 +1517,17 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     const guid = crypto.randomUUID()
     const ta = textareaRef.current
     if (!ta) return
-    const start = ta.selectionStart
-    const end = ta.selectionEnd
-    const next = content.slice(0, start) + guid + content.slice(end)
-    pushHistoryNow(next)
-    setContent(next)
-    onUpdate({ content: next })
-    requestAnimationFrame(() => {
-      ta.selectionStart = ta.selectionEnd = start + guid.length
-      ta.focus()
-    })
+    replaceRange(ta.selectionStart, ta.selectionEnd, guid)
     setGuidCopied(true)
     setTimeout(() => setGuidCopied(false), 1500)
+  }
+
+  const insertNow = () => {
+    const ta = textareaRef.current
+    if (!ta) return
+    replaceRange(ta.selectionStart, ta.selectionEnd, formatCurrentDateTime())
+    setNowInserted(true)
+    setTimeout(() => setNowInserted(false), 1500)
   }
 
   const replaceSelectionWith = (value) => {
@@ -1513,6 +1633,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       e.preventDefault()
       cancelPendingCalc()
       return
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const cursor = e.target.selectionStart ?? 0
+      const nowRange = getInlineCommandRange(e.target.value, cursor, NOW_COMMAND)
+      if (nowRange) {
+        e.preventDefault()
+        replaceRangeInEditor(nowRange.start, nowRange.end, formatCurrentDateTime())
+        return
+      }
     }
     if (helpCommandReady && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault()
@@ -1843,6 +1972,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const markdownHtml = useMemo(() => {
     if (!content.trim()) return ''
     try {
+      _scratchBlockIdx = 0
       const rendered = marked.parse(content)
       let nextSectionIndex = 0
       return rendered.replace(/<h([1-6])(\b[^>]*)>([\s\S]*?)<\/h\1>/gi, (match, level, attrs, inner) => {
@@ -1980,6 +2110,19 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     })
   }, [markdownHtml, findOpen, findParsed, findMode, findRegexError, searchQuery])
 
+  // Clear scratch outputs when switching notes
+  useEffect(() => {
+    setScratchOutputs({})
+    setScratchPortals([])
+  }, [note.id])
+
+  // Scan for scratch output portal targets after markdown HTML updates
+  useEffect(() => {
+    if (!markdownPreviewRef.current) return
+    const divs = markdownPreviewRef.current.querySelectorAll('.jotit-scratch-output[data-scratch-id]')
+    setScratchPortals(Array.from(divs).map(el => ({ id: el.dataset.scratchId, el })))
+  }, [displayMarkdownHtml])
+
   const searchHighlightHtml = useMemo(() => {
     if (!searchQuery || findOpen) return null
     const matches = findMatches(editorDisplayContent, searchQuery, 'exact')
@@ -2088,26 +2231,22 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     return TRANSFORMS.map(tx => ({ ...tx, score: score(tx.id) }))
   }, [sel.text])
 
-  const dateFmtPopup = useMemo(() => {
+  const dateTimeCommandBar = useMemo(() => {
     if (!hasSelection) return null
-    const date = detectSingleDate(sel.text)
-    return date ? getDateFormats(date) : null
+    const detected = detectDateTimeInstant(sel.text)
+    if (!detected) return null
+    return {
+      source: detected.source,
+      ...getDateTimeCommandOptions(detected.date),
+    }
   }, [sel.text, hasSelection])
-
-  const tzPopup = useMemo(() => {
-    if (!hasSelection) return null
-    const result = detectTimeWithZone(sel.text)
-    return result ? getTimeConversions(result.utcDate) : null
-  }, [sel.text, hasSelection])
-
-  const tsPopup = useMemo(() => {
-    if (!hasSelection) return null
-    const date = detectTimestamp(sel.text)
-    return date ? getTimestampFormats(date) : null
-  }, [sel.text, hasSelection])
+  const dateFmtPopup = null
+  const tzPopup = null
+  const tsPopup = null
   const showCommandToolbars = !simpleEditor && !hideCommandToolbars
 
   return (
+    <>
     <div ref={panelRef} className="flex flex-col flex-1 min-w-0 overflow-hidden relative" onKeyDown={handlePanelKeyDown}>
 
       {/* ── Main toolbar ── */}
@@ -2324,6 +2463,18 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         </button>
         <button
           onMouseDown={e => e.preventDefault()}
+          onClick={insertNow}
+          title="Insert current local date and time at cursor. You can also type /now and press Enter."
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            nowInserted
+              ? 'text-green-300 border-green-800 bg-green-950/30'
+              : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          {nowInserted ? 'âœ“ inserted' : 'Now'}
+        </button>
+        <button
+          onMouseDown={e => e.preventDefault()}
           onClick={() => setShowLineNumbers(v => { const next = !v; localStorage.setItem('jotit_lnums', String(next)); return next })}
           title={showLineNumbers ? 'Hide line numbers' : 'Show line numbers'}
           className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
@@ -2358,6 +2509,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         >
           Go
         </button>
+        {llmEnabled && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => onOpenNibPane?.({
+              noteId: note.id,
+              selectionText: sel.text,
+              selectionRange: { start: sel.start, end: sel.end },
+              regexContext: null,
+              initialMessage: '',
+            })}
+            title="Nib — ask AI about this note"
+            className="flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono text-violet-400 hover:text-violet-200 bg-violet-950/20 border-violet-900 hover:border-violet-700"
+          >
+            <span className="text-[13px] leading-none">✒</span>
+            Nib
+          </button>
+        )}
         <button
           onMouseDown={e => e.preventDefault()}
           onClick={findOpen ? closeFind : openFind}
@@ -2622,6 +2790,41 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       )}
 
       {/* ── Date format strip ── */}
+      {showCommandToolbars && mode === 'edit' && !interactiveTx && dateTimeCommandBar && (
+        <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">datetime</span>
+          {dateTimeCommandBar.timezoneOptions.map(option => (
+            <button
+              key={option.iana}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(option.value)}
+              title={`${option.label}${option.isUser ? ' local timezone' : ''} - overwrite selection`}
+              className={`px-2 py-0.5 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 ${
+                option.isUser
+                  ? 'text-amber-300 border-amber-700/60 bg-amber-950/20 hover:bg-amber-950/50 hover:text-amber-100'
+                  : 'text-zinc-400 hover:text-zinc-100 border-zinc-700/60 bg-transparent hover:bg-zinc-800/60 hover:border-zinc-500'
+              }`}
+            >
+              <span className="text-zinc-600 mr-1">{option.label}</span>
+              {option.value}
+            </button>
+          ))}
+          <span className="h-4 w-px bg-zinc-800 mx-0.5" />
+          {dateTimeCommandBar.timestampOptions.map(option => (
+            <button
+              key={option.label}
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => replaceSelectionWith(option.value)}
+              title={`${option.label} - overwrite selection`}
+              className="px-2 py-0.5 text-[11px] font-mono text-sky-400 hover:text-sky-200 border border-sky-900/70 hover:border-sky-700 rounded bg-sky-950/20 hover:bg-sky-950/40 transition-colors whitespace-nowrap shrink-0"
+            >
+              <span className="text-sky-700 mr-1">{option.label}</span>
+              {option.value}
+            </button>
+          ))}
+        </div>
+      )}
+
       {showCommandToolbars && mode === 'edit' && !interactiveTx && dateFmtPopup && (
         <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/40 shrink-0 flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] text-zinc-600 font-mono shrink-0 self-center mr-0.5">date</span>
@@ -3005,7 +3208,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               )}
             </div>
           ) : (
-            <div className="flex flex-1 min-w-0 overflow-hidden" style={{ background: '#0d1117' }}>
+            <div className="flex flex-col flex-1 min-w-0 overflow-hidden" style={{ background: '#0d1117' }}>
+              <div className="flex flex-1 min-w-0 overflow-hidden">
               <div className="relative flex-1 overflow-hidden">
                 <pre
                   ref={codePreRef}
@@ -3025,11 +3229,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                   className="absolute inset-0 w-full h-full p-4 resize-none outline-none bg-transparent text-[13px]"
                   style={{ color: 'transparent', caretColor: codeViewReadOnly ? 'transparent' : '#e2e8f0', fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: CODE_LINE_HEIGHT }}
                 />
-                {codeViewReadOnly && (
-                  <div className="pointer-events-none absolute right-3 top-3 rounded-md border border-amber-800/60 bg-amber-950/85 px-2 py-1 text-[10px] font-mono text-amber-200">
-                    inspect mode: unfold to edit
-                  </div>
-                )}
+                <div className="absolute right-3 top-3 flex items-center gap-2">
+                  {(codeLanguage === 'javascript' || codeLanguage === 'typescript') && (
+                    <button
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={runCodeViewScratch}
+                      disabled={codeViewScratchOutput?.status === 'running'}
+                      className="rounded border border-emerald-800/70 bg-emerald-950/80 px-2 py-1 text-[10px] font-mono text-emerald-300 hover:text-emerald-100 hover:border-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-default"
+                    >
+                      {codeViewScratchOutput?.status === 'running' ? 'running…' : '▷ Run'}
+                    </button>
+                  )}
+                  {codeViewReadOnly && (
+                    <div className="pointer-events-none rounded-md border border-amber-800/60 bg-amber-950/85 px-2 py-1 text-[10px] font-mono text-amber-200">
+                      inspect mode: unfold to edit
+                    </div>
+                  )}
+                </div>
               </div>
               {minimapEnabled && (
                 <NoteScrollMap
@@ -3081,6 +3297,33 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                   </div>
                 </div>
               )}
+              </div>
+              {codeViewScratchOutput && (
+                <div className="shrink-0 border-t border-zinc-800 max-h-52 overflow-y-auto font-mono text-[11.5px] bg-zinc-950">
+                  <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800/60 sticky top-0 bg-zinc-950">
+                    <span className="text-[10px] uppercase tracking-widest text-zinc-600">output</span>
+                    <button
+                      onClick={() => setCodeViewScratchOutput(null)}
+                      className="ml-auto text-zinc-600 hover:text-zinc-300 text-[11px]"
+                    >✕</button>
+                  </div>
+                  {codeViewScratchOutput.status === 'running' && !codeViewScratchOutput.logs.length && (
+                    <div className="px-3 py-2 text-zinc-500">running…</div>
+                  )}
+                  {codeViewScratchOutput.logs.map((line, i) => (
+                    <div key={i} className="px-3 py-[3px] text-zinc-300 border-b border-zinc-800/30 last:border-0 whitespace-pre-wrap break-all">{line}</div>
+                  ))}
+                  {codeViewScratchOutput.status === 'done' && codeViewScratchOutput.result !== undefined && (
+                    <div className="px-3 py-2 text-emerald-400 border-t border-zinc-800/60 whitespace-pre-wrap break-all">→ {codeViewScratchOutput.result}</div>
+                  )}
+                  {codeViewScratchOutput.status === 'done' && codeViewScratchOutput.result === undefined && !codeViewScratchOutput.logs.length && (
+                    <div className="px-3 py-2 text-zinc-600">→ (no output)</div>
+                  )}
+                  {codeViewScratchOutput.status === 'error' && (
+                    <div className="px-3 py-2 text-red-400 whitespace-pre-wrap break-all">✕ {codeViewScratchOutput.error}</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </>
@@ -3096,17 +3339,25 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       )}
 
       {mode === 'markdown' && (
-        <div ref={markdownPreviewRef} tabIndex={-1} className="flex-1 overflow-auto p-5 outline-none">
+        <div ref={markdownPreviewRef} tabIndex={-1} className="flex-1 overflow-auto p-5 outline-none" onClick={handleMarkdownClick}>
           {displayMarkdownHtml ? (
             <div className="md-prose max-w-none" dangerouslySetInnerHTML={{ __html: displayMarkdownHtml }} />
           ) : (
             <span className="text-zinc-700 note-content text-sm">empty</span>
           )}
+          {scratchPortals.map(({ id, el }) =>
+            createPortal(<ScratchOutput key={id} output={scratchOutputs[id]} />, el)
+          )}
         </div>
       )}
       {mode === 'sqlite' && (
         sqliteAssetRef ? (
-          <SQLiteViewer assetId={sqliteAssetRef.assetId} />
+          <SQLiteViewer
+            assetId={sqliteAssetRef.assetId}
+            llmEnabled={llmEnabled}
+            agentToken={agentToken}
+            ollamaModel={ollamaModel}
+          />
         ) : (
           <div className="flex-1 flex items-center justify-center text-[12px] font-mono text-zinc-600">
             No SQLite asset is linked to this note.
@@ -3213,6 +3464,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           key={`${note.id}-${regexInstance}`}
           noteContent={content}
           initialTestString={capturedSelectionRef.current}
+          llmEnabled={llmEnabled}
+          agentToken={agentToken}
+          ollamaModel={ollamaModel}
         />
       )}
       {mode === 'http' && (
@@ -3225,6 +3479,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               Object.entries(request.headers ?? {}).map(([key, value]) => `${key}: ${value}`).join('\n')
             }${request.body ? `\n\n${request.body}` : ''}`
           )}
+          onCreateOpenApiNote={onCreateOpenApiNote}
         />
       )}
       {mode === 'shell' && (
@@ -3360,5 +3615,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         </div>
       )}
     </div>
+    </>
   )
 }

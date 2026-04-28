@@ -111,7 +111,7 @@ export async function indexNoteOnServer(pgPool, aiService, userId, note) {
         return {
           chunkId: chunk.id,
           embedding,
-          model: 'text-embedding-3-small',
+          model: aiService.embeddingModel?.() ?? 'text-embedding-3-small',
           updatedAt: normalizedNote.updatedAt,
         }
       })

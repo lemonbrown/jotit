@@ -158,6 +158,34 @@ async function testServerSearchCanReturnSemanticResultsWithoutLexicalCandidates(
   assert.equal(res.jsonBody.results[0].noteId, 'note-1')
 }
 
+async function testServerSearchDoesNotBlockOnSlowSemanticEmbedding() {
+  const app = createMockApp()
+  const aiService = {
+    isConfigured() {
+      return true
+    },
+    async getEmbedding() {
+      return new Promise(() => {})
+    },
+    cosineSimilarity() {
+      return 0
+    },
+  }
+
+  registerSearchRoutes(app, { aiService, pgPool: makePgPool(), requireAuth: allowAuth })
+
+  const handlers = app.routes.get.get('/api/search')
+  const res = createMockResponse()
+  const started = Date.now()
+  await runHandlers(handlers, { query: { q: 'api token for azure', semanticTimeoutMs: '1' } }, res)
+  const elapsed = Date.now() - started
+
+  assert.equal(res.statusCode, 200)
+  assert.ok(elapsed < 250)
+  assert.equal(res.jsonBody.results.length, 1)
+  assert.equal(res.jsonBody.results[0].noteId, 'note-1')
+}
+
 async function testServerSearchReturnsEmptyWhenNoCandidates() {
   const pgPool = {
     async query() { return { rows: [] } },
@@ -327,6 +355,7 @@ export default [
   ['server search returns empty for blank query', testServerSearchReturnsEmptyForBlankQuery],
   ['server search returns ranked results', testServerSearchReturnsRankedResults],
   ['server search can return semantic results without lexical candidates', testServerSearchCanReturnSemanticResultsWithoutLexicalCandidates],
+  ['server search does not block on slow semantic embedding', testServerSearchDoesNotBlockOnSlowSemanticEmbedding],
   ['server search returns empty when no candidates', testServerSearchReturnsEmptyWhenNoCandidates],
   ['server search respects limit param', testServerSearchRespectsLimitParam],
   ['ai status reports configured availability', testAiStatusRequiresConfiguredServerKey],

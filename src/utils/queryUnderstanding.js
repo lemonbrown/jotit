@@ -48,6 +48,36 @@ const TERM_EXPANSIONS = {
   debug: ['error', 'incident', 'trace', 'unauthorized'],
   refused: ['timeout', 'firewall', 'blocked', '503'],
   crash: ['error', 'exception', 'stacktrace', 'panic'],
+  cors: ['cross origin', 'access-control-allow-origin', 'preflight'],
+  ollama: ['local llm', 'nib', 'model', 'localhost:11434'],
+  sqlite: ['database', 'sql', 'query', 'table', 'view'],
+  regex: ['regexp', 'regular expression', 'pattern'],
+}
+
+const PLURAL_NORMALIZATIONS = {
+  tokens: 'token',
+  secrets: 'secret',
+  credentials: 'credential',
+  passwords: 'password',
+  keys: 'key',
+  commands: 'command',
+  scripts: 'script',
+  errors: 'error',
+  exceptions: 'exception',
+  workflows: 'workflow',
+  pipelines: 'pipeline',
+  queries: 'query',
+  tables: 'table',
+  views: 'view',
+  patterns: 'pattern',
+}
+
+const INTENT_SHOULD_TERMS = {
+  'find-credentials': ['token', 'secret', 'credential', 'bearer', 'api key'],
+  'find-config': ['env', 'config', 'settings', 'host', 'connection string'],
+  'find-command': ['command', 'cli', 'script', 'run'],
+  'debug-issue': ['error', 'exception', 'trace', '401', '403', '500', 'timeout'],
+  'ci-workflow': ['workflow', 'pipeline', 'runner', 'publish', 'registry'],
 }
 
 const FACET_RULES = [
@@ -96,7 +126,33 @@ function tokenizeQuery(query) {
     .trim()
     .toLowerCase()
     .split(/\s+/)
+    .map(token => token.replace(/^['"]+|['"]+$/g, ''))
+    .map(token => normalizeToken(token))
     .filter(Boolean)
+}
+
+function normalizeToken(token) {
+  return PLURAL_NORMALIZATIONS[token] ?? token
+}
+
+function extractQuotedPhrases(query) {
+  return [...String(query ?? '').matchAll(/"([^"]+)"|'([^']+)'/g)]
+    .map(match => (match[1] ?? match[2] ?? '').trim().toLowerCase())
+    .filter(Boolean)
+}
+
+function extractMeaningfulPhrases(normalizedQuery, tokens) {
+  const phrases = new Set(extractQuotedPhrases(normalizedQuery))
+  if (tokens.length >= 2 && tokens.length <= 5) phrases.add(tokens.join(' '))
+
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const phrase = `${tokens[i]} ${tokens[i + 1]}`
+    if (TERM_EXPANSIONS[tokens[i]] || PROVIDER_ALIASES[tokens[i]] || TERM_EXPANSIONS[tokens[i + 1]] || PROVIDER_ALIASES[tokens[i + 1]]) {
+      phrases.add(phrase)
+    }
+  }
+
+  return Array.from(phrases)
 }
 
 function collectExpandedTerms(tokens) {
@@ -108,6 +164,15 @@ function collectExpandedTerms(tokens) {
   }
 
   return Array.from(expanded)
+}
+
+function collectSynonyms(tokens) {
+  const synonyms = new Set()
+  for (const token of tokens) {
+    for (const alias of PROVIDER_ALIASES[token] ?? []) synonyms.add(alias)
+    for (const alias of TERM_EXPANSIONS[token] ?? []) synonyms.add(alias)
+  }
+  return Array.from(synonyms)
 }
 
 function detectProviderHints(tokens) {
@@ -136,6 +201,20 @@ function detectIntent(normalizedQuery) {
   return INTENT_RULES.find(rule => rule.pattern.test(normalizedQuery))?.intent ?? 'general-search'
 }
 
+function detectMustHave(tokens) {
+  return tokens
+    .filter(token => token.startsWith('+') && token.length > 1)
+    .map(token => token.slice(1))
+}
+
+function detectShouldHave(intent, facets, synonyms) {
+  return [
+    ...(INTENT_SHOULD_TERMS[intent] ?? []),
+    ...facets,
+    ...synonyms.slice(0, 8),
+  ].filter(Boolean)
+}
+
 export function understandQuery(query) {
   const normalizedQuery = query.trim().toLowerCase()
   if (!normalizedQuery) {
@@ -144,6 +223,10 @@ export function understandQuery(query) {
       coreTerms: [],
       tokens: [],
       expandedTerms: [],
+      phrases: [],
+      synonyms: [],
+      mustHave: [],
+      shouldHave: [],
       intent: 'general-search',
       facets: [],
       entityTypesToBoost: [],
@@ -152,17 +235,27 @@ export function understandQuery(query) {
   }
 
   const tokens = tokenizeQuery(query)
-  const expandedTerms = collectExpandedTerms(tokens)
-  const providerHints = detectProviderHints(tokens)
-  const facets = detectFacets(normalizedQuery)
-  const entityTypesToBoost = detectEntityTypeBoosts(normalizedQuery, facets)
-  const intent = detectIntent(normalizedQuery)
+  const normalizedTokens = tokens.map(token => token.replace(/^\+/, '')).filter(Boolean)
+  const detectionQuery = `${normalizedQuery} ${normalizedTokens.join(' ')}`
+  const expandedTerms = collectExpandedTerms(normalizedTokens)
+  const synonyms = collectSynonyms(normalizedTokens)
+  const providerHints = detectProviderHints(normalizedTokens)
+  const facets = detectFacets(detectionQuery)
+  const entityTypesToBoost = detectEntityTypeBoosts(detectionQuery, facets)
+  const intent = detectIntent(detectionQuery)
+  const phrases = extractMeaningfulPhrases(normalizedQuery, normalizedTokens)
+  const mustHave = detectMustHave(tokens)
+  const shouldHave = detectShouldHave(intent, facets, synonyms)
 
   return {
     normalizedQuery,
-    coreTerms: tokens,
-    tokens,
+    coreTerms: normalizedTokens,
+    tokens: normalizedTokens,
     expandedTerms: [normalizedQuery, ...expandedTerms.filter(term => term !== normalizedQuery)],
+    phrases,
+    synonyms,
+    mustHave,
+    shouldHave: [...new Set(shouldHave)].filter(term => !normalizedTokens.includes(term)),
     intent,
     facets,
     entityTypesToBoost,

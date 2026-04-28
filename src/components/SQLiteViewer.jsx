@@ -1,11 +1,57 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { downloadSQLiteAsset, getSQLiteAsset, replaceSQLiteAssetBytes, replaceSQLiteAssetFromFile } from '../utils/sqliteAssets'
 import { executeSQLiteQuery, inspectSQLiteDatabase, readSQLiteTable, updateSQLiteRow } from '../utils/externalSqlite'
-import { buildSelectAllQuery } from '../utils/externalSqliteCore'
+import { validateSelectQuery } from '../utils/externalSqliteCore'
+import { streamLLMChat } from '../utils/llmClient'
 
 const PAGE_SIZE = 100
-const DEFAULT_QUERY = 'SELECT name FROM sqlite_master ORDER BY name'
+const DEFAULT_QUERY = `SELECT type, name, sql
+FROM sqlite_master
+WHERE type IN ('table', 'view')
+  AND name NOT LIKE 'sqlite_%'
+ORDER BY type, name`
 const HIDDEN_ROW_ID = '__jotit_rowid'
+
+function extractSQLFromResponse(text) {
+  const fenced = text.match(/```(?:sql|sqlite)?\s*([\s\S]*?)```/i)
+  if (fenced?.[1]) return fenced[1].trim()
+
+  const lines = text.split('\n')
+  const startIndex = lines.findIndex(line => /^\s*select\b/i.test(line))
+  if (startIndex === -1) return ''
+
+  const sqlLines = []
+  for (const line of lines.slice(startIndex)) {
+    if (!line.trim()) break
+    sqlLines.push(line)
+    if (line.trim().endsWith(';')) break
+  }
+  return sqlLines.join('\n').trim()
+}
+
+function buildSQLiteNibContext({ overview, queryText }) {
+  const parts = []
+  if (overview?.objects?.length) {
+    parts.push('Full database schema:')
+    for (const entry of overview.objects) {
+      const count = entry.type === 'table' && entry.rowCount != null ? ` (${entry.rowCount} rows)` : ''
+      parts.push(`- ${entry.type} ${entry.name}${count}`)
+      if (entry.sql) parts.push(entry.sql)
+    }
+  }
+  if (queryText?.trim()) parts.push(`Current query:\n${queryText.trim()}`)
+  return parts.join('\n\n')
+}
+
+function validateSQLSuggestion(sql) {
+  if (!sql) return 'Nib did not return a SQL query.'
+  try {
+    validateSelectQuery(sql)
+    return ''
+  } catch (error) {
+    return error.message || 'Invalid SQL suggestion.'
+  }
+}
 
 function SQLiteResultsTable({ columns, rows, emptyLabel, onSelectRow, selectedRowIndex }) {
   if (!columns?.length) {
@@ -57,8 +103,10 @@ function SQLiteResultsTable({ columns, rows, emptyLabel, onSelectRow, selectedRo
   )
 }
 
-export default function SQLiteViewer({ assetId }) {
+export default function SQLiteViewer({ assetId, llmEnabled = false, agentToken = '', ollamaModel = '' }) {
   const fileInputRef = useRef(null)
+  const nibInputRef = useRef(null)
+  const nibResponseRef = useRef('')
   const [asset, setAsset] = useState(null)
   const [overview, setOverview] = useState(null)
   const [activeTab, setActiveTab] = useState('browse')
@@ -78,6 +126,11 @@ export default function SQLiteViewer({ assetId }) {
   const [selectedRowIndex, setSelectedRowIndex] = useState(null)
   const [selectedRow, setSelectedRow] = useState(null)
   const [editDraft, setEditDraft] = useState({})
+  const [nibMode, setNibMode] = useState(false)
+  const [nibRequest, setNibRequest] = useState('')
+  const [nibStreaming, setNibStreaming] = useState(false)
+  const [nibSuggestion, setNibSuggestion] = useState('')
+  const [nibError, setNibError] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -100,6 +153,11 @@ export default function SQLiteViewer({ assetId }) {
       setTableData(null)
       setQueryText('')
       setQueryResult(null)
+      setNibMode(false)
+      setNibRequest('')
+      setNibStreaming(false)
+      setNibSuggestion('')
+      setNibError('')
       setPage(0)
       setSelectedRowIndex(null)
       setSelectedRow(null)
@@ -112,11 +170,10 @@ export default function SQLiteViewer({ assetId }) {
         if (cancelled) return
         setAsset(nextAsset)
         setOverview(nextOverview)
-        const firstTable = nextOverview.objects.find(entry => entry.type === 'table')
-        const firstObject = firstTable ?? nextOverview.objects[0] ?? null
+        const firstObject = nextOverview.objects.find(entry => entry.type === 'table') ?? nextOverview.objects[0] ?? null
         setSelectedName(firstObject?.name ?? '')
         setSelectedType(firstObject?.type ?? 'table')
-        setQueryText(firstObject?.name ? buildSelectAllQuery(firstObject.name) : DEFAULT_QUERY)
+        setQueryText(DEFAULT_QUERY)
       } catch (e) {
         if (cancelled) return
         setViewerError(e.message ?? 'Unable to load SQLite database.')
@@ -167,8 +224,90 @@ export default function SQLiteViewer({ assetId }) {
   }, [overview, selectedName, selectedType])
 
   const pageCount = tableData ? Math.max(1, Math.ceil(tableData.totalRows / PAGE_SIZE)) : 1
-  const selectedObjectQuery = selectedObject?.name ? buildSelectAllQuery(selectedObject.name) : DEFAULT_QUERY
   const editableColumns = (tableData?.columnInfo ?? []).filter(column => !column.isPrimaryKey)
+
+  const dismissNibSuggestion = useCallback(() => {
+    setNibSuggestion('')
+    setNibError('')
+  }, [])
+
+  const acceptNibSuggestion = useCallback(() => {
+    if (!nibSuggestion) return
+    setQueryText(nibSuggestion)
+    setNibSuggestion('')
+    setNibError('')
+  }, [nibSuggestion])
+
+  const toggleNibMode = useCallback(() => {
+    setNibSuggestion('')
+    setNibError('')
+    setNibMode(prev => {
+      const next = !prev
+      if (next) setTimeout(() => nibInputRef.current?.focus(), 0)
+      return next
+    })
+  }, [])
+
+  const sendToNib = useCallback(() => {
+    if (!nibRequest.trim() || nibStreaming) return
+
+    nibResponseRef.current = ''
+    setNibStreaming(true)
+    setNibMode(false)
+    setNibSuggestion('')
+    setNibError('')
+
+    streamLLMChat(
+      {
+        token: agentToken,
+        model: ollamaModel,
+        messages: [{ role: 'user', content: nibRequest.trim() }],
+        context: buildSQLiteNibContext({ overview, queryText }),
+        contextMode: 'sqlite',
+      },
+      (chunk) => { nibResponseRef.current += chunk },
+      () => {
+        setNibStreaming(false)
+        const extracted = extractSQLFromResponse(nibResponseRef.current)
+        const validationError = validateSQLSuggestion(extracted)
+        if (validationError) {
+          setNibError(`Nib returned an invalid query: ${validationError}`)
+        } else {
+          setNibSuggestion(validateSelectQuery(extracted))
+        }
+        setNibRequest('')
+      },
+      (error) => {
+        setNibStreaming(false)
+        setNibError(error || 'Nib could not build a query.')
+        setNibRequest('')
+      },
+    )
+  }, [agentToken, nibRequest, nibStreaming, ollamaModel, overview, queryText])
+
+  function handleNibKeyDown(event) {
+    if (event.key === 'Escape') {
+      setNibMode(false)
+      return
+    }
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault()
+      sendToNib()
+    }
+  }
+
+  function handleQueryKeyDown(event) {
+    if (!nibSuggestion) return
+    if (event.key === 'Tab' || event.key === 'Enter') {
+      event.preventDefault()
+      acceptNibSuggestion()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      dismissNibSuggestion()
+    }
+  }
 
   async function reloadAsset(nextSelectedName = selectedName, nextSelectedType = selectedType) {
     if (!assetId) return
@@ -192,9 +331,6 @@ export default function SQLiteViewer({ assetId }) {
       setSelectedRowIndex(null)
       setSelectedRow(null)
       setEditDraft({})
-      if (activeTab === 'query' && firstObject?.name) {
-        setQueryText(buildSelectAllQuery(firstObject.name))
-      }
     } catch (e) {
       setViewerError(e.message ?? 'Unable to reload SQLite database.')
     } finally {
@@ -370,10 +506,10 @@ export default function SQLiteViewer({ assetId }) {
           <div className="flex items-center gap-3">
             <div>
               <div className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest">
-                {activeTab === 'query' ? 'query mode' : selectedObject?.type ?? 'object'}
+                {activeTab === 'query' ? 'database query' : selectedObject?.type ?? 'object'}
               </div>
               <div className="text-sm text-zinc-200">
-                {activeTab === 'query' ? 'Read-only SELECT query runner' : selectedObject?.name ?? 'Select a table'}
+                {activeTab === 'query' ? 'Read-only SELECT runner for the full database' : selectedObject?.name ?? 'Select a table'}
               </div>
             </div>
             {activeTab === 'browse' && ['table', 'view'].includes(selectedType) && tableData && (
@@ -403,12 +539,34 @@ export default function SQLiteViewer({ assetId }) {
           {activeTab === 'query' && (
             <div className="mt-3 space-y-3">
               <textarea
-                value={queryText}
-                onChange={(e) => setQueryText(e.target.value)}
+                value={nibSuggestion || queryText}
+                onChange={(e) => {
+                  dismissNibSuggestion()
+                  setQueryText(e.target.value)
+                }}
+                onKeyDown={handleQueryKeyDown}
                 spellCheck={false}
-                className="min-h-[120px] w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-[12px] text-zinc-200 outline-none transition-colors focus:border-fuchsia-700"
-                placeholder={DEFAULT_QUERY}
+                readOnly={nibStreaming}
+                className={`min-h-[120px] w-full rounded border bg-zinc-950 px-3 py-2 font-mono text-[12px] outline-none transition-colors ${
+                  nibSuggestion
+                    ? 'border-violet-700 text-violet-200 focus:border-violet-500'
+                    : nibStreaming
+                      ? 'border-zinc-800 text-zinc-600'
+                      : 'border-zinc-800 text-zinc-200 focus:border-fuchsia-700'
+                }`}
+                placeholder={nibStreaming ? 'Nib is building a query...' : DEFAULT_QUERY}
               />
+              {nibMode && (
+                <textarea
+                  ref={nibInputRef}
+                  value={nibRequest}
+                  onChange={(e) => setNibRequest(e.target.value)}
+                  onKeyDown={handleNibKeyDown}
+                  spellCheck={false}
+                  className="min-h-[72px] w-full rounded border border-violet-700 bg-violet-950/30 px-3 py-2 font-mono text-[12px] text-violet-200 outline-none transition-colors placeholder-violet-800 focus:border-violet-500"
+                  placeholder="Ask Nib for a query based on this database... (Ctrl+Enter to send)"
+                />
+              )}
               <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-500">
                 <button
                   onClick={runQuery}
@@ -419,16 +577,54 @@ export default function SQLiteViewer({ assetId }) {
                 </button>
                 <button
                   onClick={() => {
-                    setQueryText(selectedObjectQuery)
+                    setQueryText(DEFAULT_QUERY)
                     setQueryError('')
                   }}
-                  disabled={!selectedObject?.name}
                   className="rounded border border-zinc-700 px-3 py-1 text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200 disabled:border-zinc-900 disabled:text-zinc-800"
                 >
-                  Use selected object
+                  Show schema
                 </button>
+                {llmEnabled && (
+                  <button
+                    onClick={nibStreaming ? undefined : toggleNibMode}
+                    disabled={nibStreaming}
+                    title={nibStreaming ? 'Nib is building a query...' : nibMode ? 'Back to SQL input' : 'Ask Nib to write a query'}
+                    className={`rounded border px-3 py-1 transition-colors ${
+                      nibStreaming
+                        ? 'border-violet-900 text-violet-600'
+                        : nibMode
+                          ? 'border-violet-700 bg-violet-950/50 text-violet-300'
+                          : 'border-violet-900 bg-violet-950/20 text-violet-500 hover:border-violet-700 hover:text-violet-300'
+                    }`}
+                  >
+                    Nib
+                  </button>
+                )}
+                {nibMode && (
+                  <button
+                    onClick={sendToNib}
+                    disabled={!nibRequest.trim() || nibStreaming}
+                    className="rounded border border-violet-800 bg-violet-950/40 px-3 py-1 text-violet-300 transition-colors hover:border-violet-700 disabled:border-zinc-900 disabled:bg-zinc-950 disabled:text-zinc-700"
+                  >
+                    Send
+                  </button>
+                )}
                 <span className="ml-auto text-zinc-700">SELECT only</span>
               </div>
+              {nibSuggestion && (
+                <div className="flex items-center gap-2 text-[11px] font-mono">
+                  <span className="text-violet-400">Nib suggestion</span>
+                  <span className="text-zinc-600">-</span>
+                  <button onClick={acceptNibSuggestion} className="text-violet-300 transition-colors hover:text-violet-100">Tab / Enter to accept</button>
+                  <span className="text-zinc-700">.</span>
+                  <button onClick={dismissNibSuggestion} className="text-zinc-600 transition-colors hover:text-zinc-400">Esc to dismiss</button>
+                </div>
+              )}
+              {nibError && !nibSuggestion && (
+                <div className="rounded border border-violet-900/40 bg-violet-950/30 px-3 py-2 text-[11px] font-mono text-violet-300">
+                  {nibError}
+                </div>
+              )}
               {queryError && (
                 <div className="rounded border border-red-900/40 bg-red-950/30 px-3 py-2 text-[11px] font-mono text-red-400">
                   {queryError}

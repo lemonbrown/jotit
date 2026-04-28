@@ -158,6 +158,60 @@ function executeNodeRequest(url, { method, headers, body, timeoutMs, followRedir
   })
 }
 
+const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434').replace(/\/$/, '')
+const REGEX_SYSTEM_PROMPT = `You are a JavaScript regular expression expert. Your job is to write, fix, and explain regular expressions for JotIt's browser regex tester.
+
+Rules:
+- Return a JavaScript RegExp-compatible pattern.
+- Put the regex on its own first line in this exact format: /pattern/flags
+- Use only these flags when needed: g, i, m, s.
+- Do not stack quantifiers. For example, never write \\s*{3}; write (?:\\s*...){3} or another valid grouped form.
+- Prefer non-capturing groups unless the captured value is intentionally useful.
+- If JavaScript regex cannot match only the desired subpart, return a valid regex that captures the desired value and explain which capture group to use.
+- Always provide a working regex. Do not ask clarifying questions. Make a reasonable assumption and note it briefly.
+
+Example for "every 3rd word":
+/(?:\\b\\w+\\b\\W+){2}(\\b\\w+\\b)/g
+This matches each three-word span and captures the third word in group 1.`
+const SQLITE_SYSTEM_PROMPT = `You are a SQLite query expert. Your job is to write read-only SQLite SELECT queries for JotIt's full-database SQLite query runner.
+
+Rules:
+- Return a single SQLite SELECT query.
+- Put the SQL query first, preferably inside a fenced sql code block.
+- Do not return INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA, ATTACH, DETACH, VACUUM, or multiple statements.
+- Use the entire provided database schema. Join across tables and views when the request calls for it.
+- Use only tables, views, and columns shown in the provided database schema.
+- Quote identifiers with double quotes when they contain spaces, punctuation, or could be reserved words.
+- Add a reasonable LIMIT unless the user explicitly asks for aggregate-only results.
+- Do not ask clarifying questions. Make a reasonable assumption and note it briefly after the query.`
+const SEARCH_PLAN_SYSTEM_PROMPT = `You help improve JotIt note search. Return compact JSON only.
+
+For query planning, return:
+{
+  "rewrittenQuery": "short improved search query",
+  "synonyms": [],
+  "facets": [],
+  "intent": "general-search",
+  "mustHave": [],
+  "shouldHave": []
+}
+
+Use only available facets from context. Keep arrays short. Do not include prose.`
+const SEARCH_RERANK_SYSTEM_PROMPT = `You rerank JotIt search results. Return compact JSON only.
+
+Rules:
+- Use only candidate IDs provided in context.
+- Do not invent IDs.
+- Do not drop relevant candidates unless they are outside the returned top order.
+- Prefer exact title/phrase matches, useful semantic matches, and results that answer the user's query.
+
+Return:
+{
+  "results": [
+    { "id": "candidate-id", "reason": "short reason" }
+  ]
+}`
+
 const token = loadOrCreateToken()
 const app = express()
 
@@ -279,6 +333,150 @@ app.post('/shell', requireToken(token), (req, res) => {
       timedOut,
     })
   })
+})
+
+app.get('/ollama/status', requireToken(token), async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
+    if (!response.ok) return res.json({ available: false, baseUrl: OLLAMA_BASE_URL })
+    res.json({ available: true, baseUrl: OLLAMA_BASE_URL })
+  } catch {
+    res.json({ available: false, baseUrl: OLLAMA_BASE_URL })
+  }
+})
+
+app.get('/ollama/models', requireToken(token), async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return res.status(502).json({ error: 'Ollama returned an error' })
+    const data = await response.json()
+    res.json({ models: data.models ?? [] })
+  } catch (err) {
+    res.status(502).json({ error: err.message ?? 'Could not reach Ollama' })
+  }
+})
+
+app.post('/ollama/embed', requireToken(token), async (req, res) => {
+  const { model, input } = req.body ?? {}
+
+  if (!model || typeof model !== 'string') {
+    return res.status(400).json({ error: 'model is required' })
+  }
+  if (!input || (typeof input !== 'string' && !Array.isArray(input))) {
+    return res.status(400).json({ error: 'input must be a string or array of strings' })
+  }
+
+  try {
+    const ollamaRes = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input }),
+      signal: AbortSignal.timeout(60000),
+    })
+
+    if (!ollamaRes.ok) {
+      const text = await ollamaRes.text().catch(() => 'unknown error')
+      return res.status(502).json({ error: text })
+    }
+
+    const data = await ollamaRes.json()
+    res.json({ embeddings: data.embeddings ?? [] })
+  } catch (err) {
+    res.status(502).json({ error: err.message ?? 'Could not reach Ollama' })
+  }
+})
+
+app.post('/ollama/chat', requireToken(token), async (req, res) => {
+  const { model, messages, context, contextMode } = req.body ?? {}
+
+  if (!model || typeof model !== 'string') {
+    return res.status(400).json({ error: 'model is required' })
+  }
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages must be an array' })
+  }
+
+  const ctx = context?.trim() ?? ''
+  let systemContent
+  if (contextMode === 'regex') {
+    systemContent = `${REGEX_SYSTEM_PROMPT}\n\n${ctx ? `Current regex state:\n${ctx}` : ''}`
+  } else if (contextMode === 'sqlite') {
+    systemContent = `${SQLITE_SYSTEM_PROMPT}\n\n${ctx ? `Database context:\n${ctx}` : ''}`
+  } else if (contextMode === 'search') {
+    systemContent = `${SEARCH_PLAN_SYSTEM_PROMPT}\n\n${ctx ? `Search context:\n${ctx}` : ''}`
+  } else if (contextMode === 'search-rerank') {
+    systemContent = `${SEARCH_RERANK_SYSTEM_PROMPT}\n\n${ctx ? `Candidate context:\n${ctx}` : ''}`
+  } else if (contextMode === 'all') {
+    systemContent = ctx
+      ? `You are a helpful assistant. The user has the following notes in their workspace:\n\n${ctx}\n\nAnswer questions about these notes concisely.`
+      : 'You are a helpful assistant.'
+  } else if (contextMode === 'selection') {
+    systemContent = ctx
+      ? `You are a helpful assistant. The user has selected the following text from a note:\n\n${ctx}\n\nAnswer questions about this selection concisely.`
+      : 'You are a helpful assistant.'
+  } else {
+    systemContent = ctx
+      ? `You are a helpful assistant. The user is working on a note.\n\nNote:\n---\n${ctx}\n---\n\nAnswer questions about this note concisely. If the note doesn't contain relevant information, say so.`
+      : 'You are a helpful assistant.'
+  }
+
+  const systemMessage = { role: 'system', content: systemContent }
+
+  const fullMessages = [systemMessage, ...messages]
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+
+  let ollamaRes
+  try {
+    ollamaRes = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: fullMessages, stream: true }),
+      signal: AbortSignal.timeout(120000),
+    })
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ error: err.message ?? 'Could not reach Ollama' })}\n\n`)
+    return res.end()
+  }
+
+  if (!ollamaRes.ok) {
+    const text = await ollamaRes.text().catch(() => 'unknown error')
+    res.write(`data: ${JSON.stringify({ error: text })}\n\n`)
+    return res.end()
+  }
+
+  const decoder = new TextDecoder()
+  const reader = ollamaRes.body.getReader()
+
+  const cleanup = () => reader.cancel().catch(() => {})
+  req.on('close', cleanup)
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const parsed = JSON.parse(trimmed)
+          const token = parsed?.message?.content ?? ''
+          if (token) res.write(`data: ${JSON.stringify({ token })}\n\n`)
+          if (parsed?.done) {
+            res.write('data: [DONE]\n\n')
+            return res.end()
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  res.write('data: [DONE]\n\n')
+  res.end()
 })
 
 app.listen(PORT, HOST, () => {

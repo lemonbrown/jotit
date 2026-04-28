@@ -1,4 +1,5 @@
-import { useState, useMemo, Fragment } from 'react'
+import { useState, useMemo, Fragment, useRef, useCallback } from 'react'
+import { streamLLMChat } from '../utils/llmClient'
 
 function esc(t) {
   return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -166,19 +167,176 @@ function mergeQuantifiers(tokens) {
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function RegexTester({ initialTestString = '' }) {
+function extractRegexFromResponse(text) {
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^\/(.+)\/([gimsuy]*)$/)
+    if (m?.[1]) return { pattern: m[1], flags: m[2] || 'g' }
+  }
+  const m2 = text.match(/`\/(.+?)\/([gimsuy]*)`/)
+  if (m2?.[1]) return { pattern: m2[1], flags: m2[2] || 'g' }
+  return null
+}
+
+function validateRegexSuggestion(suggestion) {
+  if (!suggestion?.pattern) return 'Nib did not return a regex in /pattern/flags format.'
+  try {
+    new RegExp(suggestion.pattern, suggestion.flags || 'g')
+    return ''
+  } catch (error) {
+    return error.message || 'Invalid regex suggestion.'
+  }
+}
+
+function parseRegexLiteralInput(value) {
+  const input = value.trim()
+  if (!input.startsWith('/')) return null
+
+  let escaped = false
+  let inCharClass = false
+  for (let i = 1; i < input.length; i++) {
+    const ch = input[i]
+    if (escaped) {
+      escaped = false
+    } else if (ch === '\\') {
+      escaped = true
+    } else if (ch === '[') {
+      inCharClass = true
+    } else if (ch === ']') {
+      inCharClass = false
+    } else if (ch === '/' && !inCharClass) {
+      const parsedFlags = input.slice(i + 1)
+      if (/^[dgimsuy]*$/.test(parsedFlags)) {
+        return { pattern: input.slice(1, i), flags: parsedFlags || 'g' }
+      }
+    }
+  }
+  return null
+}
+
+function withRequiredFlags(baseFlags) {
+  const out = new Set(baseFlags.split(''))
+  out.add('g')
+  try {
+    new RegExp('', 'd')
+    out.add('d')
+  } catch {}
+  return [...out].join('')
+}
+
+function getHighlightRanges(match) {
+  const groupRanges = match.indices
+    ?.slice(1)
+    .filter(range => range && range[0] !== -1 && range[1] > range[0])
+    .map(([start, end]) => ({ start, end }))
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+
+  if (groupRanges?.length) return groupRanges
+  return [{ start: match.index, end: match.index + match[0].length }]
+}
+
+export default function RegexTester({ initialTestString = '', llmEnabled = false, agentToken = '', ollamaModel = '' }) {
   const [pattern, setPattern] = useState('')
   const [flags, setFlags]     = useState('g')
   const [testStr, setTestStr] = useState(initialTestString)
+  const [nibMode, setNibMode] = useState(false)
+  const [nibRequest, setNibRequest] = useState('')
+  const [nibStreaming, setNibStreaming] = useState(false)
+  const [nibSuggestion, setNibSuggestion] = useState(null) // { pattern, flags } | null
+  const [nibError, setNibError] = useState('')
+  const nibInputRef = useRef(null)
+  const nibResponseRef = useRef('')
 
   const toggleFlag = (f) =>
     setFlags(prev => prev.includes(f) ? prev.replace(f, '') : prev + f)
+
+  const updatePatternInput = useCallback((value) => {
+    const parsed = parseRegexLiteralInput(value)
+    if (parsed) {
+      setPattern(parsed.pattern)
+      setFlags(parsed.flags)
+    } else {
+      setPattern(value)
+    }
+  }, [])
+
+  const toggleNibMode = () => {
+    setNibSuggestion(null)
+    setNibError('')
+    const next = !nibMode
+    setNibMode(next)
+    if (next) setTimeout(() => nibInputRef.current?.focus(), 0)
+  }
+
+  const acceptSuggestion = useCallback(() => {
+    if (!nibSuggestion) return
+    setPattern(nibSuggestion.pattern)
+    setFlags(nibSuggestion.flags)
+    setNibSuggestion(null)
+    setNibError('')
+  }, [nibSuggestion])
+
+  const dismissSuggestion = useCallback(() => {
+    setNibSuggestion(null)
+    setNibError('')
+  }, [])
+
+  const handlePatternKeyDown = (e) => {
+    if (!nibSuggestion) return
+    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); acceptSuggestion(); return }
+    if (e.key === 'Escape') { e.preventDefault(); dismissSuggestion(); return }
+    // any other key: dismiss suggestion and let user type normally
+    dismissSuggestion()
+  }
+
+  const sendToNib = useCallback(() => {
+    if (!nibRequest.trim() || nibStreaming) return
+    nibResponseRef.current = ''
+    setNibStreaming(true)
+    setNibMode(false)
+    setNibError('')
+
+    const ctxParts = []
+    if (pattern) ctxParts.push(`Current pattern: /${pattern}/${flags}`)
+    if (testStr) ctxParts.push(`Test string:\n${testStr}`)
+
+    streamLLMChat(
+      {
+        token: agentToken,
+        model: ollamaModel,
+        messages: [{ role: 'user', content: nibRequest.trim() }],
+        context: ctxParts.join('\n\n'),
+        contextMode: 'regex',
+      },
+      (chunk) => { nibResponseRef.current += chunk },
+      () => {
+        setNibStreaming(false)
+        const extracted = extractRegexFromResponse(nibResponseRef.current)
+        const validationError = validateRegexSuggestion(extracted)
+        if (validationError) {
+          setNibError(`Nib returned an invalid regex: ${validationError}`)
+        } else {
+          setNibSuggestion(extracted)
+        }
+        setNibRequest('')
+      },
+      (error) => {
+        setNibStreaming(false)
+        setNibError(error || 'Nib could not build a regex.')
+        setNibRequest('')
+      },
+    )
+  }, [nibRequest, nibStreaming, pattern, flags, testStr, agentToken, ollamaModel])
+
+  const handleNibKeyDown = (e) => {
+    if (e.key === 'Escape') { setNibMode(false); return }
+    if (e.key === 'Enter') { e.preventDefault(); sendToNib() }
+  }
 
   const result = useMemo(() => {
     if (!pattern) return null
     let re
     try {
-      const f = flags.includes('g') ? flags : flags + 'g'
+      const f = withRequiredFlags(flags)
       re = new RegExp(pattern, f)
     } catch (e) {
       return { error: e.message }
@@ -191,9 +349,18 @@ export default function RegexTester({ initialTestString = '' }) {
 
     for (const m of testStr.matchAll(re)) {
       allMatches.push(m)
-      if (m.index > lastIdx) segments.push({ t: 'text', s: testStr.slice(lastIdx, m.index) })
-      segments.push({ t: 'match', s: m[0] || '∅', m })
-      lastIdx = m.index + (m[0].length || 1)
+      const matchEnd = m.index + m[0].length
+      for (const range of getHighlightRanges(m)) {
+        if (range.start > lastIdx) segments.push({ t: 'text', s: testStr.slice(lastIdx, range.start) })
+        segments.push({ t: 'match', s: testStr.slice(range.start, range.end), m })
+        lastIdx = range.end
+      }
+      if (matchEnd > lastIdx) {
+        segments.push({ t: 'text', s: testStr.slice(lastIdx, matchEnd) })
+        lastIdx = matchEnd
+      } else if (m[0].length === 0) {
+        lastIdx = m.index + 1
+      }
       if (lastIdx > testStr.length) break
     }
     if (lastIdx < testStr.length) segments.push({ t: 'text', s: testStr.slice(lastIdx) })
@@ -227,20 +394,63 @@ export default function RegexTester({ initialTestString = '' }) {
       {/* Pattern row */}
       <div className="px-4 py-2.5 border-b border-zinc-800 space-y-2 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-zinc-600 font-mono shrink-0">pattern</span>
+          <span className="text-[11px] text-zinc-600 font-mono shrink-0">
+            {nibMode ? 'ask' : 'pattern'}
+          </span>
           <div className="relative flex-1">
-            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-sm pointer-events-none select-none">/</span>
-            <input
-              value={pattern}
-              onChange={e => setPattern(e.target.value)}
-              placeholder="regex pattern"
-              spellCheck={false}
-              className={`w-full bg-zinc-800 border rounded px-6 py-1.5 text-sm font-mono text-zinc-200 outline-none transition-colors ${
-                hasError ? 'border-red-800 focus:border-red-600' : 'border-zinc-700 focus:border-zinc-500'
-              }`}
-            />
-            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-sm pointer-events-none select-none">/{flags}</span>
+            {!nibMode && (
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-sm pointer-events-none select-none">/</span>
+            )}
+            {nibMode ? (
+              <input
+                ref={nibInputRef}
+                value={nibRequest}
+                onChange={e => setNibRequest(e.target.value)}
+                onKeyDown={handleNibKeyDown}
+                placeholder="describe what you want to match… (Enter to send)"
+                spellCheck={false}
+                className="w-full bg-violet-950/30 border border-violet-700 rounded px-3 py-1.5 text-sm font-mono text-violet-200 outline-none focus:border-violet-500 transition-colors placeholder-violet-800"
+              />
+            ) : (
+              <input
+                value={nibSuggestion ? nibSuggestion.pattern : pattern}
+                onChange={e => { dismissSuggestion(); updatePatternInput(e.target.value) }}
+                onKeyDown={handlePatternKeyDown}
+                placeholder={nibStreaming ? '✒ thinking…' : 'regex pattern'}
+                readOnly={nibStreaming}
+                spellCheck={false}
+                className={`w-full bg-zinc-800 border rounded px-6 py-1.5 text-sm font-mono outline-none transition-colors ${
+                  nibSuggestion
+                    ? 'border-violet-600 text-violet-300 focus:border-violet-400'
+                    : nibStreaming
+                      ? 'border-zinc-700 text-zinc-600 cursor-wait'
+                      : hasError
+                        ? 'border-red-800 focus:border-red-600 text-zinc-200'
+                        : 'border-zinc-700 focus:border-zinc-500 text-zinc-200'
+                }`}
+              />
+            )}
+            {!nibMode && (
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-sm pointer-events-none select-none">/{flags}</span>
+            )}
           </div>
+
+          {llmEnabled && (
+            <button
+              onClick={nibStreaming ? undefined : toggleNibMode}
+              disabled={nibStreaming}
+              title={nibStreaming ? 'Nib is thinking…' : nibMode ? 'Back to regex input (Esc)' : 'Ask Nib to write this regex'}
+              className={`shrink-0 px-2 py-1.5 text-[12px] rounded border transition-colors font-mono ${
+                nibStreaming
+                  ? 'text-violet-600 border-violet-900 cursor-wait animate-pulse'
+                  : nibMode
+                    ? 'text-violet-300 bg-violet-950/50 border-violet-700'
+                    : 'text-violet-500 hover:text-violet-300 bg-violet-950/20 border-violet-900 hover:border-violet-700'
+              }`}
+            >
+              ✒
+            </button>
+          )}
 
           <div className="flex gap-0.5 shrink-0">
             {['g','i','m','s'].map(f => (
@@ -264,7 +474,23 @@ export default function RegexTester({ initialTestString = '' }) {
           )}
         </div>
 
-        {hasError && (
+        {nibSuggestion && (
+          <div className="flex items-center gap-2 text-[11px] font-mono">
+            <span className="text-violet-400">✒ suggestion</span>
+            <span className="text-zinc-600">—</span>
+            <button onClick={acceptSuggestion} className="text-violet-300 hover:text-violet-100 transition-colors">Tab / Enter to accept</button>
+            <span className="text-zinc-700">·</span>
+            <button onClick={dismissSuggestion} className="text-zinc-600 hover:text-zinc-400 transition-colors">Esc to dismiss</button>
+          </div>
+        )}
+
+        {nibError && !nibSuggestion && (
+          <div className="text-[11px] text-violet-300 font-mono bg-violet-950/30 border border-violet-900/40 rounded px-2.5 py-1">
+            {nibError}
+          </div>
+        )}
+
+        {hasError && !nibSuggestion && (
           <div className="text-[11px] text-red-400 font-mono bg-red-950/30 border border-red-900/40 rounded px-2.5 py-1">
             {result.error}
           </div>
