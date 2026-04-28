@@ -31,9 +31,9 @@ const FEATURES = [
   'snippet search',
 ]
 
-const LANDING_COPY = `I built jot.it for me. It may not work for you. I built it because I have a penchant for dumping "eventually very important information" into notepad++. 
-And it became teeth pulling painful to find that very important thing. So I built something that helps me find things. 
-A lot of other things were added, too. Jot.it will exasperate a disciplined developer, but could be useful to another like me. Ymmv.`
+const LANDING_COPY = `I built jot.it for me. It may not be for you. I built it because I am undisciplined and unorganized. "eventually very important information" vanishes into notepad++. 
+My clutter becomes unmanageable and painful. So I built something that helps me find things. This does not fix my habits. 
+A lot of other things were added, too. jot.it might confuse a disciplined developer, but could be useful to another like me. Ymmv.`
 
 const FEATURE_GROUPS = [
   {
@@ -93,7 +93,7 @@ function LandingHero({ onEnter }) {
   return (
     <section className="px-8 py-24 max-w-3xl mx-auto">
       <h1 className="text-4xl sm:text-5xl font-medium text-zinc-50 leading-tight mb-8 tracking-tight">
-        I built a<br />note app for me.<br /> You may like it, or hate it.
+        I built a note app that works for me.
       </h1>
       <p className="text-zinc-400 text-base leading-relaxed mb-12 max-w-2xl">
         {LANDING_COPY}

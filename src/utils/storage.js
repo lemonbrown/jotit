@@ -29,9 +29,9 @@ export function saveNotes(notes) {
 export function loadSettings() {
   try {
     const data = localStorage.getItem(SETTINGS_KEY)
-    return data ? JSON.parse(data) : { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark' }
+    return data ? JSON.parse(data) : { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark', secretScanEnabled: false, secretScanBlockSync: false }
   } catch {
-    return { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark' }
+    return { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark', secretScanEnabled: false, secretScanBlockSync: false }
   }
 }
 

@@ -55,6 +55,8 @@ export default function HelpModal({ onClose }) {
             [['Alt+Right'],          'Forward through note locations'],
             [['Ctrl+Alt+Up'],        'Switch to previous collection'],
             [['Ctrl+Alt+Down'],      'Switch to next collection'],
+            [['Ctrl+Up'],            'Select previous note in list'],
+            [['Ctrl+Down'],          'Select next note in list'],
             [['Click'],              'Select a note'],
             [['Ctrl+Click'],         'Open note in another editor pane'],
             [['Alt+Hover'],          'Preview a note in a popout glance view'],

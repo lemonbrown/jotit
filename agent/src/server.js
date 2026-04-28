@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { exec } from 'node:child_process'
 import express from 'express'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -12,10 +13,19 @@ const TOKEN_ENV = 'JOTIT_AGENT_TOKEN'
 const CONFIG_PATH = path.join(os.homedir(), '.jotit-agent.json')
 const MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 const MAX_RESPONSE_BODY_BYTES = 25 * 1024 * 1024
+const MAX_SHELL_OUTPUT_BYTES = 512 * 1024
 const MAX_TIMEOUT_MS = 30000
 const DEFAULT_TIMEOUT_MS = 15000
 const DEFAULT_REDIRECTS = 5
 const HOP_BY_HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding'])
+const IS_WINDOWS = process.platform === 'win32'
+
+function resolveShell(lang) {
+  const l = String(lang ?? '').toLowerCase()
+  if (l === 'powershell' || l === 'pwsh') return IS_WINDOWS ? 'powershell.exe' : 'pwsh'
+  if (l === 'cmd') return IS_WINDOWS ? 'cmd.exe' : '/bin/sh'
+  return IS_WINDOWS ? 'powershell.exe' : '/bin/bash'
+}
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
 function loadOrCreateToken() {
@@ -238,6 +248,37 @@ app.post('/execute', requireToken(token), async (req, res) => {
   } finally {
     clearTimeout(timeout)
   }
+})
+
+app.post('/shell', requireToken(token), (req, res) => {
+  const startedAt = Date.now()
+  const { command, cwd, timeoutMs, lang } = req.body ?? {}
+
+  if (!command || typeof command !== 'string' || !command.trim()) {
+    return res.status(400).json({ error: 'command is required' })
+  }
+
+  const resolvedCwd = (typeof cwd === 'string' && cwd.trim()) ? cwd.trim() : os.homedir()
+  const resolvedTimeout = clampTimeout(timeoutMs)
+
+  exec(command.trim(), {
+    cwd: resolvedCwd,
+    timeout: resolvedTimeout,
+    maxBuffer: MAX_SHELL_OUTPUT_BYTES * 2,
+    shell: resolveShell(lang),
+  }, (error, stdout, stderr) => {
+    const elapsed = Date.now() - startedAt
+    const timedOut = error?.killed === true
+    const exitCode = error == null ? 0 : (typeof error.code === 'number' ? error.code : 1)
+    res.json({
+      ok: error == null,
+      exitCode,
+      stdout: String(stdout ?? '').slice(0, MAX_SHELL_OUTPUT_BYTES),
+      stderr: String(stderr ?? '').slice(0, MAX_SHELL_OUTPUT_BYTES),
+      elapsed,
+      timedOut,
+    })
+  })
 })
 
 app.listen(PORT, HOST, () => {

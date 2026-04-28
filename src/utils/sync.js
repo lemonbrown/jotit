@@ -5,6 +5,11 @@ import {
   upsertCollectionSync, deleteCollectionSync,
 } from './db.js'
 import { getStoredKeyPair, encryptNoteE2E, decryptNoteE2E } from './e2eEncryption.js'
+import { loadSettings } from './storage.js'
+import { scanForSecrets, contentHash } from './secretScanner.js'
+
+let _onSyncHeld = null
+export function setOnSyncHeld(cb) { _onSyncHeld = cb }
 
 const TOKEN_KEY = 'jotit_auth_token'
 const LAST_PULL_KEY = 'jotit_last_pull_ts'
@@ -26,8 +31,33 @@ export function scheduleSyncPush() {
 
 export async function syncPush() {
   if (!getToken()) return
-  const dirty = getDirtyNotes()
+  const allDirty = getDirtyNotes()
   const dirtyCollections = getDirtyCollections()
+
+  const { secretScanEnabled, secretScanBlockSync } = loadSettings()
+  const blockSync = secretScanEnabled && secretScanBlockSync
+
+  let dirty = allDirty
+  let heldNotes = []
+
+  if (blockSync) {
+    dirty = []
+    for (const note of allDirty) {
+      if (!note.pendingDelete) {
+        const c = note.content ?? ''
+        const matches = scanForSecrets(c)
+        const isCleared = note.secretsClearedHash && note.secretsClearedHash === contentHash(c)
+        if (matches.length && !isCleared) {
+          heldNotes.push(note)
+          continue
+        }
+      }
+      dirty.push(note)
+    }
+  }
+
+  if (_onSyncHeld) _onSyncHeld(heldNotes.map(n => n.id))
+
   if (!dirty.length && !dirtyCollections.length) return
 
   // Fetch key pair once if any E2E notes need encrypting

@@ -146,6 +146,7 @@ export async function initDB() {
   try { db.run('CREATE INDEX IF NOT EXISTS idx_notes_collection_id ON notes(collection_id)') } catch {}
   try { db.run('ALTER TABLE collections ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN collection_excluded INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN secrets_cleared_hash TEXT') } catch {}
 
   ensureDefaultCollection()
 
@@ -352,8 +353,8 @@ export function upsertNoteSync(note, dirty = 1) {
   const collectionId = note.collectionId ?? getDefaultCollection()?.id ?? 'default'
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded, secrets_cleared_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     [
       note.id,
       collectionId,
@@ -368,6 +369,7 @@ export function upsertNoteSync(note, dirty = 1) {
       dirty,
       note.encryptionTier ?? 0,
       note.collectionExcluded ? 1 : 0,
+      note.secretsClearedHash ?? null,
     ]
   )
 }
@@ -616,8 +618,9 @@ function deserialize(row) {
     isPublic:           row.is_public === 1,
     dirty:              row.dirty,
     pendingDelete:      row.pending_delete === 1,
-    encryptionTier:     Number(row.encryption_tier ?? 0),
-    collectionExcluded: row.collection_excluded === 1,
+    encryptionTier:      Number(row.encryption_tier ?? 0),
+    collectionExcluded:  row.collection_excluded === 1,
+    secretsClearedHash:  row.secrets_cleared_hash ?? null,
   }
 }
 

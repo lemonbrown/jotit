@@ -2,7 +2,8 @@
 import { loadSettings, saveSettings } from './utils/storage'
 import { useMemo } from 'react'
 import { exportSQLite, getAttachmentsForNote } from './utils/db'
-import { scheduleSyncPush } from './utils/sync'
+import { scheduleSyncPush, setOnSyncHeld } from './utils/sync'
+import { scanForSecrets, contentHash } from './utils/secretScanner'
 import { generateAndStoreKeyPair, exportPublicKeyJwk, wrapPrivateKey } from './utils/e2eEncryption'
 import { createEmptyNote } from './utils/noteFactories'
 import { ALL_COLLECTION_ID } from './utils/collectionFactories'
@@ -86,6 +87,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [tipsCreated, setTipsCreated] = useState(() => localStorage.getItem(TIPS_CREATED_KEY) === 'true')
   const [editorFocusNonce, setEditorFocusNonce] = useState(0)
   const [draggedNoteId, setDraggedNoteId] = useState(null)
+  const [syncHeldIds, setSyncHeldIds] = useState([])
+  const [publishSecretGate, setPublishSecretGate] = useState(null) // { note, viewMode, matches }
   const [dragOverCollectionId, setDragOverCollectionId] = useState(null)
   const createFromUrlHandledRef = useRef(false)
   const {
@@ -459,6 +462,16 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [updateNote, user])
 
   const handlePublishNote = useCallback(async (note, viewMode) => {
+    if (settings.secretScanEnabled) {
+      const c = note.content ?? ''
+      const matches = scanForSecrets(c)
+      const isCleared = note.secretsClearedHash && note.secretsClearedHash === contentHash(c)
+      if (matches.length && !isCleared) {
+        setPublishSecretGate({ note, viewMode, matches })
+        return { secretGated: true }
+      }
+    }
+
     try {
       let content = note.content ?? ''
 
@@ -495,7 +508,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     } catch (e) {
       return { error: e.message ?? 'Network error' }
     }
-  }, [])
+  }, [settings])
 
   const handleListSharedLinks = useCallback(async () => {
     try {
@@ -572,7 +585,30 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     return () => window.removeEventListener('keydown', handler)
   }, [clearSearch, createNote, cycleCollection, navigateLocationHistory, toggleNotesPane, toggleSimpleEditorMode, toggleCommandToolbars, toggleNoteListMetadata])
 
+  useEffect(() => {
+    setOnSyncHeld(ids => setSyncHeldIds(ids))
+    return () => setOnSyncHeld(null)
+  }, [])
+
   const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? collectionNotes, [collectionNotes, searchResults])
+
+  const cycleNote = useCallback((direction) => {
+    if (!displayedNotes.length) return
+    const idx = displayedNotes.findIndex(n => n.id === activeNoteId)
+    const next = displayedNotes[Math.max(0, Math.min(displayedNotes.length - 1, idx + direction))]
+    if (next && next.id !== activeNoteId) showSinglePaneForNote(next.id)
+  }, [displayedNotes, activeNoteId, showSinglePaneForNote])
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.tagName === 'INPUT') return
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowUp') { e.preventDefault(); cycleNote(-1) }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowDown') { e.preventDefault(); cycleNote(1) }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [cycleNote])
+
   const searchMatches = useMemo(
     () => (searchResults ? new Map(searchResults.map(result => [result.noteId, result])) : null),
     [searchResults]
@@ -1016,6 +1052,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                   notes={notes}
                   searchQuery={searchQuery}
                   simpleEditor={simpleEditorMode}
+                  secretScanEnabled={settings.secretScanEnabled ?? false}
                   hideCommandToolbars={simpleEditorMode || commandToolbarsHidden}
                   onDiffModeChange={(loader) => {
                     diffLoaderRef.current = loader
@@ -1073,6 +1110,68 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showAuth && <AuthScreen onClose={() => setShowAuth(false)} />}
+
+      {settings.secretScanEnabled && settings.secretScanBlockSync && syncHeldIds.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-2.5 bg-amber-950 border border-amber-700/60 rounded-lg shadow-xl text-[12px] max-w-sm">
+          <svg className="w-4 h-4 text-amber-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          </svg>
+          <span className="text-amber-200 flex-1">
+            {syncHeldIds.length} note{syncHeldIds.length > 1 ? 's' : ''} held from sync — potential secrets detected
+          </span>
+          <button
+            onClick={() => setSyncHeldIds([])}
+            className="text-amber-600 hover:text-amber-300 transition-colors shrink-0"
+            title="Dismiss"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {publishSecretGate && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={e => e.target === e.currentTarget && setPublishSecretGate(null)}>
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-[440px] p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <svg className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100">Potential secrets detected</h3>
+                <p className="text-[11px] text-zinc-500 mt-0.5">This note may contain sensitive credentials. Are you sure you want to publish it?</p>
+              </div>
+            </div>
+            <div className="bg-zinc-800/60 border border-zinc-700/40 rounded-lg p-3 space-y-1">
+              {publishSecretGate.matches.map((m, i) => (
+                <div key={i} className="flex items-center gap-2 text-[11px]">
+                  <span className="text-zinc-500">{m.label}:</span>
+                  <span className="font-mono text-amber-400">{m.redacted}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                onClick={() => setPublishSecretGate(null)}
+                className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  const { note, viewMode } = publishSecretGate
+                  setPublishSecretGate(null)
+                  await handlePublishNote(note, viewMode)
+                }}
+                className="px-4 py-1.5 text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-md transition-colors font-medium"
+              >
+                Publish anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

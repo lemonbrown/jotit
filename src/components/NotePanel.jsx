@@ -32,12 +32,14 @@ import { analyzeCalculation } from '../utils/calculator'
 import { parseCsvTable, looksLikeCsvTable } from '../utils/csvTable'
 import { diagramSessionFromText, serializeDiagramBlock } from '../utils/diagram'
 import { detectRequestType } from '../utils/httpParser'
+import { hasShellBlocks } from '../utils/shellParser'
 import CategoryBadge from './CategoryBadge'
 import FindBar from './FindBar'
 import { findMatches, isValidRegex, parseSearchScope, findMatchesScoped, applyReplaceAll } from '../utils/inNoteSearch'
 import { parseSections, matchesToSections } from '../utils/parseNoteSections'
 import RegexTester from './RegexTester'
 import HttpRunner from './HttpRunner'
+import ShellRunner from './ShellRunner'
 import DiffViewer from './DiffViewer'
 import TableViewer from './TableViewer'
 import CronBuilder from './CronBuilder'
@@ -51,6 +53,7 @@ import { extractSQLiteAssetRef } from '../utils/sqliteNote'
 import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote } from '../utils/noteTypes'
 import { getStoredKeyPair } from '../utils/e2eEncryption'
 import { useScrollMap } from '../hooks/useScrollMap'
+import SecretAlert from './SecretAlert'
 
 const CODE_LINE_HEIGHT = '1.6'
 
@@ -297,6 +300,16 @@ function buildCollapsedCodeView(text, symbols, collapsedIds) {
 
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
+  if (lang === 'csv') {
+    try {
+      const { headers, rows } = parseCsvTable(text)
+      const headerCells = headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')
+      const bodyRows = rows.map(row =>
+        `<tr>${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`
+      ).join('')
+      return `<table><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table>`
+    } catch { /* fall through to code block */ }
+  }
   let highlighted = ''
   const normalizedLang = normalizeCodeLanguage(lang)
   if (normalizedLang && hljs.getLanguage(normalizedLang)) {
@@ -355,13 +368,14 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [copied, setCopied] = useState(false)
   const [shareState, setShareState] = useState(null)
   const [sharing, setSharing] = useState(false)
+  const [publishSecretMatches, setPublishSecretMatches] = useState(null)
   const [regexInstance, setRegexInstance] = useState(0)
   const [codeViewActive, setCodeViewActive] = useState(false)
 
@@ -426,10 +440,13 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const historyTimerRef = useRef(null)
   const capturedSelectionRef = useRef('')
   const capturedHttpSelRef = useRef('')
+  const capturedShellSelRef = useRef('')
   const capturedDiffARef = useRef('')
   const capturedDiffBRef = useRef('')
   const txRangeRef = useRef({ start: 0, end: 0 })
   const [httpInstance, setHttpInstance] = useState(0)
+  const [shellInstance, setShellInstance] = useState(0)
+  const [shellRunTrigger, setShellRunTrigger] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
   const [showMinimap, setShowMinimap] = useState(() => localStorage.getItem('jotit_minimap') === 'true')
   const [findOpen, setFindOpen] = useState(false)
@@ -1137,9 +1154,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     const end = hasSelection ? ta.selectionEnd : content.length
     const text = content.slice(start, end)
 
+    const fenceMatch = text.match(/^```csv\s*\n([\s\S]*?)\n```\s*$/)
+    const csvText = fenceMatch ? fenceMatch[1] : text
+
     try {
-      parseCsvTable(text)
-      setTableSession({ start, end, text })
+      parseCsvTable(csvText)
+      setTableSession({ start, end, text: csvText })
       setTxResult(null)
       setCalcResult(null)
       setPendingCalc(null)
@@ -1152,9 +1172,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
   const applyTableSession = (csv) => {
     if (!tableSession) return
-    replaceRange(tableSession.start, tableSession.end, csv)
+    replaceRange(tableSession.start, tableSession.end, `\`\`\`csv\n${csv}\n\`\`\``)
     setTableSession(null)
-    setDisplayHint('table')
     setMode('edit')
   }
 
@@ -1534,6 +1553,11 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       runCalculation()
       return
     }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') {
+      e.preventDefault()
+      runShell()
+      return
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault()
       runCalculation({ complete: true })
@@ -1674,7 +1698,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     try {
       const publishMode = mode !== 'edit' ? mode : displayHint
       const result = await onPublishNote(publishMode)
-      if (result?.ok) {
+      if (result?.secretGated) {
+        // App-level secret gate has taken over — do nothing, modal will show
+      } else if (result?.ok) {
         const absolute = `${window.location.origin}${result.url}`
         try { await navigator.clipboard.writeText(absolute) } catch {}
         setShareState({ ok: true, url: result.url, copied: true })
@@ -1699,6 +1725,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       : ''
     capturedSelectionRef.current = text
     capturedHttpSelRef.current = text
+    capturedShellSelRef.current = text
     capturedDiffARef.current = text
     capturedDiffBRef.current = ''
   }
@@ -1711,8 +1738,22 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const switchMode = useCallback((next) => {
     if (next === 'regex' && mode !== 'regex') setRegexInstance(i => i + 1)
     if (next === 'http'  && mode !== 'http')  setHttpInstance(i => i + 1)
+    if (next === 'shell' && mode !== 'shell') setShellInstance(i => i + 1)
     if (next === 'diff'  && mode !== 'diff')  setDiffInstance(i => i + 1)
     setMode(prev => prev === next ? 'edit' : next)
+  }, [mode])
+
+  const runShell = useCallback(() => {
+    const ta = textareaRef.current
+    const text = (ta && ta.selectionStart !== ta.selectionEnd)
+      ? ta.value.slice(ta.selectionStart, ta.selectionEnd)
+      : ''
+    capturedShellSelRef.current = text
+    setShellRunTrigger(t => t + 1)
+    if (mode !== 'shell') {
+      setShellInstance(i => i + 1)
+      setMode('shell')
+    }
   }, [mode])
 
 
@@ -2001,12 +2042,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     return detectRequestType(content) !== null
   }, [content])
 
+  const looksLikeShell = useMemo(() => hasShellBlocks(content), [content])
+
   const looksLikeTable = useMemo(() => {
     const ta = textareaRef.current
     const selected = ta && ta.selectionStart !== ta.selectionEnd
       ? content.slice(ta.selectionStart, ta.selectionEnd)
       : content
-    return looksLikeCsvTable(selected)
+    const fenceMatch = selected.match(/^```csv\s*\n([\s\S]*?)\n```\s*$/)
+    return fenceMatch ? looksLikeCsvTable(fenceMatch[1]) : looksLikeCsvTable(selected)
   }, [content, sel.text])
 
   const jsonValid = isValidJson(content)
@@ -2199,6 +2243,21 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         >
           <span className="text-[12px]">⚡</span>
           {mode === 'http' ? 'Edit' : 'HTTP'}
+        </button>
+        <button
+          onMouseDown={captureSelForModeSwitch}
+          onClick={() => switchMode('shell')}
+          title="Shell runner — run bash/shell code blocks via local agent"
+          className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+            mode === 'shell'
+              ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800'
+              : looksLikeShell || sel.text.length > 0
+                ? 'text-emerald-400 hover:text-emerald-200 bg-emerald-950/20 border-emerald-900 hover:border-emerald-700'
+                : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+          }`}
+        >
+          <span className="text-[12px]">$</span>
+          {mode === 'shell' ? 'Edit' : 'Shell'}
         </button>
         <button
           onMouseDown={captureSelForModeSwitch}
@@ -2758,6 +2817,14 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         </div>
       )}
 
+      {secretScanEnabled && (
+        <SecretAlert
+          content={content}
+          clearedHash={note.secretsClearedHash ?? null}
+          onMarkSafe={hash => onUpdate({ secretsClearedHash: hash })}
+        />
+      )}
+
       {/* ── Content area ── */}
       {mode === 'edit' && (
         <div className="flex flex-1 overflow-hidden">
@@ -3158,6 +3225,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               Object.entries(request.headers ?? {}).map(([key, value]) => `${key}: ${value}`).join('\n')
             }${request.body ? `\n\n${request.body}` : ''}`
           )}
+        />
+      )}
+      {mode === 'shell' && (
+        <ShellRunner
+          key={`${note.id}-${shellInstance}`}
+          noteContent={content}
+          initialText={capturedShellSelRef.current}
+          runTrigger={shellRunTrigger}
+          onCreateNoteFromContent={onCreateNoteFromContent}
         />
       )}
       {mode === 'diff' && (

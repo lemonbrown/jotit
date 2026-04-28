@@ -127,6 +127,21 @@ function renderDiagramSvg(jsonText) {
   </svg></div>`
 }
 
+export function parseContentSegments(rawContent) {
+  const content = String(rawContent ?? '').replace(/\[img:\/\/[^\]]+\]/g, '')
+  const segments = []
+  const fenceRe = /```csv\s*\n([\s\S]*?)\n```/g
+  let last = 0
+  let match
+  while ((match = fenceRe.exec(content)) !== null) {
+    if (match.index > last) segments.push({ type: 'markdown', content: content.slice(last, match.index) })
+    segments.push({ type: 'csv', content: match[1] })
+    last = match.index + match[0].length
+  }
+  if (last < content.length) segments.push({ type: 'markdown', content: content.slice(last) })
+  return segments
+}
+
 export function renderPublicMarkdown(content) {
   const stripped = String(content ?? '').replace(/\[img:\/\/[^\]]+\]/g, '')
   const withDiagrams = stripped.replace(/```jotit-diagram\s*\n([\s\S]*?)\n```/g, (_, json) => renderDiagramSvg(json))

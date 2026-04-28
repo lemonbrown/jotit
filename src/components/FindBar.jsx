@@ -9,12 +9,6 @@ export default function FindBar({
   replaceScope, onReplaceScopeChange,
   replaceInputRef, replaceCount,
 }) {
-  const typingDirective = query.toLowerCase().startsWith('in:') && !query.slice(3).includes(' ')
-  const directivePrefix = typingDirective ? query.slice(3).toLowerCase() : ''
-  const scopeOptions = typingDirective
-    ? ['code', 'text'].filter(s => s.startsWith(directivePrefix)).map(s => 'in:' + s)
-    : []
-
   return (
     <div className="flex flex-col border-b border-zinc-800 bg-zinc-950/80 shrink-0">
 
@@ -33,51 +27,18 @@ export default function FindBar({
               if (e.key === 'Escape') { e.preventDefault(); onClose() }
               if (e.key === 'Tab' && showReplace) { e.preventDefault(); replaceInputRef?.current?.focus() }
             }}
-            placeholder="search… or in:code / in:text"
+            placeholder="search…"
             spellCheck={false}
             className={`w-60 bg-zinc-800 border rounded px-2.5 py-1 text-sm font-mono text-zinc-200 outline-none transition-colors placeholder-zinc-700 ${
               regexError ? 'border-red-700 focus:border-red-600' : 'border-zinc-700 focus:border-zinc-500'
             }`}
           />
-          {regexError && !typingDirective && (
+          {regexError && (
             <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-red-500 font-mono pointer-events-none">
               invalid
             </span>
           )}
-          {scopeOptions.length > 0 && (
-            <div className="absolute top-full left-0 mt-1 z-20 flex flex-col bg-zinc-900 border border-zinc-700 rounded shadow-xl overflow-hidden min-w-max">
-              {scopeOptions.map(opt => (
-                <button
-                  key={opt}
-                  onMouseDown={e => e.preventDefault()}
-                  onClick={() => {
-                    onQueryChange(opt + ' ')
-                    inputRef?.current?.focus()
-                  }}
-                  className="flex items-center gap-3 px-3 py-1.5 text-[11px] font-mono text-left text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors"
-                >
-                  <span className="text-zinc-100">{opt}</span>
-                  <span className="text-zinc-600">
-                    {opt === 'in:code' ? 'inside code blocks' : 'in prose text'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
-
-        {scope && scope !== 'all' && (
-          <span
-            title={`Searching ${scope === 'code' ? 'inside' : 'outside'} code blocks. Clear query to remove.`}
-            className={`px-1.5 py-0.5 text-[10px] font-mono rounded border shrink-0 ${
-              scope === 'code'
-                ? 'text-blue-300 border-blue-800 bg-blue-950/40'
-                : 'text-amber-300 border-amber-800 bg-amber-950/40'
-            }`}
-          >
-            {scope.toUpperCase()}
-          </span>
-        )}
 
         <div className="flex items-center border border-zinc-700 rounded overflow-hidden shrink-0">
           {[
@@ -105,7 +66,7 @@ export default function FindBar({
 
         <span className="text-[11px] text-zinc-500 font-mono shrink-0 min-w-[4rem] text-right">
           {matchCount === 0
-            ? (query && !regexError && !typingDirective ? 'no match' : '')
+            ? (query && !regexError ? 'no match' : '')
             : `${matchIndex + 1} / ${matchCount}`}
         </span>
 
