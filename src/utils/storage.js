@@ -26,12 +26,22 @@ export function saveNotes(notes) {
   } catch {}
 }
 
+const SETTINGS_DEFAULTS = {
+  serverProxy: false,
+  localAgentToken: '',
+  bucketName: '',
+  theme: 'dark',
+  secretScanEnabled: false,
+  secretScanBlockSync: false,
+  syncEnabled: true,
+}
+
 export function loadSettings() {
   try {
     const data = localStorage.getItem(SETTINGS_KEY)
-    return data ? JSON.parse(data) : { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark', secretScanEnabled: false, secretScanBlockSync: false }
+    return data ? { ...SETTINGS_DEFAULTS, ...JSON.parse(data) } : { ...SETTINGS_DEFAULTS }
   } catch {
-    return { serverProxy: false, localAgentToken: '', bucketName: '', theme: 'dark', secretScanEnabled: false, secretScanBlockSync: false }
+    return { ...SETTINGS_DEFAULTS }
   }
 }
 

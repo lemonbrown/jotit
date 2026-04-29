@@ -127,6 +127,13 @@ const SCHEMA = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_attachments_note_id ON attachments(note_id);
+
+  CREATE TABLE IF NOT EXISTS note_pins (
+    note_id       TEXT    NOT NULL,
+    collection_id TEXT    NOT NULL,
+    pinned_at     INTEGER NOT NULL,
+    PRIMARY KEY (note_id, collection_id)
+  );
 `
 
 export async function initDB() {
@@ -147,6 +154,8 @@ export async function initDB() {
   try { db.run('ALTER TABLE collections ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN collection_excluded INTEGER NOT NULL DEFAULT 0') } catch {}
   try { db.run('ALTER TABLE notes ADD COLUMN secrets_cleared_hash TEXT') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN sync_included INTEGER DEFAULT NULL') } catch {}
+  try { db.run('ALTER TABLE notes ADD COLUMN sync_excluded INTEGER NOT NULL DEFAULT 0') } catch {}
 
   ensureDefaultCollection()
 
@@ -353,8 +362,8 @@ export function upsertNoteSync(note, dirty = 1) {
   const collectionId = note.collectionId ?? getDefaultCollection()?.id ?? 'default'
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded, secrets_cleared_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded, secrets_cleared_hash, sync_included, sync_excluded)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
     [
       note.id,
       collectionId,
@@ -370,6 +379,8 @@ export function upsertNoteSync(note, dirty = 1) {
       note.encryptionTier ?? 0,
       note.collectionExcluded ? 1 : 0,
       note.secretsClearedHash ?? null,
+      note.syncIncluded ? 1 : null,
+      note.syncExcluded ? 1 : 0,
     ]
   )
 }
@@ -394,9 +405,12 @@ export function getNote(id) {
   return deserialize(row)
 }
 
-export function getDirtyNotes() {
+export function getDirtyNotes(syncEnabled = true) {
   if (!db) return []
-  const result = db.exec('SELECT * FROM notes WHERE dirty = 1')
+  const sql = syncEnabled
+    ? 'SELECT * FROM notes WHERE dirty = 1 AND sync_excluded = 0'
+    : 'SELECT * FROM notes WHERE dirty = 1 AND sync_excluded = 0 AND (pending_delete = 1 OR sync_included = 1)'
+  const result = db.exec(sql)
   if (!result.length) return []
   const { columns, values } = result[0]
   return values.map(row => {
@@ -404,6 +418,22 @@ export function getDirtyNotes() {
     columns.forEach((col, i) => { note[col] = row[i] })
     return deserialize(note)
   })
+}
+
+export function setSyncIncluded(noteId, included) {
+  if (!db) return
+  const val = included ? 1 : null
+  db.run('UPDATE notes SET sync_included = ?, dirty = 1, updated_at = ? WHERE id = ?', [val, Date.now(), noteId])
+}
+
+export function setSyncExcluded(noteId) {
+  if (!db) return
+  db.run('UPDATE notes SET sync_excluded = 1, dirty = 0 WHERE id = ?', [noteId])
+}
+
+export function setAllSyncExcluded() {
+  if (!db) return
+  db.run('UPDATE notes SET sync_excluded = 1, dirty = 0 WHERE pending_delete = 0')
 }
 
 export function markSynced(ids) {
@@ -589,6 +619,28 @@ export function deleteAttachmentsForNote(noteId) {
   db.run('DELETE FROM attachments WHERE note_id = ?', [noteId])
 }
 
+// ── Pins ───────────────────────────────────────────────────────────────────────
+
+export function pinNote(noteId, collectionId) {
+  if (!db) return
+  db.run(
+    'INSERT OR REPLACE INTO note_pins (note_id, collection_id, pinned_at) VALUES (?, ?, ?)',
+    [noteId, collectionId, Date.now()]
+  )
+}
+
+export function unpinNote(noteId, collectionId) {
+  if (!db) return
+  db.run('DELETE FROM note_pins WHERE note_id = ? AND collection_id = ?', [noteId, collectionId])
+}
+
+export function getAllPins() {
+  if (!db) return []
+  const result = db.exec('SELECT note_id, collection_id, pinned_at FROM note_pins ORDER BY pinned_at ASC')
+  if (!result.length) return []
+  return result[0].values.map(([noteId, collectionId, pinnedAt]) => ({ noteId, collectionId, pinnedAt }))
+}
+
 // Export the raw .sqlite file as a download
 export function exportSQLite() {
   if (!db) return
@@ -621,6 +673,8 @@ function deserialize(row) {
     encryptionTier:      Number(row.encryption_tier ?? 0),
     collectionExcluded:  row.collection_excluded === 1,
     secretsClearedHash:  row.secrets_cleared_hash ?? null,
+    syncIncluded:        row.sync_included === 1,
+    syncExcluded:        row.sync_excluded === 1,
   }
 }
 

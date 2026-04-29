@@ -25,6 +25,7 @@ export default function Settings({
   onSaveAiConfig,
   onSeedNotes,
   onRegenerateKeys,
+  onRemoveAllFromServer,
   publicNoteCount,
   publicCollectionCount = 0,
   noteCount = 0,
@@ -32,6 +33,7 @@ export default function Settings({
   bucketName: initialBucketName = '',
 }) {
   const [serverProxy, setServerProxy] = useState(settings.serverProxy ?? false)
+  const [syncEnabled, setSyncEnabled] = useState(settings.syncEnabled ?? true)
   const [localAgentToken, setLocalAgentToken] = useState(settings.localAgentToken ?? '')
   const [bucketName, setBucketName] = useState(initialBucketName || settings.bucketName || '')
   const [theme, setTheme] = useState(settings.theme ?? 'dark')
@@ -39,6 +41,8 @@ export default function Settings({
   const [secretScanBlockSync, setSecretScanBlockSync] = useState(settings.secretScanBlockSync ?? false)
   const [bucketSaving, setBucketSaving] = useState(false)
   const [bucketStatus, setBucketStatus] = useState(null)
+  const [removeAllServerState, setRemoveAllServerState] = useState(null) // null | 'confirm' | 'loading' | 'ok' | { error }
+
   const [bucketCollections, setBucketCollections] = useState([])
   const [bucketNotes, setBucketNotes] = useState([])
   const localAgentStatus = useLocalAgentStatus()
@@ -152,7 +156,7 @@ export default function Settings({
   }
 
   const handleSave = () => {
-    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), theme, secretScanEnabled, secretScanBlockSync })
+    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), theme, secretScanEnabled, secretScanBlockSync, syncEnabled })
   }
 
   const handleSaveBucketName = async () => {
@@ -222,12 +226,28 @@ export default function Settings({
             </div>
           </div>
 
-          <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-3 text-[12px] text-zinc-500 space-y-1">
-            <p className="text-zinc-400 font-medium mb-1">AI access</p>
-            <p>Server AI is owned and controlled by the backend.</p>
-            <p>Signed-in users can search their workspace semantically when server AI is enabled.</p>
-            <p>Guests keep local keyword search only.</p>
-          </div>
+          {user && (
+            <div className="pt-1 border-t border-zinc-800">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400">Sync notes to server</label>
+                  <p className="text-[11px] text-zinc-600 mt-0.5">
+                    {syncEnabled
+                      ? 'All notes sync automatically.'
+                      : 'Sync is off globally. Choose which notes to sync individually from the note list.'}
+                  </p>
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={syncEnabled}
+                  onClick={() => setSyncEnabled(v => !v)}
+                  className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${syncEnabled ? 'bg-blue-600 border-blue-500' : 'bg-zinc-700 border-zinc-600'}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${syncEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="pt-1 border-t border-zinc-800">
             <div className="flex items-center justify-between">
@@ -549,14 +569,8 @@ export default function Settings({
             )}
           </div>
 
-          <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
+          <div className="flex items-center gap-2 pt-1 border-t border-zinc-800 flex-wrap">
             <span className="text-[11px] text-zinc-600">Database</span>
-            <button
-              onClick={handleSeedNotes}
-              className="px-3 py-1.5 text-xs bg-emerald-950 hover:bg-emerald-900 border border-emerald-900 text-emerald-200 rounded-md transition-colors"
-            >
-              Seed dev notes
-            </button>
             <button
               onClick={onExportDB}
               className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md transition-colors"
@@ -570,6 +584,32 @@ export default function Settings({
             >
               Delete all notes
             </button>
+            {user && onRemoveAllFromServer && (
+              <button
+                disabled={removeAllServerState === 'loading' || removeAllServerState === 'ok'}
+                onClick={async () => {
+                  if (removeAllServerState !== 'confirm') {
+                    setRemoveAllServerState('confirm')
+                    return
+                  }
+                  setRemoveAllServerState('loading')
+                  const result = await onRemoveAllFromServer()
+                  setRemoveAllServerState(result?.ok ? 'ok' : { error: result?.error ?? 'Failed' })
+                }}
+                className={`px-3 py-1.5 text-xs rounded-md border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  removeAllServerState === 'confirm'
+                    ? 'bg-amber-950 hover:bg-amber-900 border-amber-800 text-amber-200'
+                    : removeAllServerState === 'ok'
+                      ? 'bg-zinc-800 border-zinc-700 text-zinc-400 cursor-default'
+                      : removeAllServerState?.error
+                        ? 'bg-zinc-800 border-red-900 text-red-400 cursor-default'
+                        : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-300'
+                }`}
+                title="Remove all notes from the server while keeping them on this device"
+              >
+                {removeAllServerState === 'confirm' ? 'confirm remove all?' : removeAllServerState === 'loading' ? 'removing…' : removeAllServerState === 'ok' ? 'removed from server' : removeAllServerState?.error ? `failed: ${removeAllServerState.error}` : 'Remove all from server'}
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">

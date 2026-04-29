@@ -1,4 +1,4 @@
 {
-  "embeddingProvider": "ollama",
+  "embeddingProvider": "openai",
   "ollamaEmbedModel": "nomic-embed-text"
 }

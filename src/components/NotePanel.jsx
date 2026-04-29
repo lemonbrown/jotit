@@ -409,10 +409,13 @@ function ScratchOutput({ output }) {
   )
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
   const [content, setContent] = useState(note.content)
   const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmRemoveServer, setConfirmRemoveServer] = useState(false)
+  const [removingFromServer, setRemovingFromServer] = useState(false)
+  const [removeServerResult, setRemoveServerResult] = useState(null)
   const [copied, setCopied] = useState(false)
   const [shareState, setShareState] = useState(null)
   const [sharing, setSharing] = useState(false)
@@ -1846,6 +1849,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000) }
   }
 
+  const handleRemoveFromServer = async () => {
+    if (!confirmRemoveServer) {
+      setConfirmRemoveServer(true)
+      setTimeout(() => setConfirmRemoveServer(false), 3000)
+      return
+    }
+    setConfirmRemoveServer(false)
+    setRemovingFromServer(true)
+    setRemoveServerResult(null)
+    try {
+      const result = await onRemoveFromServer()
+      setRemoveServerResult(result ?? { ok: true })
+    } finally {
+      setRemovingFromServer(false)
+    }
+  }
+
   // Capture selection for panel mode switches
   const captureSelForModeSwitch = () => {
     const ta = textareaRef.current
@@ -2641,6 +2661,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
             {note.encryptionTier === 2 ? 'E2E' : 'E2E'}
           </button>
         )}
+        {onTogglePin && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={onTogglePin}
+            title={isPinned ? 'Unpin from this collection' : 'Pin to top of this collection'}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              isPinned
+                ? 'text-amber-300 bg-amber-950/40 border-amber-800 hover:bg-amber-950/60'
+                : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
+            }`}
+          >
+            <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M5 4a2 2 0 012-2h6a2 2 0 012 2v14l-5-2.5L5 18V4z" />
+            </svg>
+            {isPinned ? 'Pinned' : 'Pin'}
+          </button>
+        )}
         <button
           onMouseDown={e => e.preventDefault()}
           onClick={sharePublicNote}
@@ -2668,6 +2705,24 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           )}
           {shareState?.error && (
             <span className="text-[11px] text-red-400 font-mono">{shareState.error}</span>
+          )}
+          {user && onRemoveFromServer && !note.syncExcluded && (
+            <button
+              onClick={handleRemoveFromServer}
+              disabled={removingFromServer}
+              className={`shrink-0 whitespace-nowrap text-xs transition-colors px-2 py-1 rounded ${
+                confirmRemoveServer
+                  ? 'bg-amber-900/60 text-amber-300 border border-amber-700'
+                  : removeServerResult?.ok
+                    ? 'text-zinc-500 cursor-default'
+                    : removeServerResult?.error
+                      ? 'text-red-400 cursor-default'
+                      : 'text-zinc-600 hover:text-amber-400'
+              }`}
+              title="Delete this note from the server but keep it on this device"
+            >
+              {removingFromServer ? 'removing…' : confirmRemoveServer ? 'confirm remove?' : removeServerResult?.ok ? 'removed from server' : removeServerResult?.error ? `failed: ${removeServerResult.error}` : 'remove from server'}
+            </button>
           )}
           <button
             onClick={handleDelete}

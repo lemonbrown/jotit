@@ -1,8 +1,8 @@
 ﻿import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
 import { useMemo } from 'react'
-import { exportSQLite, getAttachmentsForNote, schedulePersist as scheduleDbPersist, upsertNoteSync } from './utils/db'
-import { scheduleSyncPush, setOnSyncHeld } from './utils/sync'
+import { exportSQLite, getAttachmentsForNote, schedulePersist as scheduleDbPersist, upsertNoteSync, setSyncIncluded, setSyncExcluded, setAllSyncExcluded, pinNote, unpinNote, getAllPins } from './utils/db'
+import { scheduleSyncPush, setOnSyncHeld, removeNoteFromServer, removeAllNotesFromServer } from './utils/sync'
 import { scanForSecrets, contentHash } from './utils/secretScanner'
 import { generateAndStoreKeyPair, exportPublicKeyJwk, wrapPrivateKey } from './utils/e2eEncryption'
 import { createEmptyNote, createImportedOpenApiNote } from './utils/noteFactories'
@@ -72,6 +72,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [dbReady, setDbReady] = useState(false)
   const [notes, setNotes] = useState([])
   const [snippets, setSnippets] = useState([])
+  const [pins, setPins] = useState(() => new Map())
   const [settings, setSettings] = useState(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
   const { llmEnabled, ollamaModel } = useLLMSettings()
@@ -79,6 +80,16 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme ?? 'dark'
   }, [settings.theme])
+
+  useEffect(() => {
+    if (!dbReady) return
+    const map = new Map()
+    for (const { noteId, collectionId } of getAllPins()) {
+      if (!map.has(collectionId)) map.set(collectionId, new Set())
+      map.get(collectionId).add(noteId)
+    }
+    setPins(map)
+  }, [dbReady])
   const [showHelp, setShowHelp] = useState(false)
   const [showSnippets, setShowSnippets] = useState(false)
   const [showSharedLinks, setShowSharedLinks] = useState(false)
@@ -186,6 +197,46 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
       : notes.filter(note => note.collectionId === activeCollectionId),
     [activeCollectionId, notes]
   )
+
+  const pinnedIds = useMemo(
+    () => activeCollectionId && activeCollectionId !== ALL_COLLECTION_ID
+      ? (pins.get(activeCollectionId) ?? new Set())
+      : new Set(),
+    [activeCollectionId, pins]
+  )
+
+  const sortedCollectionNotes = useMemo(() => {
+    if (!pinnedIds.size) return collectionNotes
+    const pinned = collectionNotes.filter(n => pinnedIds.has(n.id))
+    const unpinned = collectionNotes.filter(n => !pinnedIds.has(n.id))
+    return [...pinned, ...unpinned]
+  }, [collectionNotes, pinnedIds])
+
+  const handleTogglePin = useCallback((noteId, collectionId) => {
+    const isPinned = pins.get(collectionId)?.has(noteId)
+    if (isPinned) {
+      unpinNote(noteId, collectionId)
+      setPins(prev => {
+        const next = new Map(prev)
+        const set = new Set(next.get(collectionId))
+        set.delete(noteId)
+        if (set.size) next.set(collectionId, set)
+        else next.delete(collectionId)
+        return next
+      })
+    } else {
+      pinNote(noteId, collectionId)
+      setPins(prev => {
+        const next = new Map(prev)
+        const set = new Set(next.get(collectionId) ?? [])
+        set.add(noteId)
+        next.set(collectionId, set)
+        return next
+      })
+    }
+    scheduleDbPersist()
+  }, [pins])
+
   const collectionNotesRef = useRef(collectionNotes)
   useEffect(() => { collectionNotesRef.current = collectionNotes }, [collectionNotes])
 
@@ -429,6 +480,33 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setSettings(nextSettings)
     saveSettings(nextSettings)
     setShowSettings(false)
+  }, [])
+
+  const handleToggleNoteSync = useCallback((noteId, included) => {
+    setSyncIncluded(noteId, included)
+    scheduleDbPersist()
+    setNotes(prev => prev.map(n => n.id === noteId ? { ...n, syncIncluded: included } : n))
+  }, [])
+
+  const handleRemoveNoteFromServer = useCallback(async (noteId) => {
+    const result = await removeNoteFromServer(noteId)
+    if (result?.ok) {
+      setSyncExcluded(noteId)
+      scheduleDbPersist()
+      setNotes(prev => prev.map(n => n.id === noteId ? { ...n, syncExcluded: true, dirty: 0 } : n))
+    }
+    return result
+  }, [])
+
+  const handleRemoveAllNotesFromServer = useCallback(async () => {
+    const ids = notesRef.current.map(n => n.id)
+    const result = await removeAllNotesFromServer(ids)
+    if (result?.ok) {
+      setAllSyncExcluded()
+      scheduleDbPersist()
+      setNotes(prev => prev.map(n => ({ ...n, syncExcluded: true, dirty: 0 })))
+    }
+    return result
   }, [])
 
   const handleLoadBucketInfo = useCallback(async () => {
@@ -686,7 +764,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     return () => setOnSyncHeld(null)
   }, [])
 
-  const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? collectionNotes, [collectionNotes, searchResults])
+  const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? sortedCollectionNotes, [sortedCollectionNotes, searchResults])
   const displayedNoteById = useMemo(
     () => new Map(displayedNotes.map(note => [note.id, note])),
     [displayedNotes]
@@ -1148,6 +1226,10 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             notes={displayedNotes}
             activeNoteId={activeNoteId}
             style={{ width: noteGridWidth }}
+            syncEnabled={user ? (settings.syncEnabled ?? true) : true}
+            onToggleNoteSync={user ? handleToggleNoteSync : undefined}
+            pinnedIds={pinnedIds}
+            onTogglePin={activeCollectionId !== ALL_COLLECTION_ID ? handleTogglePin : undefined}
             onSelectNote={(id, options = {}) => {
               if (diffLoaderRef.current) {
                 const note = notes.find(item => item.id === id)
@@ -1265,6 +1347,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     onUpdate={(updates) => updateNote(note.id, updates)}
                     onReplaceInNotes={(updates) => updates.forEach(({ id, content }) => updateNote(id, { content }))}
                     onDelete={() => deleteNote(note.id)}
+                    onRemoveFromServer={user ? () => handleRemoveNoteFromServer(note.id) : undefined}
+                    isPinned={pins.get(note.collectionId)?.has(note.id) ?? false}
+                    onTogglePin={() => handleTogglePin(note.id, note.collectionId)}
                     onCreateSnippet={createSnippet}
                     onSearchSnippets={searchSnippets}
                     onPublishNote={(mode) => handlePublishNote(note, mode)}
@@ -1325,6 +1410,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           onSaveAiConfig={handleSaveAiConfig}
           onSeedNotes={handleSeedDeveloperNotes}
           onRegenerateKeys={handleRegenerateKeys}
+          onRemoveAllFromServer={user ? handleRemoveAllNotesFromServer : undefined}
           publicNoteCount={publicNoteCount}
           publicCollectionCount={publicCollectionCount}
           noteCount={collectionNotes.length}

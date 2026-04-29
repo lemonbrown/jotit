@@ -42,10 +42,9 @@ export function scheduleSyncPush() {
 
 export async function syncPush() {
   if (!getToken()) return
-  const allDirty = getDirtyNotes()
+  const { secretScanEnabled, secretScanBlockSync, syncEnabled = true } = loadSettings()
+  const allDirty = getDirtyNotes(syncEnabled)
   const dirtyCollections = getDirtyCollections()
-
-  const { secretScanEnabled, secretScanBlockSync } = loadSettings()
   const blockSync = secretScanEnabled && secretScanBlockSync
 
   let dirty = allDirty
@@ -229,4 +228,37 @@ export async function syncPull() {
 export async function syncAll() {
   await syncPull()
   await syncPush()
+}
+
+export async function removeNoteFromServer(noteId) {
+  if (!getToken()) return { error: 'Not signed in' }
+  try {
+    const res = await fetch('/api/sync/push', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ notes: [{ id: noteId, deleted: true }], collections: [] }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { error: data.error ?? 'Failed to remove from server' }
+    return { ok: true }
+  } catch (e) {
+    return { error: e.message ?? 'Network error' }
+  }
+}
+
+export async function removeAllNotesFromServer(noteIds) {
+  if (!getToken()) return { error: 'Not signed in' }
+  if (!noteIds.length) return { ok: true }
+  try {
+    const res = await fetch('/api/sync/push', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ notes: noteIds.map(id => ({ id, deleted: true })), collections: [] }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { error: data.error ?? 'Failed to remove from server' }
+    return { ok: true }
+  } catch (e) {
+    return { error: e.message ?? 'Network error' }
+  }
 }

@@ -22,6 +22,10 @@ export default function NoteGrid({
   onNoteDragStart,
   onNoteDragEnd,
   style,
+  syncEnabled = true,
+  onToggleNoteSync,
+  pinnedIds,
+  onTogglePin,
 }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
@@ -367,6 +371,10 @@ export default function NoteGrid({
               draggingRef.current = false
               onNoteDragEnd?.()
             }}
+            syncEnabled={syncEnabled}
+            onToggleSync={onToggleNoteSync}
+            isPinned={pinnedIds?.has(note.id) ?? false}
+            onTogglePin={onTogglePin ? () => onTogglePin(note.id, note.collectionId) : undefined}
           />
         ))}
       </div>
