@@ -6,7 +6,7 @@ import { scheduleSyncPush, setOnSyncHeld, removeNoteFromServer, removeAllNotesFr
 import { scanForSecrets, contentHash } from './utils/secretScanner'
 import { generateAndStoreKeyPair, exportPublicKeyJwk, wrapPrivateKey } from './utils/e2eEncryption'
 import { createEmptyNote, createImportedOpenApiNote } from './utils/noteFactories'
-import { ALL_COLLECTION_ID } from './utils/collectionFactories'
+import { ALL_COLLECTION_ID, normalizeCollectionSlug } from './utils/collectionFactories'
 import { createDeveloperSeedNotes } from './utils/helpers'
 import { getNoteTitle } from './utils/noteTypes'
 import { searchSnippetsLocally } from './utils/search'
@@ -27,8 +27,12 @@ import SharedLinksModal from './components/SharedLinksModal'
 import HelpModal from './components/HelpModal'
 import AuthScreen from './components/AuthScreen'
 import SnippetManager from './components/SnippetManager'
+import TemplateManager from './components/TemplateManager'
+import { useTemplates } from './hooks/useTemplates'
 import { useAuth } from './contexts/AuthContext'
 import { usePaneResize } from './hooks/usePaneResize'
+import { useMultiPaneResize } from './hooks/useMultiPaneResize'
+import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts'
 import PaneResizer from './components/PaneResizer'
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
@@ -41,15 +45,6 @@ const NOTEGRID_MIN_WIDTH = 160
 const NOTEGRID_MAX_WIDTH = 720
 const DEFAULT_PANE_WIDTH = 600
 const MIN_PANE_WIDTH = 280
-
-function normalizeCollectionSlug(name) {
-  return String(name ?? '')
-    .toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-}
 
 export default function App() {
   const { user, loading: authLoading, logout, refreshUser, bucketName } = useAuth()
@@ -92,6 +87,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [dbReady])
   const [showHelp, setShowHelp] = useState(false)
   const [showSnippets, setShowSnippets] = useState(false)
+  const [showTemplates, setShowTemplates] = useState(false)
   const [showSharedLinks, setShowSharedLinks] = useState(false)
   const searchRef = useRef(null)
   const diffLoaderRef = useRef(null)
@@ -104,29 +100,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const { size: noteGridWidth, startDrag: startNoteGridResize } = usePaneResize(
     NOTEGRID_WIDTH_KEY, NOTEGRID_DEFAULT_WIDTH, NOTEGRID_MIN_WIDTH, NOTEGRID_MAX_WIDTH,
   )
-  const [paneWidths, setPaneWidths] = useState({})
-  const paneWidthsRef = useRef({})
-  useEffect(() => { paneWidthsRef.current = paneWidths }, [paneWidths])
-
-  const startPaneResize = useCallback((paneId, e) => {
-    e.preventDefault()
-    const startX = e.clientX
-    const startWidth = paneWidthsRef.current[paneId] ?? DEFAULT_PANE_WIDTH
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    const onMove = (ev) => {
-      const next = Math.max(MIN_PANE_WIDTH, startWidth + (ev.clientX - startX))
-      setPaneWidths(prev => ({ ...prev, [paneId]: next }))
-    }
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }, [])
+  const { paneWidths, startPaneResize, prunePaneWidths } = useMultiPaneResize(DEFAULT_PANE_WIDTH, MIN_PANE_WIDTH)
 
   const [commandToolbarsHidden, setCommandToolbarsHidden] = useState(() => (
     localStorage.getItem(COMMAND_TOOLBARS_HIDDEN_KEY) !== 'false'
@@ -270,6 +244,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setActiveNoteId,
     setNotes,
   })
+  const { templates, userTemplates, saveTemplate, deleteTemplate } = useTemplates({ dbReady })
+
   const { addNote, createSnippet, deleteAllNotes, deleteNote, deleteSnippet, seedNotes, updateNote, updateSnippet } = useNoteMutations({
     notesRef,
     resetWorkspace,
@@ -739,27 +715,6 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [noteListMetadataHidden])
 
   useEffect(() => {
-    const handler = (e) => {
-      const inInput = ['INPUT', 'TEXTAREA'].includes(e.target.tagName)
-      const isBackslashShortcut = (e.ctrlKey || e.metaKey) && (e.code === 'Backslash' || e.key === '\\' || e.key === '|')
-      if (e.altKey && e.key === 'n') { e.preventDefault(); createNote() }
-      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowUp') { e.preventDefault(); cycleCollection(-1) }
-      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowDown') { e.preventDefault(); cycleCollection(1) }
-      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navigateLocationHistory(-1) }
-      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navigateLocationHistory(1) }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); searchRef.current?.focus() }
-      if (isBackslashShortcut && e.shiftKey && e.altKey) { e.preventDefault(); toggleNoteListMetadata() }
-      else if (isBackslashShortcut && e.shiftKey) { e.preventDefault(); toggleSimpleEditorMode() }
-      else if (isBackslashShortcut && e.altKey) { e.preventDefault(); toggleCommandToolbars() }
-      else if (isBackslashShortcut) { e.preventDefault(); toggleNotesPane() }
-      if (e.key === 'Escape') { clearSearch(); setShowSettings(false); setShowHelp(false); setShowSnippets(false); setShowSharedLinks(false) }
-      if (e.key === '?' && !inInput) { e.preventDefault(); setShowHelp(h => !h) }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [clearSearch, createNote, cycleCollection, navigateLocationHistory, toggleNotesPane, toggleSimpleEditorMode, toggleCommandToolbars, toggleNoteListMetadata])
-
-  useEffect(() => {
     setOnSyncHeld(ids => setSyncHeldIds(ids))
     return () => setOnSyncHeld(null)
   }, [])
@@ -814,15 +769,23 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     }
   }, [activeNoteId, displayedNotes, ensureSelectableNoteIsLocal, showSinglePaneForNote])
 
-  useEffect(() => {
-    const handler = (e) => {
-      if (e.target.tagName === 'INPUT') return
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowUp') { e.preventDefault(); cycleNote(-1) }
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowDown') { e.preventDefault(); cycleNote(1) }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [cycleNote])
+  useGlobalKeyboardShortcuts({
+    clearSearch,
+    createNote,
+    cycleCollection,
+    cycleNote,
+    navigateLocationHistory,
+    searchRef,
+    setShowHelp,
+    setShowSettings,
+    setShowSharedLinks,
+    setShowSnippets,
+    setShowTemplates,
+    toggleCommandToolbars,
+    toggleNoteListMetadata,
+    toggleNotesPane,
+    toggleSimpleEditorMode,
+  })
 
   const searchMatches = useMemo(
     () => (searchResults ? new Map(searchResults.map(result => [result.noteId, result])) : null),
@@ -847,17 +810,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const openPaneIdStr = openPanes.map(p => p.id).join(',')
   useEffect(() => {
     if (!openPaneIdStr) return
-    const ids = new Set(openPaneIdStr.split(','))
-    setPaneWidths(prev => {
-      const hasStale = Object.keys(prev).some(id => !ids.has(id))
-      if (!hasStale) return prev
-      const cleaned = {}
-      for (const [id, w] of Object.entries(prev)) {
-        if (ids.has(id)) cleaned[id] = w
-      }
-      return cleaned
-    })
-  }, [openPaneIdStr])
+    prunePaneWidths(openPaneIdStr.split(','))
+  }, [openPaneIdStr, prunePaneWidths])
 
   const publicNoteCount = notes.filter(note => note.isPublic).length
   const publicCollectionCount = collections.filter(collection => collection.isPublic).length
@@ -1104,6 +1058,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             Snippets
           </button>
           <button
+            onClick={() => setShowTemplates(true)}
+            title="Manage templates (!command to expand)"
+            className="hidden sm:inline-flex px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+          >
+            Templates
+          </button>
+          <button
             onClick={() => setShowSharedLinks(true)}
             title="Manage shared links"
             className="hidden sm:inline-flex px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
@@ -1341,6 +1302,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     collection={collections.find(collection => collection.id === note.collectionId) ?? null}
                     bucketName={bucketName}
                     snippets={snippets}
+                    templates={templates}
                     aiEnabled={aiEnabled}
                     user={user}
                     onRequireAuth={() => setShowAuth(true)}
@@ -1424,6 +1386,14 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           onClose={() => setShowSnippets(false)}
           onDelete={deleteSnippet}
           onRename={(id, name) => updateSnippet(id, { name })}
+        />
+      )}
+      {showTemplates && (
+        <TemplateManager
+          userTemplates={userTemplates}
+          onClose={() => setShowTemplates(false)}
+          onSave={saveTemplate}
+          onDelete={deleteTemplate}
         />
       )}
       {showSharedLinks && (

@@ -8,9 +8,10 @@ import sqliteWorkspaceTests from './sqlite-workspace.test.js'
 import openApiTests from './openapi.test.js'
 import collectionTests from './collections.test.js'
 import noteCommandTests from './note-commands.test.js'
+import gitCommandTests from './git-commands.test.js'
 import dateTimeTests from './datetime.test.js'
 
-const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests, ...noteCommandTests, ...dateTimeTests]
+const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests, ...noteCommandTests, ...gitCommandTests, ...dateTimeTests]
 
 let failures = 0
 

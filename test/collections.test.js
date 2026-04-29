@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createCollectionDraft, createDefaultCollectionDraft, DEFAULT_COLLECTION_NAME } from '../src/utils/collectionFactories.js'
+import { createCollectionDraft, createDefaultCollectionDraft, DEFAULT_COLLECTION_NAME, normalizeCollectionSlug } from '../src/utils/collectionFactories.js'
 import { importFiles } from '../src/utils/importNotes.js'
 import { createPublicCloneNote } from '../src/utils/noteFactories.js'
 import { getPublicCloneInfo, isPublicClone } from '../src/utils/noteTypes.js'
@@ -25,6 +25,12 @@ async function testDefaultCollectionFactoryUsesStableId() {
   assert.equal(collection.id, 'default')
   assert.equal(collection.name, DEFAULT_COLLECTION_NAME)
   assert.equal(collection.isDefault, true)
+}
+
+async function testNormalizeCollectionSlug() {
+  assert.equal(normalizeCollectionSlug(' Client Notes 2026! '), 'client-notes-2026')
+  assert.equal(normalizeCollectionSlug('---Ops___Runbook---'), 'opsrunbook')
+  assert.equal(normalizeCollectionSlug(null), '')
 }
 
 async function testImportFilesAssignsCollectionId() {
@@ -90,6 +96,7 @@ export default [
   ['collection factory creates collection shape', testCollectionFactoryCreatesCollectionShape],
   ['collection factory rejects blank name', testCollectionFactoryRejectsBlankName],
   ['default collection factory uses stable id', testDefaultCollectionFactoryUsesStableId],
+  ['normalize collection slug', testNormalizeCollectionSlug],
   ['import files assigns collection id', testImportFilesAssignsCollectionId],
   ['public clone note stores clone metadata', testPublicCloneNoteStoresCloneMetadata],
 ]

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { exec } from 'node:child_process'
+import { exec, execFile } from 'node:child_process'
 import express from 'express'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -44,6 +44,103 @@ function loadOrCreateToken() {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify({ token }, null, 2), 'utf8')
   } catch {}
   return token
+}
+
+function readAgentConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_PATH)) return {}
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveAgentConfig(config) {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8')
+  } catch {}
+}
+
+function getGitConfig() {
+  const config = readAgentConfig()
+  return {
+    ...config,
+    git: {
+      defaultRepoId: config.git?.defaultRepoId ?? null,
+      repos: config.git?.repos && typeof config.git.repos === 'object' ? config.git.repos : {},
+    },
+  }
+}
+
+function saveGitConfig(nextGit) {
+  const config = readAgentConfig()
+  saveAgentConfig({ ...config, git: nextGit })
+}
+
+function runGit(args, cwd, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, {
+      cwd,
+      timeout: Math.min(timeoutMs, MAX_TIMEOUT_MS),
+      maxBuffer: MAX_SHELL_OUTPUT_BYTES * 4,
+      windowsHide: true,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const err = new Error(String(stderr || stdout || error.message || 'git failed').trim())
+        err.exitCode = typeof error.code === 'number' ? error.code : 1
+        reject(err)
+        return
+      }
+      resolve(String(stdout ?? '').trimEnd())
+    })
+  })
+}
+
+function repoIdFromPath(repoPath, existingRepos = {}) {
+  const name = path.basename(repoPath).replace(/[^a-zA-Z0-9_.-]/g, '-').replace(/-+/g, '-')
+  const base = name || 'repo'
+  const hash = crypto.createHash('sha1').update(repoPath.toLowerCase()).digest('hex').slice(0, 6)
+  const existing = existingRepos[base]
+  if (!existing || path.resolve(existing.path) === path.resolve(repoPath)) return base
+  return `${base}-${hash}`
+}
+
+function resolveRegisteredRepo(repoId) {
+  const config = getGitConfig()
+  const repo = config.git.repos[repoId]
+  if (!repo) return { config, repo: null }
+  return { config, repo }
+}
+
+async function readRepoInfo(repoPath, existingRepos = {}) {
+  const resolvedInput = path.resolve(String(repoPath ?? '').trim())
+  if (!resolvedInput || !fs.existsSync(resolvedInput)) {
+    throw new Error('Repo path does not exist')
+  }
+  const stat = fs.statSync(resolvedInput)
+  if (!stat.isDirectory()) throw new Error('Repo path must be a directory')
+
+  const root = await runGit(['rev-parse', '--show-toplevel'], resolvedInput)
+  if (!root) throw new Error('Not a git repository')
+  const resolvedRoot = path.resolve(root)
+  const branch = await runGit(['branch', '--show-current'], resolvedRoot).catch(() => '')
+  const remotesText = await runGit(['remote'], resolvedRoot).catch(() => '')
+  const remotes = remotesText.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+  const baseBranch = await runGit(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], resolvedRoot)
+    .then(value => value.replace(/^origin\//, ''))
+    .catch(() => 'main')
+  const id = repoIdFromPath(resolvedRoot, existingRepos)
+  return {
+    id,
+    name: path.basename(resolvedRoot),
+    displayName: path.basename(resolvedRoot),
+    path: resolvedRoot,
+    branch: branch || '(detached)',
+    baseBranch,
+    remote: remotes[0] ?? null,
+    remotes,
+    lastSeenAt: Date.now(),
+  }
 }
 
 function normalizeHeaders(headers) {
@@ -211,6 +308,23 @@ Return:
     { "id": "candidate-id", "reason": "short reason" }
   ]
 }`
+const GIT_SUMMARY_SYSTEM_PROMPT = `You are a developer assistant that summarizes git changes concisely.
+
+Rules:
+- Begin with 1-2 sentences describing the overall intent or theme of the changes.
+- Then list the key changes as short bullet points grouped by type (features, fixes, refactoring, etc.).
+- Keep the total summary under 15 bullets.
+- Do not quote or repeat raw diff hunks.
+- Use plain markdown (bullets, inline code spans). No extra headers needed.
+- If the diff is empty or the working tree is clean, say so briefly.`
+const GIT_COMMIT_MSG_SYSTEM_PROMPT = `You are a developer assistant that writes git commit messages.
+
+Rules:
+- Return ONLY the commit message text — no preamble, no explanation, no markdown fences.
+- First line: imperative mood subject, 72 characters max (e.g. "Add login rate limiting").
+- If the changes warrant it, add a blank line then a short body (bullet points or prose, ≤5 lines).
+- Do not mention file names unless essential for clarity.
+- If the diff is empty or the working tree is clean, say so in one sentence instead.`
 
 const token = loadOrCreateToken()
 const app = express()
@@ -335,6 +449,74 @@ app.post('/shell', requireToken(token), (req, res) => {
   })
 })
 
+app.post('/git/connect', requireToken(token), async (req, res) => {
+  const { path: repoPath } = req.body ?? {}
+  if (!repoPath || typeof repoPath !== 'string') {
+    return res.status(400).json({ error: 'path is required' })
+  }
+
+  try {
+    const config = getGitConfig()
+    const repo = await readRepoInfo(repoPath, config.git.repos)
+    const repos = { ...config.git.repos, [repo.id]: repo }
+    const git = { ...config.git, repos }
+    saveGitConfig(git)
+    res.json({ ok: true, repo })
+  } catch (error) {
+    res.status(400).json({ error: error.message ?? 'Could not connect repo' })
+  }
+})
+
+app.get('/git/repos', requireToken(token), async (_req, res) => {
+  const config = getGitConfig()
+  const repos = Object.values(config.git.repos)
+  res.json({ ok: true, defaultRepoId: config.git.defaultRepoId, repos })
+})
+
+app.post('/git/use', requireToken(token), (req, res) => {
+  const { repoId, setDefault } = req.body ?? {}
+  const config = getGitConfig()
+  const repo = config.git.repos[String(repoId ?? '')]
+  if (!repo) return res.status(404).json({ error: 'Repo not found' })
+  const git = setDefault ? { ...config.git, defaultRepoId: repo.id } : config.git
+  if (setDefault) saveGitConfig(git)
+  res.json({ ok: true, repo, defaultRepoId: git.defaultRepoId })
+})
+
+app.get('/git/status', requireToken(token), async (req, res) => {
+  const repoId = String(req.query.repoId ?? '')
+  const { repo } = resolveRegisteredRepo(repoId)
+  if (!repo) return res.status(404).json({ error: 'Repo not found' })
+
+  try {
+    const branch = await runGit(['branch', '--show-current'], repo.path).catch(() => repo.branch)
+    const statusText = await runGit(['status', '--short', '--branch'], repo.path)
+    const porcelain = await runGit(['status', '--porcelain'], repo.path)
+    res.json({
+      ok: true,
+      repo: { ...repo, branch: branch || repo.branch, lastSeenAt: Date.now() },
+      dirty: Boolean(porcelain.trim()),
+      status: statusText,
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message ?? 'Could not read git status' })
+  }
+})
+
+app.get('/git/diff', requireToken(token), async (req, res) => {
+  const repoId = String(req.query.repoId ?? '')
+  const { repo } = resolveRegisteredRepo(repoId)
+  if (!repo) return res.status(404).json({ error: 'Repo not found' })
+
+  try {
+    const diff = await runGit(['diff', '--stat'], repo.path)
+    const patch = await runGit(['diff', '--', '.'], repo.path)
+    res.json({ ok: true, repo, stat: diff, diff: patch.slice(0, MAX_SHELL_OUTPUT_BYTES) })
+  } catch (error) {
+    res.status(500).json({ error: error.message ?? 'Could not read git diff' })
+  }
+})
+
 app.get('/ollama/status', requireToken(token), async (_req, res) => {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
@@ -414,6 +596,14 @@ app.post('/ollama/chat', requireToken(token), async (req, res) => {
     systemContent = ctx
       ? `You are a helpful assistant. The user has selected the following text from a note:\n\n${ctx}\n\nAnswer questions about this selection concisely.`
       : 'You are a helpful assistant.'
+  } else if (contextMode === 'git-summary') {
+    systemContent = ctx
+      ? `${GIT_SUMMARY_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
+      : GIT_SUMMARY_SYSTEM_PROMPT
+  } else if (contextMode === 'git-commit-msg') {
+    systemContent = ctx
+      ? `${GIT_COMMIT_MSG_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
+      : GIT_COMMIT_MSG_SYSTEM_PROMPT
   } else {
     systemContent = ctx
       ? `You are a helpful assistant. The user is working on a note.\n\nNote:\n---\n${ctx}\n---\n\nAnswer questions about this note concisely. If the note doesn't contain relevant information, say so.`

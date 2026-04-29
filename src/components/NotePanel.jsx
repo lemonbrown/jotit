@@ -1,19 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { marked } from 'marked'
-import hljs from 'highlight.js/lib/core'
-import json from 'highlight.js/lib/languages/json'
-import javascript from 'highlight.js/lib/languages/javascript'
-import typescript from 'highlight.js/lib/languages/typescript'
-import python from 'highlight.js/lib/languages/python'
-import sql from 'highlight.js/lib/languages/sql'
-import bash from 'highlight.js/lib/languages/bash'
-import yaml from 'highlight.js/lib/languages/yaml'
-import xml from 'highlight.js/lib/languages/xml'
-import css from 'highlight.js/lib/languages/css'
-import dockerfile from 'highlight.js/lib/languages/dockerfile'
-import ini from 'highlight.js/lib/languages/ini'
-import 'highlight.js/styles/github-dark.css'
+import { hljs, HINT_LANGS, normalizeCodeLanguage, detectPreferredCodeLanguage, shouldAutoIndentForLanguage } from '../utils/highlight'
+import { isCodeOutlineLanguage, parseCodeSymbols, buildCollapsedCodeView } from '../utils/codeSymbols'
 
 import { timeAgo, generateId } from '../utils/helpers'
 import {
@@ -53,30 +42,20 @@ import { extractSQLiteAssetRef } from '../utils/sqliteNote'
 import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote } from '../utils/noteTypes'
 import { getStoredKeyPair } from '../utils/e2eEncryption'
 import { useScrollMap } from '../hooks/useScrollMap'
+import { useNoteEditorHistory } from '../hooks/useNoteEditorHistory'
+import { useNoteSelection } from '../hooks/useNoteSelection'
+import { useNoteMode } from '../hooks/useNoteMode'
 import SecretAlert from './SecretAlert'
 import { runJsInWorker } from '../utils/jsRunner'
 import { NOW_COMMAND, formatCurrentDateTime, getInlineCommandRange } from '../utils/noteCommands'
+import { getGitCommandSuggestions, getGitCommandTrigger, parseGitCommand, parsePrCommand, formatGitCommandResult } from '../utils/gitCommands'
+import { connectGitRepo, getGitDiff, getGitStatus, listGitRepos, useGitRepo } from '../utils/gitClient'
+import { streamLLMChat } from '../utils/llmClient'
+import { matchTemplates, expandTemplate, parseTemplateQuery } from '../utils/noteTemplates'
+import { escapeHtml } from '../utils/escapeHtml'
+import { useSnippetPicker } from '../hooks/useSnippetPicker'
 
 const CODE_LINE_HEIGHT = '1.6'
-
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('sql', sql)
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('yaml', yaml)
-hljs.registerLanguage('xml', xml)
-hljs.registerLanguage('css', css)
-hljs.registerLanguage('dockerfile', dockerfile)
-hljs.registerLanguage('ini', ini)
-hljs.registerAliases?.(['js', 'mjs', 'cjs', 'node'], { languageName: 'javascript' })
-hljs.registerAliases?.(['ts', 'mts', 'cts'], { languageName: 'typescript' })
-hljs.registerAliases?.(['sh', 'zsh', 'shell'], { languageName: 'bash' })
-hljs.registerAliases?.(['yml'], { languageName: 'yaml' })
-hljs.registerAliases?.(['html', 'svg'], { languageName: 'xml' })
-
-const HINT_LANGS = ['json','javascript','typescript','python','sql','bash','yaml','xml','css','dockerfile','ini']
 const HELP_COMMAND = '/tips'
 const HELP_NOTE_CONTENT = `jot.it quick start
 
@@ -107,198 +86,6 @@ Search and navigation
 Tip
 Keep this note around as a reference, or delete it once the shortcuts feel familiar.`
 
-function escapeHtml(text) {
-  return String(text ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
-function normalizeCodeLanguage(lang) {
-  const normalized = String(lang ?? '').trim().toLowerCase()
-  if (!normalized) return ''
-
-  if (['js', 'mjs', 'cjs', 'node'].includes(normalized)) return 'javascript'
-  if (['ts', 'mts', 'cts'].includes(normalized)) return 'typescript'
-  if (['sh', 'zsh', 'shell'].includes(normalized)) return 'bash'
-  if (normalized === 'yml') return 'yaml'
-  if (['html', 'svg'].includes(normalized)) return 'xml'
-  return normalized
-}
-
-function scoreJavaScriptLike(text) {
-  const sample = String(text ?? '')
-  if (!sample.trim()) return 0
-
-  let score = 0
-  if (/\b(const|let|var)\s+[A-Za-z_$][\w$]*\s*=/.test(sample)) score += 3
-  if (/\b(function|return|import|export|from|async|await|new)\b/.test(sample)) score += 3
-  if (/=>/.test(sample)) score += 3
-  if (/\b(console\.(log|error|warn|info|debug))\s*\(/.test(sample)) score += 4
-  if (/\b(document|window|Array|Object|Promise|Map|Set|JSON)\b/.test(sample)) score += 2
-  if (/[`$][{(]/.test(sample) || /`[^`]*\$\{/.test(sample)) score += 2
-  if (/[A-Za-z_$][\w$]*\s*\(\s*\)\s*{/.test(sample)) score += 2
-  if (/<[A-Z][A-Za-z0-9]*(\s|>)/.test(sample) || /<\/[A-Z][A-Za-z0-9]*>/.test(sample)) score += 2
-  return score
-}
-
-function detectPreferredCodeLanguage(text) {
-  const sample = String(text ?? '')
-  const jsScore = scoreJavaScriptLike(sample)
-
-  try {
-    const auto = hljs.highlightAuto(sample, HINT_LANGS)
-    const autoLanguage = normalizeCodeLanguage(auto.language)
-
-    if (
-      jsScore >= 6 &&
-      (!autoLanguage || ['ini', 'yaml', 'bash', 'sql'].includes(autoLanguage))
-    ) {
-      return 'javascript'
-    }
-
-    if (
-      jsScore >= 8 &&
-      autoLanguage &&
-      !['javascript', 'typescript', 'json', 'css', 'xml'].includes(autoLanguage)
-    ) {
-      return 'javascript'
-    }
-
-    return autoLanguage
-  } catch {
-    return jsScore >= 6 ? 'javascript' : ''
-  }
-}
-
-function shouldAutoIndentForLanguage(language) {
-  return ['javascript', 'typescript', 'json', 'css'].includes(language)
-}
-
-function isCodeOutlineLanguage(language) {
-  return language === 'javascript' || language === 'typescript'
-}
-
-function classifyCodeSymbol(line) {
-  const trimmed = line.trim()
-  if (!trimmed || !trimmed.includes('{')) return null
-
-  let match = trimmed.match(/^(?:else\s+)?if\b/)
-  if (match) return { kind: 'statement', label: 'if', showInPane: false }
-
-  match = trimmed.match(/^(?:export\s+)?(?:default\s+)?class\s+([A-Za-z_$][\w$]*)\b/)
-  if (match) return { kind: 'class', label: match[1] }
-
-  match = trimmed.match(/^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/)
-  if (match) return { kind: 'function', label: match[1] }
-
-  match = trimmed.match(/^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/)
-  if (match) return { kind: 'function', label: match[1] }
-
-  match = trimmed.match(/^([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/)
-  if (match) return { kind: 'property', label: match[1] }
-
-  match = trimmed.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(/)
-  if (match) {
-    const segments = match[1].split('.')
-    return { kind: 'call', label: segments[segments.length - 1] }
-  }
-
-  match = trimmed.match(/^(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^=]*\)\s*\{/)
-  if (match) return { kind: 'method', label: match[1] }
-
-  match = trimmed.match(/^(for|while|switch|try|catch|finally|do)\b/)
-  if (match) return { kind: 'statement', label: match[1], showInPane: false }
-
-  return null
-}
-
-function parseCodeSymbols(text, language) {
-  if (!isCodeOutlineLanguage(language)) return []
-
-  const lines = String(text ?? '').split('\n')
-  const symbols = []
-  const stack = []
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex]
-    const candidate = classifyCodeSymbol(line)
-    let assignedCandidate = false
-
-    for (const char of line) {
-      if (char === '{') {
-        stack.push({
-          candidate: !assignedCandidate ? candidate : null,
-          lineIndex,
-        })
-        if (candidate && !assignedCandidate) assignedCandidate = true
-      } else if (char === '}') {
-        const open = stack.pop()
-        if (!open?.candidate) continue
-        if (lineIndex <= open.lineIndex) continue
-
-        const symbol = {
-          id: `${open.candidate.kind}:${open.lineIndex}:${open.candidate.label}`,
-          kind: open.candidate.kind,
-          label: open.candidate.label,
-          showInPane: open.candidate.showInPane !== false,
-          startLine: open.lineIndex,
-          endLine: lineIndex,
-        }
-        symbols.push(symbol)
-      }
-    }
-  }
-
-  return symbols.sort((a, b) => (
-    a.startLine - b.startLine ||
-    b.endLine - a.endLine
-  ))
-}
-
-function buildCollapsedCodeView(text, symbols, collapsedIds) {
-  const lines = String(text ?? '').split('\n')
-  const collapsed = symbols.filter(symbol => collapsedIds[symbol.id])
-  if (!collapsed.length) {
-    return {
-      foldedSymbols: [],
-      visibleLineNumbers: lines.map((_, index) => index + 1),
-      text: String(text ?? ''),
-    }
-  }
-
-  const collapsedByStartLine = new Map(
-    collapsed
-      .filter(symbol => symbol.endLine > symbol.startLine)
-      .map(symbol => [symbol.startLine, symbol])
-  )
-
-  const visibleLines = []
-  const visibleLineNumbers = []
-
-  for (let lineIndex = 0; lineIndex < lines.length;) {
-    const symbol = collapsedByStartLine.get(lineIndex)
-    if (symbol) {
-      const hiddenCount = symbol.endLine - symbol.startLine
-      visibleLines.push(`// ... ${symbol.kind} ${symbol.label} (${hiddenCount} line${hiddenCount === 1 ? '' : 's'})`)
-      visibleLineNumbers.push(lineIndex + 1)
-      lineIndex = symbol.endLine + 1
-      continue
-    }
-
-    visibleLines.push(lines[lineIndex])
-    visibleLineNumbers.push(lineIndex + 1)
-    lineIndex += 1
-  }
-
-  return {
-    foldedSymbols: collapsed,
-    visibleLineNumbers,
-    text: visibleLines.join('\n'),
-  }
-}
 
 let _scratchBlockIdx = 0
 
@@ -384,6 +171,21 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
+function isRunnableCommandLine(line) {
+  const text = String(line ?? '').trim()
+  const gitCommand = parseGitCommand(text)
+  if (gitCommand) {
+    if (gitCommand.command === 'help') return false
+    if (gitCommand.command === 'unknown') return false
+    if (gitCommand.command === 'connect') return Boolean(gitCommand.path)
+    if (gitCommand.command === 'use') return Boolean(gitCommand.repoId)
+    return true
+  }
+
+  const prCommand = parsePrCommand(text)
+  return Boolean(prCommand && prCommand.command !== 'unknown')
+}
+
 function ScratchOutput({ output }) {
   if (!output) return null
   const { status, logs, result, error } = output
@@ -409,9 +211,8 @@ function ScratchOutput({ output }) {
   )
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
   const [content, setContent] = useState(note.content)
-  const [mode, setMode] = useState('edit')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmRemoveServer, setConfirmRemoveServer] = useState(false)
   const [removingFromServer, setRemovingFromServer] = useState(false)
@@ -424,17 +225,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [codeViewActive, setCodeViewActive] = useState(false)
   const [codeViewScratchOutput, setCodeViewScratchOutput] = useState(null)
 
-  // Selection + transform state
-  const [sel, setSel] = useState({ start: 0, end: 0, text: '' })
-  const [txResult, setTxResult] = useState(null) // { opName, text, error } | null
-  const [txCopied, setTxCopied] = useState(false)
-  const [calcResult, setCalcResult] = useState(null)
-  const [pendingCalc, setPendingCalc] = useState(null)
-  const [calcCopied, setCalcCopied] = useState(false)
-  const [interactiveTx, setInteractiveTx] = useState(null) // { id, opName, param } | null
-  const [guidCopied, setGuidCopied] = useState(false)
-  const [nowInserted, setNowInserted] = useState(false)
-  const [diffCapture, setDiffCapture] = useState(null) // captured "A" text for diff
   const [hasE2EKeys, setHasE2EKeys] = useState(false)
   const [codeSymbolsOpen, setCodeSymbolsOpen] = useState(false)
   const [codeCollapsedIds, setCodeCollapsedIds] = useState({})
@@ -442,10 +232,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   useEffect(() => {
     if (user) getStoredKeyPair().then(kp => setHasE2EKeys(!!kp))
   }, [user])
-  const [diffInstance, setDiffInstance] = useState(0)
-  const [diffPendingNote, setDiffPendingNote] = useState(null)
-  const [codeBefore, setCodeBefore] = useState('')
-  const [codeAfter, setCodeAfter] = useState('')
   const [codeContent, setCodeContent] = useState('')
   const [gotoOpen, setGotoOpen] = useState(false)
   const [gotoLine, setGotoLine] = useState('')
@@ -457,9 +243,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [snippetSaveOpen, setSnippetSaveOpen] = useState(false)
   const [snippetDraftName, setSnippetDraftName] = useState('')
   const [snippetSaved, setSnippetSaved] = useState(false)
-  const [snippetPicker, setSnippetPicker] = useState(null)
-  const [snippetResults, setSnippetResults] = useState([])
-  const [snippetActiveIndex, setSnippetActiveIndex] = useState(0)
   const [displayHint, setDisplayHint] = useState(null) // 'table' | 'code' | null — persists after apply for sharing
 
   const isInPublicCollection = Boolean(collection?.isPublic)
@@ -481,9 +264,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const gotoInputRef = useRef(null)
   const snippetNameInputRef = useRef(null)
   const editorScrollCoastRef = useRef({ velocity: 0, direction: 1, rafId: null })
-  const historyRef = useRef([note.content])
-  const historyIdxRef = useRef(0)
-  const historyTimerRef = useRef(null)
   const capturedSelectionRef = useRef('')
   const capturedHttpSelRef = useRef('')
   const capturedShellSelRef = useRef('')
@@ -505,13 +285,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     })
   }, [note.id, onOpenNibPane])
 
-  useEffect(() => {
-    onNibContextChange?.({
-      noteId: note.id,
-      selectionText: sel.text,
-      selectionRange: { start: sel.start, end: sel.end },
-    })
-  }, [note.id, onNibContextChange, sel.end, sel.start, sel.text])
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
@@ -527,6 +300,11 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [pasteError, setPasteError] = useState('')
   const [scratchOutputs, setScratchOutputs] = useState({})
   const [scratchPortals, setScratchPortals] = useState([])
+  const [sessionGitRepoId, setSessionGitRepoId] = useState(null)
+  const [gitPicker, setGitPicker] = useState(null)
+  const [gitActiveIndex, setGitActiveIndex] = useState(0)
+  const [knownGitRepos, setKnownGitRepos] = useState([])
+  const [enterCommandHint, setEnterCommandHint] = useState(null)
 
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
@@ -545,10 +323,138 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const helpCommandReady = !openApiNote && content.trim() === HELP_COMMAND
   const charCount = editorDisplayContent.length
   const lineCount = editorDisplayContent.split('\n').length
+  const {
+    snippetPicker,
+    setSnippetPicker,
+    snippetResults,
+    setSnippetResults,
+    templateResults,
+    setTemplateResults,
+    snippetActiveIndex,
+    setSnippetActiveIndex,
+    tabStops,
+    setTabStops,
+    closeSnippetPicker,
+    advanceTabStop,
+  } = useSnippetPicker({
+    textareaRef,
+  })
+  const {
+    mode,
+    setMode,
+    diffCapture,
+    setDiffCapture,
+    diffInstance,
+    setDiffInstance,
+    diffPendingNote,
+    setDiffPendingNote,
+    codeBefore,
+    setCodeBefore,
+    codeAfter,
+    setCodeAfter,
+  } = useNoteMode({ onDiffModeChange })
 
   const minimapEnabled = showMinimap && mode === 'edit' && !jsonSession && !hasInlineImages
   const activeEditorRef = codeViewActive ? codeEditRef : textareaRef
   const scrollMap = useScrollMap(activeEditorRef, content, minimapEnabled)
+  const reportCurrentLocation = useCallback((target = textareaRef.current) => {
+    if (!target) return
+    onLocationChange?.({
+      noteId: note.id,
+      cursorStart: target.selectionStart ?? 0,
+      cursorEnd: target.selectionEnd ?? target.selectionStart ?? 0,
+      scrollTop: target.scrollTop ?? 0,
+    })
+  }, [note.id, onLocationChange])
+  const {
+    sel,
+    setSel,
+    txResult,
+    setTxResult,
+    txCopied,
+    setTxCopied,
+    calcResult,
+    setCalcResult,
+    pendingCalc,
+    setPendingCalc,
+    calcCopied,
+    setCalcCopied,
+    interactiveTx,
+    setInteractiveTx,
+    guidCopied,
+    setGuidCopied,
+    nowInserted,
+    setNowInserted,
+    resetSelectionState,
+    updateSel,
+    clearSelIfEmpty,
+  } = useNoteSelection({
+    textareaRef,
+    reportCurrentLocation,
+    setSnippetSaveOpen,
+  })
+  const {
+    pushHistory,
+    pushHistoryNow,
+    resetHistory,
+    undo,
+    redo,
+  } = useNoteEditorHistory({
+    initialContent: note.content,
+    setContent,
+    onUpdate,
+    codeViewActive,
+    setCodeContent,
+  })
+
+  const gitSuggestions = useMemo(
+    () => gitPicker ? getGitCommandSuggestions(gitPicker.query, knownGitRepos) : [],
+    [gitPicker, knownGitRepos]
+  )
+
+  const linkedGitRepo = useMemo(() => {
+    if (!note.git?.repoId) return null
+    const repo = knownGitRepos.find(item => item.id === note.git.repoId)
+    return repo ?? {
+      id: note.git.repoId,
+      displayName: note.git.repoId,
+      baseBranch: note.git.baseBranch,
+    }
+  }, [knownGitRepos, note.git])
+
+  useEffect(() => {
+    if (!gitPicker || !agentToken?.trim()) return
+    let cancelled = false
+    listGitRepos(agentToken)
+      .then(data => {
+        if (!cancelled) setKnownGitRepos(data.repos ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) setKnownGitRepos([])
+      })
+    return () => { cancelled = true }
+  }, [agentToken, gitPicker])
+
+  useEffect(() => {
+    if (!note.git?.repoId || !agentToken?.trim()) return
+    if (knownGitRepos.some(repo => repo.id === note.git.repoId)) return
+
+    let cancelled = false
+    listGitRepos(agentToken)
+      .then(data => {
+        if (!cancelled) setKnownGitRepos(data.repos ?? [])
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [agentToken, knownGitRepos, note.git?.repoId])
+
+  useEffect(() => {
+    onNibContextChange?.({
+      noteId: note.id,
+      selectionText: sel.text,
+      selectionRange: { start: sel.start, end: sel.end },
+    })
+  }, [note.id, onNibContextChange, sel.end, sel.start, sel.text])
 
   const pendingCalcInline = useMemo(() => {
     if (!pendingCalc) return null
@@ -564,16 +470,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     const visible = !ta || (top > -lineHeight && top < ta.clientHeight + lineHeight)
     return { top, left, visible }
   }, [content, pendingCalc])
-
-  const reportCurrentLocation = useCallback((target = textareaRef.current) => {
-    if (!target) return
-    onLocationChange?.({
-      noteId: note.id,
-      cursorStart: target.selectionStart ?? 0,
-      cursorEnd: target.selectionEnd ?? target.selectionStart ?? 0,
-      scrollTop: target.scrollTop ?? 0,
-    })
-  }, [note.id, onLocationChange])
 
   const focusEditorLine = useCallback((lineNumber) => {
     const ta = codeViewActive ? codeEditRef.current : textareaRef.current
@@ -597,6 +493,35 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     if (lineNumsRef.current) lineNumsRef.current.scrollTop = targetTop
     reportCurrentLocation(ta)
   }, [codeViewActive, content, lineCount, reportCurrentLocation])
+
+  const updateEnterCommandHint = useCallback((target = textareaRef.current, value = content) => {
+    if (!target || openApiNote || target.selectionStart !== target.selectionEnd) {
+      setEnterCommandHint(null)
+      return
+    }
+
+    const cursor = target.selectionStart ?? 0
+    const lineStart = value.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1
+    const nextBreak = value.indexOf('\n', cursor)
+    const lineEnd = nextBreak === -1 ? value.length : nextBreak
+    const line = value.slice(lineStart, lineEnd).trim()
+    if (!isRunnableCommandLine(line)) {
+      setEnterCommandHint(null)
+      return
+    }
+
+    const before = value.slice(0, lineStart)
+    const lineIndex = before.split('\n').length - 1
+    const column = Math.max(0, cursor - lineStart)
+    const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+    const charWidth = 7.8
+
+    setEnterCommandHint({
+      label: `Enter runs ${line}`,
+      top: 24 + lineIndex * lineHeight - target.scrollTop,
+      left: 24 + column * charWidth - target.scrollLeft,
+    })
+  }, [content, openApiNote])
 
   const openGotoLine = useCallback(() => {
     setMode('edit')
@@ -877,10 +802,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
     setConfirmDelete(false)
     setShareState(null)
-    setSel({ start: 0, end: 0, text: '' })
-    setTxResult(null)
-    setCalcResult(null)
-    setPendingCalc(null)
+    resetSelectionState()
     setTableSession(null)
     setCronSession(null)
     setDiagramSession(null)
@@ -890,8 +812,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setSnippetSaved(false)
     setSnippetPicker(null)
     setSnippetResults([])
+    setTemplateResults([])
     setSnippetActiveIndex(0)
-    setInteractiveTx(null)
+    setTabStops(null)
     setDisplayHint(null)
     setFindOpen(false)
     setFindQuery('')
@@ -902,10 +825,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setCodeViewActive(false)
     setCodeSymbolsOpen(false)
     setCodeCollapsedIds({})
-    clearTimeout(historyTimerRef.current)
-    historyRef.current = [note.content]
-    historyIdxRef.current = 0
-  }, [note.id])
+    resetHistory(note.content)
+  }, [note.id, resetHistory, resetSelectionState])
 
   useEffect(() => {
     setAttachments(getAttachmentsForNote(note.id))
@@ -1038,6 +959,16 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [mode, reportCurrentLocation])
 
   useEffect(() => {
+    if (!snippetPicker?.query && snippetPicker?.query !== '') {
+      setSnippetResults(snippets.slice(0, 8))
+      setTemplateResults([])
+      setSnippetActiveIndex(0)
+      return
+    }
+
+    // Template results are synchronous — filter immediately
+    setTemplateResults(matchTemplates(templates, snippetPicker?.query ?? ''))
+
     if (!snippetPicker?.query) {
       setSnippetResults(snippets.slice(0, 8))
       setSnippetActiveIndex(0)
@@ -1060,68 +991,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       cancelled = true
       clearTimeout(timer)
     }
-  }, [onSearchSnippets, snippetPicker?.query, snippets])
-
-  // Register/unregister diff note loader with parent
-  useEffect(() => {
-    if (mode === 'diff') {
-      onDiffModeChange?.((note) => setDiffPendingNote(note))
-    } else {
-      onDiffModeChange?.(null)
-    }
-    return () => onDiffModeChange?.(null)
-  }, [mode])
+  }, [onSearchSnippets, snippetPicker?.query, snippets, templates])
 
   // ── Selection tracking ──────────────────────────────────────────────────────
-  const updateSel = () => {
-    const ta = textareaRef.current
-    if (!ta) return
-    const { selectionStart: start, selectionEnd: end } = ta
-    if (end > start) {
-      setSel({ start, end, text: ta.value.slice(start, end) })
-    } else {
-      setSel({ start: 0, end: 0, text: '' })
-    }
-    reportCurrentLocation(ta)
-  }
-
-  const clearSelIfEmpty = () => {
-    const ta = textareaRef.current
-    if (!ta) return
-    if (ta.selectionStart === ta.selectionEnd) {
-      setSel({ start: 0, end: 0, text: '' })
-      setTxResult(null)
-      setInteractiveTx(null)
-      setSnippetSaveOpen(false)
-    }
-    reportCurrentLocation(ta)
-  }
-
   // ── Undo / redo ─────────────────────────────────────────────────────────────
-  const pushHistory = (text) => {
-    clearTimeout(historyTimerRef.current)
-    historyTimerRef.current = setTimeout(() => {
-      const idx = historyIdxRef.current
-      if (historyRef.current[idx] === text) return
-      const next = historyRef.current.slice(0, idx + 1)
-      next.push(text)
-      if (next.length > 200) next.splice(0, next.length - 200)
-      historyRef.current = next
-      historyIdxRef.current = next.length - 1
-    }, 300)
-  }
-
-  const pushHistoryNow = (text) => {
-    clearTimeout(historyTimerRef.current)
-    const idx = historyIdxRef.current
-    if (historyRef.current[idx] === text) return
-    const next = historyRef.current.slice(0, idx + 1)
-    next.push(text)
-    if (next.length > 200) next.splice(0, next.length - 200)
-    historyRef.current = next
-    historyIdxRef.current = next.length - 1
-  }
-
   const handlePaste = useCallback(async (e) => {
     const imageItem = [...(e.clipboardData?.items ?? [])].find(item => item.type.startsWith('image/'))
     if (!imageItem) return
@@ -1170,28 +1043,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       pushHistoryNow(next)
     }
   }, [content, onUpdate, pushHistoryNow])
-
-  const undo = () => {
-    clearTimeout(historyTimerRef.current)
-    const idx = historyIdxRef.current
-    if (idx <= 0) return
-    historyIdxRef.current = idx - 1
-    const prev = historyRef.current[idx - 1]
-    setContent(prev)
-    onUpdate({ content: prev })
-    if (codeViewActive) setCodeContent(prev)
-  }
-
-  const redo = () => {
-    clearTimeout(historyTimerRef.current)
-    const idx = historyIdxRef.current
-    if (idx >= historyRef.current.length - 1) return
-    historyIdxRef.current = idx + 1
-    const next = historyRef.current[idx + 1]
-    setContent(next)
-    onUpdate({ content: next })
-    if (codeViewActive) setCodeContent(next)
-  }
 
   // ── Transforms ──────────────────────────────────────────────────────────────
   const runTransform = (id, opName, param = '') => {
@@ -1415,12 +1266,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [note.id, onCreateSnippet, sel.text, snippetDraftName])
 
-  const closeSnippetPicker = useCallback(() => {
-    setSnippetPicker(null)
-    setSnippetResults([])
-    setSnippetActiveIndex(0)
-  }, [])
-
   const replaceRangeInEditor = useCallback((start, end, text) => {
     const next = content.slice(0, start) + text + content.slice(end)
     pushHistoryNow(next)
@@ -1437,11 +1282,57 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     })
   }, [content, onUpdate, reportCurrentLocation])
 
+  const closeGitPicker = useCallback(() => {
+    setGitPicker(null)
+    setGitActiveIndex(0)
+  }, [])
+
+  const handleEditorSelect = useCallback((e) => {
+    updateSel()
+    updateEnterCommandHint(e.target, e.target.value)
+  }, [updateEnterCommandHint, updateSel])
+
+  const handleEditorClick = useCallback((e) => {
+    clearSelIfEmpty()
+    updateEnterCommandHint(e.target, e.target.value)
+  }, [clearSelIfEmpty, updateEnterCommandHint])
+
+  const insertGitSuggestion = useCallback((suggestion) => {
+    if (!gitPicker || !suggestion) return
+    replaceRangeInEditor(gitPicker.start, gitPicker.end, suggestion.insertText)
+    closeGitPicker()
+  }, [closeGitPicker, gitPicker, replaceRangeInEditor])
+
   const insertSnippet = useCallback((snippet) => {
     if (!snippetPicker) return
     replaceRangeInEditor(snippetPicker.start, snippetPicker.end, snippet.content)
     closeSnippetPicker()
   }, [closeSnippetPicker, replaceRangeInEditor, snippetPicker])
+
+  const insertPickerItem = useCallback((item) => {
+    if (!snippetPicker) return
+    if (item.kind === 'template') {
+      const { args } = parseTemplateQuery(snippetPicker.query)
+      const { text, stops } = expandTemplate(item.template, { args, selection: sel.text })
+      const base = snippetPicker.start
+      replaceRangeInEditor(base, snippetPicker.end, text)
+      closeSnippetPicker()
+      if (stops.length > 0) {
+        const absoluteStops = stops.map(s => ({ ...s, start: base + s.start, end: base + s.end }))
+        setTabStops({ stops: absoluteStops, current: 0 })
+        requestAnimationFrame(() => {
+          const ta = textareaRef.current
+          if (ta) {
+            ta.selectionStart = absoluteStops[0].start
+            ta.selectionEnd = absoluteStops[0].end
+          }
+        })
+      }
+    } else {
+      replaceRangeInEditor(snippetPicker.start, snippetPicker.end, item.snippet.content)
+      closeSnippetPicker()
+    }
+  }, [snippetPicker, sel.text, replaceRangeInEditor, closeSnippetPicker])
 
   const runCalculation = ({ complete = false } = {}) => {
     const range = getCalcRange()
@@ -1533,6 +1424,303 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setTimeout(() => setNowInserted(false), 1500)
   }
 
+  const resolveGitRepoId = async (explicitRepoId = '') => {
+    if (explicitRepoId) return explicitRepoId
+    if (note.git?.repoId) return note.git.repoId
+    if (sessionGitRepoId) return sessionGitRepoId
+
+    const data = await listGitRepos(agentToken)
+    if (data.defaultRepoId) return data.defaultRepoId
+    throw new Error('No repo selected. Run /git connect "path" and then /git use <repo>.')
+  }
+
+  const replaceGitCommand = (range, output) => {
+    replaceRangeInEditor(range.start, range.end, output)
+  }
+
+  const runGitCommand = async (range) => {
+    const parsed = parseGitCommand(range.text)
+    if (!parsed) return false
+    closeGitPicker()
+    setEnterCommandHint(null)
+
+    if (!agentToken?.trim()) {
+      replaceGitCommand(range, formatGitCommandResult('Git command failed', 'Local agent token is missing. Paste the token into Settings.'))
+      return true
+    }
+
+    try {
+      if (parsed.command === 'help') {
+        replaceGitCommand(range, formatGitCommandResult('Git commands', [
+          '/git connect "C:\\path\\to\\repo"',
+          '/git repos',
+          '/git use <repo-id>',
+          '/git status',
+          '/git diff',
+          '/git summary',
+          '/git summary commit',
+        ].join('\n')))
+        return true
+      }
+
+      if (parsed.command === 'connect') {
+        if (!parsed.path) throw new Error('Usage: /git connect "C:\\path\\to\\repo"')
+        const { repo } = await connectGitRepo(parsed.path, agentToken)
+        setSessionGitRepoId(repo.id)
+        replaceGitCommand(range, formatGitCommandResult(`Connected repo: ${repo.displayName ?? repo.name ?? repo.id}`, [
+          `Repo ID: ${repo.id}`,
+          `Branch: ${repo.branch}`,
+          `Base: ${repo.baseBranch}`,
+          `Path: ${repo.path}`,
+          '',
+          `Run /git use ${repo.id} to link it to this note.`,
+        ].join('\n')))
+        return true
+      }
+
+      if (parsed.command === 'repos') {
+        const data = await listGitRepos(agentToken)
+        const linkedRepoId = note.git?.repoId ?? null
+        const lines = data.repos.length
+          ? data.repos.flatMap(repo => [
+            `* ${repo.id}${repo.id === linkedRepoId ? ' (linked)' : ''}${repo.id === data.defaultRepoId ? ' (default)' : ''}`,
+            `  Branch: ${repo.branch}`,
+            `  Base: ${repo.baseBranch}`,
+            `  Path: ${repo.path}`,
+          ])
+          : ['No repos connected. Run /git connect "C:\\path\\to\\repo".']
+        replaceGitCommand(range, formatGitCommandResult('Known repos', lines.join('\n')))
+        return true
+      }
+
+      if (parsed.command === 'use') {
+        if (!parsed.repoId) throw new Error('Usage: /git use <repo-id>')
+        const { repo } = await useGitRepo(parsed.repoId, { setDefault: parsed.setDefault }, agentToken)
+        const git = { repoId: repo.id, baseBranch: repo.baseBranch, linkedAt: Date.now() }
+        const noteData = note.noteData && typeof note.noteData === 'object' ? { ...note.noteData, git } : { git }
+        onUpdate({ git, noteData })
+        setSessionGitRepoId(repo.id)
+        replaceGitCommand(range, formatGitCommandResult(`Repo linked to this note: ${repo.displayName ?? repo.name ?? repo.id}`, [
+          `Repo ID: ${repo.id}`,
+          `Branch: ${repo.branch}`,
+          `Base: ${repo.baseBranch}`,
+          parsed.setDefault ? 'Default repo: yes' : '',
+        ].filter(Boolean).join('\n')))
+        return true
+      }
+
+      if (parsed.command === 'status') {
+        const repoId = await resolveGitRepoId(parsed.repoId)
+        const data = await getGitStatus(repoId, agentToken)
+        replaceGitCommand(range, formatGitCommandResult(`Git status: ${data.repo.displayName ?? data.repo.name ?? repoId}`, `\`\`\`text\n${data.status || 'clean'}\n\`\`\``))
+        return true
+      }
+
+      if (parsed.command === 'diff') {
+        const repoId = await resolveGitRepoId(parsed.repoId)
+        const data = await getGitDiff(repoId, agentToken)
+        const diff = data.diff || '(no diff)'
+        const stat = data.stat ? `${data.stat}\n\n` : ''
+        replaceGitCommand(range, formatGitCommandResult(`Git diff: ${data.repo.displayName ?? data.repo.name ?? repoId}`, `${stat}\`\`\`diff\n${diff}\n\`\`\``))
+        return true
+      }
+
+      if (parsed.command === 'summary') {
+        if (!ollamaModel) throw new Error('No AI model configured. Enable a local AI model in Settings.')
+        const repoId = await resolveGitRepoId(parsed.repoId)
+        const [statusData, diffData] = await Promise.all([
+          getGitStatus(repoId, agentToken),
+          getGitDiff(repoId, agentToken),
+        ])
+        const repoName = statusData.repo.displayName ?? statusData.repo.name ?? repoId
+        const header = `Git summary: ${repoName}\n\n`
+        replaceGitCommand(range, header + '…')
+        const insertBodyStart = range.start + header.length
+        const streamState = { bodyLen: 1 }
+        const context = [
+          `Repository: ${repoName}`,
+          `Branch: ${statusData.repo.branch ?? 'unknown'}`,
+          statusData.repo.baseBranch ? `Base branch: ${statusData.repo.baseBranch}` : null,
+          '',
+          '=== Status ===',
+          statusData.status || '(clean)',
+          '',
+          '=== Diff stat ===',
+          diffData.stat || '(no changes)',
+          '',
+          '=== Diff ===',
+          (diffData.diff || '(no diff)').slice(0, 16000),
+        ].filter(s => s !== null).join('\n')
+        streamLLMChat(
+          {
+            token: agentToken,
+            model: ollamaModel,
+            messages: [{ role: 'user', content: 'Summarize these git changes.' }],
+            context,
+            contextMode: 'git-summary',
+          },
+          (chunk) => {
+            let next
+            setContent(prev => {
+              const bodyEnd = insertBodyStart + streamState.bodyLen
+              next = prev.slice(0, insertBodyStart) + prev.slice(insertBodyStart, bodyEnd) + chunk + prev.slice(bodyEnd)
+              streamState.bodyLen += chunk.length
+              return next
+            })
+            if (next !== undefined) onUpdate({ content: next })
+          },
+          () => {
+            setContent(prev => { pushHistoryNow(prev); return prev })
+          },
+          (err) => {
+            let next
+            setContent(prev => {
+              const bodyEnd = insertBodyStart + streamState.bodyLen
+              const errMsg = `_(Error: ${err})_`
+              next = prev.slice(0, insertBodyStart) + errMsg + prev.slice(bodyEnd)
+              streamState.bodyLen = errMsg.length
+              return next
+            })
+            if (next !== undefined) {
+              pushHistoryNow(next)
+              onUpdate({ content: next })
+            }
+          }
+        )
+        return true
+      }
+
+      if (parsed.command === 'summary-commit') {
+        if (!ollamaModel) throw new Error('No AI model configured. Enable a local AI model in Settings.')
+        const repoId = await resolveGitRepoId(parsed.repoId)
+        const [statusData, diffData] = await Promise.all([
+          getGitStatus(repoId, agentToken),
+          getGitDiff(repoId, agentToken),
+        ])
+        const repoName = statusData.repo.displayName ?? statusData.repo.name ?? repoId
+        const header = `Commit message: ${repoName}\n\n`
+        replaceGitCommand(range, header + '…')
+        const insertBodyStart = range.start + header.length
+        const streamState = { bodyLen: 1 }
+        const context = [
+          `Repository: ${repoName}`,
+          `Branch: ${statusData.repo.branch ?? 'unknown'}`,
+          statusData.repo.baseBranch ? `Base branch: ${statusData.repo.baseBranch}` : null,
+          '',
+          '=== Status ===',
+          statusData.status || '(clean)',
+          '',
+          '=== Diff stat ===',
+          diffData.stat || '(no changes)',
+          '',
+          '=== Diff ===',
+          (diffData.diff || '(no diff)').slice(0, 16000),
+        ].filter(s => s !== null).join('\n')
+        streamLLMChat(
+          {
+            token: agentToken,
+            model: ollamaModel,
+            messages: [{ role: 'user', content: 'Write a git commit message for these changes.' }],
+            context,
+            contextMode: 'git-commit-msg',
+          },
+          (chunk) => {
+            let next
+            setContent(prev => {
+              const bodyEnd = insertBodyStart + streamState.bodyLen
+              next = prev.slice(0, insertBodyStart) + prev.slice(insertBodyStart, bodyEnd) + chunk + prev.slice(bodyEnd)
+              streamState.bodyLen += chunk.length
+              return next
+            })
+            if (next !== undefined) onUpdate({ content: next })
+          },
+          () => {
+            setContent(prev => { pushHistoryNow(prev); return prev })
+          },
+          (err) => {
+            let next
+            setContent(prev => {
+              const bodyEnd = insertBodyStart + streamState.bodyLen
+              const errMsg = `_(Error: ${err})_`
+              next = prev.slice(0, insertBodyStart) + errMsg + prev.slice(bodyEnd)
+              streamState.bodyLen = errMsg.length
+              return next
+            })
+            if (next !== undefined) {
+              pushHistoryNow(next)
+              onUpdate({ content: next })
+            }
+          }
+        )
+        return true
+      }
+
+      throw new Error('Unknown git command. Try /git repos, /git connect, /git use, /git status, /git diff, /git summary, or /git summary commit.')
+    } catch (error) {
+      replaceGitCommand(range, formatGitCommandResult('Git command failed', error.message ?? String(error)))
+      return true
+    }
+  }
+
+  const runPrCommand = async (range) => {
+    const parsed = parsePrCommand(range.text)
+    if (!parsed) return false
+    closeGitPicker()
+    setEnterCommandHint(null)
+
+    if (!agentToken?.trim()) {
+      replaceGitCommand(range, formatGitCommandResult('PR draft failed', 'Local agent token is missing. Paste the token into Settings.'))
+      return true
+    }
+
+    try {
+      if (parsed.command === 'help') {
+        replaceGitCommand(range, formatGitCommandResult('PR commands', '/pr draft [repo-id]'))
+        return true
+      }
+      if (parsed.command !== 'draft') {
+        throw new Error('Unknown PR command. Try /pr draft.')
+      }
+
+      const repoId = await resolveGitRepoId(parsed.repoId)
+      const [statusData, diffData] = await Promise.all([
+        getGitStatus(repoId, agentToken),
+        getGitDiff(repoId, agentToken),
+      ])
+      const repoName = statusData.repo.displayName ?? statusData.repo.name ?? repoId
+      const branch = statusData.repo.branch ?? 'unknown'
+      const base = statusData.repo.baseBranch ?? note.git?.baseBranch ?? 'main'
+      const stat = diffData.stat || '(no file changes)'
+      const draft = [
+        `PR draft: ${repoName}`,
+        '',
+        '## Title',
+        `${branch} into ${base}`,
+        '',
+        '## Summary',
+        '- TODO: describe the intent of this change.',
+        '',
+        '## Changes',
+        '```text',
+        stat,
+        '```',
+        '',
+        '## Working Tree',
+        '```text',
+        statusData.status || 'clean',
+        '```',
+        '',
+        '## Tests',
+        '- TODO',
+      ].join('\n')
+      replaceGitCommand(range, draft)
+      return true
+    } catch (error) {
+      replaceGitCommand(range, formatGitCommandResult('PR draft failed', error.message ?? String(error)))
+      return true
+    }
+  }
+
   const replaceSelectionWith = (value) => {
     const newContent = content.slice(0, sel.start) + value + content.slice(sel.end)
     pushHistoryNow(newContent)
@@ -1564,12 +1752,70 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const handleContent = (e) => {
     const target = e.target
     const cursor = target.selectionStart ?? 0
-    const trigger = getSnippetTrigger(e.target.value, cursor)
     setPendingCalc(null)
     setContent(e.target.value)
     onUpdate({ content: e.target.value })
     pushHistory(e.target.value)
     if (jsonSession) setJsonSession(null)
+    updateEnterCommandHint(target, e.target.value)
+
+    // Track tab stop drift as user types within the current stop
+    if (tabStops) {
+      const stop = tabStops.stops[tabStops.current]
+      const newEnd = target.selectionEnd ?? cursor
+      if (newEnd < stop.start) {
+        // Cursor moved before the current stop — exit tab stop mode
+        setTabStops(null)
+      } else {
+        const delta = newEnd - stop.end
+        if (delta !== 0) {
+          setTabStops(prev => {
+            if (!prev) return null
+            const newStops = prev.stops.map((s, i) => {
+              if (i < prev.current) return s
+              if (i === prev.current) return { ...s, end: newEnd }
+              return { ...s, start: s.start + delta, end: s.end + delta }
+            })
+            return { ...prev, stops: newStops }
+          })
+        }
+      }
+      reportCurrentLocation(target)
+      return // Don't open the snippet picker while navigating tab stops
+    }
+
+    const gitTrigger = getGitCommandTrigger(e.target.value, cursor)
+    if (gitTrigger) {
+      const lineStart = gitTrigger.start
+      const lineEnd = e.target.value.indexOf('\n', cursor)
+      const currentLine = e.target.value.slice(lineStart, lineEnd === -1 ? e.target.value.length : lineEnd)
+      if (isRunnableCommandLine(currentLine)) {
+        closeGitPicker()
+        updateEnterCommandHint(target, e.target.value)
+        reportCurrentLocation(target)
+        return
+      }
+      const before = e.target.value.slice(0, gitTrigger.start)
+      const lineIndex = before.split('\n').length - 1
+      const visualLineStart = before.lastIndexOf('\n') + 1
+      const column = gitTrigger.start - visualLineStart
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setGitPicker({
+        ...gitTrigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + column * charWidth - target.scrollLeft,
+      })
+      setGitActiveIndex(0)
+      setEnterCommandHint(null)
+      if (snippetPicker) closeSnippetPicker()
+      reportCurrentLocation(target)
+      return
+    } else if (gitPicker) {
+      closeGitPicker()
+    }
+
+    const trigger = getSnippetTrigger(e.target.value, cursor)
     if (trigger) {
       const before = e.target.value.slice(0, trigger.start)
       const lineIndex = before.split('\n').length - 1
@@ -1592,17 +1838,70 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const handleInlineEditorChange = useCallback((newContent) => {
     setPendingCalc(null)
     if (snippetPicker) closeSnippetPicker()
+    if (gitPicker) closeGitPicker()
     setContent(newContent)
     onUpdate({ content: newContent })
     pushHistory(newContent)
     if (jsonSession) setJsonSession(null)
-  }, [onUpdate, pushHistory, closeSnippetPicker, snippetPicker, jsonSession])
+  }, [onUpdate, pushHistory, closeSnippetPicker, closeGitPicker, snippetPicker, gitPicker, jsonSession])
 
   const handleKeyDown = (e) => {
-    if (snippetPicker) {
+    // Tab stop cycling (active when a template was just expanded)
+    if (tabStops && !snippetPicker) {
+      if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault()
+        advanceTabStop(e.shiftKey ? -1 : 1)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setTabStops(null)
+        return
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const commandRange = getCurrentLineRange()
+      if (isRunnableCommandLine(commandRange.text)) {
+        const gitCommand = parseGitCommand(commandRange.text)
+        e.preventDefault()
+        if (gitCommand) void runGitCommand(commandRange)
+        else void runPrCommand(commandRange)
+        return
+      }
+    }
+    if (gitPicker) {
+      const totalItems = gitSuggestions.length
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setSnippetActiveIndex(index => Math.min(index + 1, Math.max(0, snippetResults.length - 1)))
+        setGitActiveIndex(index => Math.min(index + 1, Math.max(0, totalItems - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setGitActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && totalItems) {
+        e.preventDefault()
+        insertGitSuggestion(gitSuggestions[gitActiveIndex] ?? gitSuggestions[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeGitPicker()
+        return
+      }
+    }
+    if (snippetPicker) {
+      // Combined picker: templates first, then snippets
+      const pickerItems = [
+        ...templateResults.map(t => ({ kind: 'template', template: t })),
+        ...snippetResults.map(s => ({ kind: 'snippet', snippet: s })),
+      ]
+      const totalItems = pickerItems.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSnippetActiveIndex(index => Math.min(index + 1, Math.max(0, totalItems - 1)))
         return
       }
       if (e.key === 'ArrowUp') {
@@ -1610,9 +1909,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         setSnippetActiveIndex(index => Math.max(index - 1, 0))
         return
       }
-      if ((e.key === 'Enter' || e.key === 'Tab') && snippetResults.length) {
+      if ((e.key === 'Enter' || e.key === 'Tab') && totalItems) {
         e.preventDefault()
-        insertSnippet(snippetResults[snippetActiveIndex] ?? snippetResults[0])
+        insertPickerItem(pickerItems[snippetActiveIndex] ?? pickerItems[0])
         return
       }
       if (e.key === 'Escape') {
@@ -1639,6 +1938,17 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const cursor = e.target.selectionStart ?? 0
+      const gitRange = getCurrentLineRange()
+      if (isRunnableCommandLine(gitRange.text) && parseGitCommand(gitRange.text)) {
+        e.preventDefault()
+        void runGitCommand(gitRange)
+        return
+      }
+      if (isRunnableCommandLine(gitRange.text) && parsePrCommand(gitRange.text)) {
+        e.preventDefault()
+        void runPrCommand(gitRange)
+        return
+      }
       const nowRange = getInlineCommandRange(e.target.value, cursor, NOW_COMMAND)
       if (nowRange) {
         e.preventDefault()
@@ -2491,7 +2801,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               : 'text-zinc-500 hover:text-zinc-300 bg-transparent border-zinc-800 hover:border-zinc-600'
           }`}
         >
-          {nowInserted ? 'âœ“ inserted' : 'Now'}
+          {nowInserted ? 'inserted' : 'Now'}
         </button>
         <button
           onMouseDown={e => e.preventDefault()}
@@ -2602,6 +2912,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           >
             cloned
           </a>
+        )}
+        {linkedGitRepo && (
+          <span
+            title={[
+              `Linked repo: ${linkedGitRepo.displayName ?? linkedGitRepo.name ?? linkedGitRepo.id}`,
+              linkedGitRepo.branch ? `Branch: ${linkedGitRepo.branch}` : null,
+              linkedGitRepo.baseBranch ? `Base: ${linkedGitRepo.baseBranch}` : null,
+              linkedGitRepo.path ? `Path: ${linkedGitRepo.path}` : null,
+            ].filter(Boolean).join('\n')}
+            className="flex min-w-0 max-w-[18rem] items-center gap-1 px-2 py-1 text-[11px] rounded border border-sky-800/70 bg-sky-950/30 text-sky-200 font-mono"
+          >
+            <span className="text-sky-400 shrink-0">git</span>
+            <span className="truncate">{linkedGitRepo.displayName ?? linkedGitRepo.name ?? linkedGitRepo.id}</span>
+            {linkedGitRepo.branch && (
+              <span className="text-sky-500/80 truncate">({linkedGitRepo.branch})</span>
+            )}
+          </span>
         )}
         {isInPublicCollection && (
           <button
@@ -3023,7 +3350,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
             className="text-zinc-600 hover:text-zinc-300 transition-colors text-sm leading-none shrink-0"
             title="Cancel"
           >
-            âœ•
+            x
           </button>
         </div>
       )}
@@ -3100,10 +3427,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              onSelect={updateSel}
-              onMouseUp={updateSel}
-              onKeyUp={updateSel}
-              onClick={clearSelIfEmpty}
+              onSelect={handleEditorSelect}
+              onMouseUp={handleEditorSelect}
+              onKeyUp={handleEditorSelect}
+              onClick={handleEditorClick}
             />
           ) : (
           <>
@@ -3176,13 +3503,14 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                 onChange={openApiNote ? undefined : handleContent}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                onSelect={updateSel}
-                onMouseUp={updateSel}
-                onKeyUp={updateSel}
-                onClick={clearSelIfEmpty}
+                onSelect={handleEditorSelect}
+                onMouseUp={handleEditorSelect}
+                onKeyUp={handleEditorSelect}
+                onClick={handleEditorClick}
                 onScroll={e => {
                   if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
                   if (searchBackdropRef.current) searchBackdropRef.current.scrollTop = e.target.scrollTop
+                  updateEnterCommandHint(e.target, e.target.value)
                   reportCurrentLocation(e.target)
                 }}
                 placeholder={openApiNote ? 'OpenAPI document JSON' : tipsCreated ? 'Start typing...' : '/tips'}
@@ -3214,42 +3542,142 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                   </span>
                 </div>
               )}
-              {snippetPicker && (
+              {enterCommandHint && !gitPicker && !snippetPicker && (
                 <div
-                  className="absolute z-20 w-80 max-w-[calc(100%-32px)]"
+                  className="absolute z-10 pointer-events-none"
                   style={{
-                    top: `${Math.max(16, snippetPicker.top + 24)}px`,
-                    left: `${Math.max(16, snippetPicker.left)}px`,
+                    top: `${enterCommandHint.top + 24}px`,
+                    left: `${Math.max(16, enterCommandHint.left)}px`,
+                    maxWidth: 'calc(100% - 32px)',
+                  }}
+                >
+                  <span className="inline-flex items-center rounded border border-sky-900/70 bg-zinc-950/90 px-1.5 py-0.5 text-[10px] font-mono text-sky-400 shadow-lg shadow-black/30">
+                    {enterCommandHint.label}
+                  </span>
+                </div>
+              )}
+              {tabStops && (
+                <div className="absolute bottom-3 right-3 z-10 flex items-center gap-1 pointer-events-none">
+                  <span className="text-[10px] font-mono text-violet-400 bg-zinc-950/90 border border-violet-900/60 rounded px-1.5 py-0.5">
+                    Tab next · Shift+Tab back · Esc exit
+                  </span>
+                </div>
+              )}
+              {gitPicker && (
+                <div
+                  className="absolute z-20 w-[26rem] max-w-[calc(100%-32px)]"
+                  style={{
+                    top: `${Math.max(16, gitPicker.top + 24)}px`,
+                    left: `${Math.max(16, gitPicker.left)}px`,
                   }}
                 >
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/95 shadow-2xl shadow-black/40 overflow-hidden">
                     <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/80 flex items-center gap-2">
-                      <span className="text-[10px] text-zinc-600 font-mono">snippets</span>
-                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">!{snippetPicker.query}</span>
-                      {snippetSaved && <span className="ml-auto text-[10px] text-emerald-400 font-mono">saved</span>}
+                      <span className="text-[10px] text-sky-400 font-mono">git</span>
+                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">/git {gitPicker.query}</span>
+                      <span className="ml-auto text-[10px] text-zinc-700 font-mono">Enter accept</span>
                     </div>
                     <div className="max-h-72 overflow-auto">
-                      {snippetResults.length ? snippetResults.map((snippet, index) => (
+                      {gitSuggestions.length ? gitSuggestions.map((item, index) => (
                         <button
-                          key={snippet.id}
+                          key={`${item.kind}:${item.command}:${item.repo?.id ?? item.insertText}`}
                           onMouseDown={e => e.preventDefault()}
-                          onClick={() => insertSnippet(snippet)}
+                          onClick={() => insertGitSuggestion(item)}
                           className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
-                            index === snippetActiveIndex ? 'bg-zinc-800/80' : 'bg-transparent hover:bg-zinc-900/80'
+                            index === gitActiveIndex ? 'bg-sky-950/50' : 'bg-transparent hover:bg-zinc-900/80'
                           }`}
                         >
-                          <div className="text-[12px] text-zinc-200 font-mono truncate">{snippetLabel(snippet)}</div>
-                          <div className="text-[11px] text-zinc-500 note-content whitespace-pre-wrap line-clamp-2">
-                            {snippet.content}
+                          <div className="flex items-center gap-2">
+                            <span className="text-[12px] text-sky-300 font-mono shrink-0">{item.kind === 'repo' ? item.repo.id : `/git ${item.command}`}</span>
+                            <span className="text-[12px] text-zinc-300 truncate">{item.kind === 'repo' ? item.usage : item.detail}</span>
+                          </div>
+                          <div className="text-[11px] text-zinc-600 font-mono truncate mt-0.5">
+                            {item.kind === 'repo' ? item.detail : item.usage}
                           </div>
                         </button>
                       )) : (
-                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no snippets</div>
+                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no git suggestions</div>
                       )}
                     </div>
                   </div>
                 </div>
               )}
+              {snippetPicker && (() => {
+                const pickerItems = [
+                  ...templateResults.map((t, i) => ({ kind: 'template', template: t, globalIndex: i })),
+                  ...snippetResults.map((s, i) => ({ kind: 'snippet', snippet: s, globalIndex: templateResults.length + i })),
+                ]
+                const hasTemplates = templateResults.length > 0
+                const hasSnippets = snippetResults.length > 0
+                return (
+                  <div
+                    className="absolute z-20 w-80 max-w-[calc(100%-32px)]"
+                    style={{
+                      top: `${Math.max(16, snippetPicker.top + 24)}px`,
+                      left: `${Math.max(16, snippetPicker.left)}px`,
+                    }}
+                  >
+                    <div className="rounded-lg border border-zinc-700 bg-zinc-950/95 shadow-2xl shadow-black/40 overflow-hidden">
+                      <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/80 flex items-center gap-2">
+                        <span className="text-[10px] text-zinc-600 font-mono">{hasTemplates ? 'templates · snippets' : 'snippets'}</span>
+                        <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">!{snippetPicker.query}</span>
+                        {snippetSaved && <span className="ml-auto text-[10px] text-emerald-400 font-mono">saved</span>}
+                      </div>
+                      <div className="max-h-72 overflow-auto">
+                        {hasTemplates && (
+                          <>
+                            {templateResults.map((t, i) => (
+                              <button
+                                key={t.id}
+                                onMouseDown={e => e.preventDefault()}
+                                onClick={() => insertPickerItem({ kind: 'template', template: t })}
+                                className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                                  i === snippetActiveIndex ? 'bg-violet-950/60' : 'bg-transparent hover:bg-zinc-900/80'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] text-violet-400 font-mono shrink-0">!{t.command}</span>
+                                  <span className="text-[12px] text-zinc-200 truncate">{t.name}</span>
+                                  {t.builtin && <span className="text-[9px] text-zinc-700 font-mono ml-auto shrink-0">built-in</span>}
+                                </div>
+                                <div className="text-[11px] text-zinc-600 font-mono truncate mt-0.5">
+                                  {snippetPicker.query.includes(' ')
+                                    ? `args: "${parseTemplateQuery(snippetPicker.query).args}"`
+                                    : 'Tab through fields after expanding'}
+                                </div>
+                              </button>
+                            ))}
+                          </>
+                        )}
+                        {hasTemplates && hasSnippets && (
+                          <div className="px-3 py-1 text-[10px] text-zinc-700 font-mono border-b border-zinc-900/80 bg-zinc-900/30">snippets</div>
+                        )}
+                        {hasSnippets && snippetResults.map((snippet, i) => {
+                          const globalIdx = templateResults.length + i
+                          return (
+                            <button
+                              key={snippet.id}
+                              onMouseDown={e => e.preventDefault()}
+                              onClick={() => insertPickerItem({ kind: 'snippet', snippet })}
+                              className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                                globalIdx === snippetActiveIndex ? 'bg-zinc-800/80' : 'bg-transparent hover:bg-zinc-900/80'
+                              }`}
+                            >
+                              <div className="text-[12px] text-zinc-200 font-mono truncate">{snippetLabel(snippet)}</div>
+                              <div className="text-[11px] text-zinc-500 note-content whitespace-pre-wrap line-clamp-2">
+                                {snippet.content}
+                              </div>
+                            </button>
+                          )
+                        })}
+                        {!hasTemplates && !hasSnippets && (
+                          <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no results</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
               </div>
               {minimapEnabled && (
                 <NoteScrollMap
