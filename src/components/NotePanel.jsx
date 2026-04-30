@@ -57,6 +57,8 @@ import { escapeHtml } from '../utils/escapeHtml'
 import { useSnippetPicker } from '../hooks/useSnippetPicker'
 
 const CODE_LINE_HEIGHT = '1.6'
+const LARGE_NOTE_CHAR_THRESHOLD = 200_000
+const LARGE_NOTE_LINE_THRESHOLD = 5_000
 const HELP_COMMAND = '/tips'
 const HELP_NOTE_CONTENT = `jot.it quick start
 
@@ -89,6 +91,23 @@ Keep this note around as a reference, or delete it once the shortcuts feel famil
 
 
 let _scratchBlockIdx = 0
+
+function countLines(text) {
+  let count = 1
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) count += 1
+  }
+  return count
+}
+
+function scheduleIdleWork(callback) {
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(callback, { timeout: 1200 })
+    return () => window.cancelIdleCallback(id)
+  }
+  const id = window.setTimeout(callback, 80)
+  return () => window.clearTimeout(id)
+}
 
 const mdRenderer = new marked.Renderer()
 mdRenderer.code = ({ text, lang }) => {
@@ -311,6 +330,16 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [gitActiveIndex, setGitActiveIndex] = useState(0)
   const [knownGitRepos, setKnownGitRepos] = useState([])
   const [enterCommandHint, setEnterCommandHint] = useState(null)
+  const [lineNumberScrollTop, setLineNumberScrollTop] = useState(0)
+  const [lineNumberViewportHeight, setLineNumberViewportHeight] = useState(0)
+  const [idleSections, setIdleSections] = useState([])
+  const [idleSectionsReady, setIdleSectionsReady] = useState(false)
+  const [largeNoteFeatures, setLargeNoteFeatures] = useState({
+    overlays: false,
+    minimap: false,
+    detectors: false,
+    secretScan: false,
+  })
 
   const lineNumsRef = useRef(null)
   const findInputRef = useRef(null)
@@ -322,13 +351,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const inlineScrollRef = useRef(null)
   const markdownPreviewRef = useRef(null)
   const panelRef = useRef(null)
+  const deferredContentUpdateRef = useRef(null)
   const attachmentMap = useMemo(() => new Map(attachments.map(a => [a.id, a])), [attachments])
   const hasInlineImages = attachments.length > 0 && /\[img:\/\/[^\]]+\]/.test(content)
   const openApiNote = useMemo(() => isOpenApiNote(note), [note])
   const editorDisplayContent = openApiNote ? (note.noteData?.rawText ?? content) : content
   const helpCommandReady = !openApiNote && content.trim() === HELP_COMMAND
   const charCount = editorDisplayContent.length
-  const lineCount = editorDisplayContent.split('\n').length
+  const lineCount = useMemo(() => countLines(editorDisplayContent), [editorDisplayContent])
+  const largeNoteMode = charCount > LARGE_NOTE_CHAR_THRESHOLD || lineCount > LARGE_NOTE_LINE_THRESHOLD
   const {
     snippetPicker,
     setSnippetPicker,
@@ -360,7 +391,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setCodeAfter,
   } = useNoteMode({ onDiffModeChange })
 
-  const minimapEnabled = showMinimap && mode === 'edit' && !jsonSession && !hasInlineImages
+  const minimapEnabled = showMinimap && mode === 'edit' && !jsonSession && !hasInlineImages && (!largeNoteMode || largeNoteFeatures.minimap)
   const activeEditorRef = codeViewActive ? codeEditRef : textareaRef
   const scrollMap = useScrollMap(activeEditorRef, content, minimapEnabled)
   const reportCurrentLocation = useCallback((target = textareaRef.current) => {
@@ -412,6 +443,31 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     codeViewActive,
     setCodeContent,
   })
+
+  const flushDeferredContentUpdate = useCallback(() => {
+    const pending = deferredContentUpdateRef.current
+    if (!pending) return
+    clearTimeout(pending.timer)
+    deferredContentUpdateRef.current = null
+    onUpdate({ content: pending.content })
+  }, [onUpdate])
+
+  const scheduleContentUpdate = useCallback((nextContent) => {
+    const existing = deferredContentUpdateRef.current
+    if (existing) clearTimeout(existing.timer)
+    deferredContentUpdateRef.current = {
+      content: nextContent,
+      timer: setTimeout(() => {
+        const pending = deferredContentUpdateRef.current
+        deferredContentUpdateRef.current = null
+        if (pending) onUpdate({ content: pending.content })
+      }, largeNoteMode ? 700 : 180),
+    }
+  }, [largeNoteMode, onUpdate])
+
+  useEffect(() => {
+    return () => flushDeferredContentUpdate()
+  }, [flushDeferredContentUpdate])
 
   const gitSuggestions = useMemo(
     () => gitPicker ? getGitCommandSuggestions(gitPicker.query, knownGitRepos) : [],
@@ -496,7 +552,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20
     const targetTop = Math.max(0, (clampedLine - 1) * lineHeight - ta.clientHeight * 0.35)
     ta.scrollTop = targetTop
-    if (lineNumsRef.current) lineNumsRef.current.scrollTop = targetTop
+    setLineNumberScrollTop(targetTop)
     reportCurrentLocation(ta)
   }, [codeViewActive, content, lineCount, reportCurrentLocation])
 
@@ -574,7 +630,34 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [])
 
-  const sections = useMemo(() => parseSections(content), [content])
+  const immediateSections = useMemo(() => (
+    largeNoteMode ? [] : parseSections(content)
+  ), [content, largeNoteMode])
+  const sections = largeNoteMode ? idleSections : immediateSections
+
+  useEffect(() => {
+    if (!largeNoteMode) {
+      setIdleSections([])
+      setIdleSectionsReady(false)
+      return
+    }
+
+    setIdleSections([])
+    setIdleSectionsReady(false)
+    let cancelled = false
+    const cancelIdle = scheduleIdleWork(() => {
+      if (cancelled) return
+      const parsed = parseSections(content)
+      if (!cancelled) {
+        setIdleSections(parsed)
+        setIdleSectionsReady(true)
+      }
+    })
+    return () => {
+      cancelled = true
+      cancelIdle()
+    }
+  }, [content, largeNoteMode])
   const sqliteAssetRef = useMemo(() => extractSQLiteAssetRef(content), [content])
 
   const jumpToFindMatch = useCallback((targetIndex, results) => {
@@ -592,7 +675,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       const lineIndex = ta.value.slice(0, match.start).split('\n').length - 1
       const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
       ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight * 0.35)
-      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+      setLineNumberScrollTop(ta.scrollTop)
     }
 
     if (mode === 'markdown') {
@@ -611,6 +694,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
           ta.scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight * 0.35)
           if (codePreRef.current) codePreRef.current.scrollTop = ta.scrollTop
+          setLineNumberScrollTop(ta.scrollTop)
         })
       } else {
         setCodeViewActive(false)
@@ -805,6 +889,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
   useEffect(() => {
     setContent(note.content)
+    if (deferredContentUpdateRef.current) {
+      clearTimeout(deferredContentUpdateRef.current.timer)
+      deferredContentUpdateRef.current = null
+    }
     setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
     setGitPRData(null)
     setGitPRViewRef(note.noteData?.gitPRView ?? null)
@@ -828,6 +916,13 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setFindOpen(false)
     setFindQuery('')
     setFindMatchIndex(0)
+    setLineNumberScrollTop(0)
+    setLargeNoteFeatures({
+      overlays: false,
+      minimap: false,
+      detectors: false,
+      secretScan: false,
+    })
     setOutlineOpen(false)
     setOutlineQuery('')
     setOutlineIndex(0)
@@ -918,7 +1013,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         ta.selectionStart = cursorStart
         ta.selectionEnd = cursorEnd
         ta.scrollTop = scrollTop
-        if (lineNumsRef.current) lineNumsRef.current.scrollTop = scrollTop
+        setLineNumberScrollTop(scrollTop)
       }
     })
   }, [restoreLocation, note.id, mode])
@@ -929,7 +1024,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     if (!ta) return
 
     const syncLineNumbers = () => {
-      if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+      setLineNumberScrollTop(ta.scrollTop)
     }
 
     const handler = (e) => {
@@ -1005,6 +1100,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   // ── Selection tracking ──────────────────────────────────────────────────────
   // ── Undo / redo ─────────────────────────────────────────────────────────────
   const handlePaste = useCallback(async (e) => {
+    flushDeferredContentUpdate()
     const imageItem = [...(e.clipboardData?.items ?? [])].find(item => item.type.startsWith('image/'))
     if (!imageItem) return
 
@@ -1037,7 +1133,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     requestAnimationFrame(() => {
       if (ta) ta.selectionStart = ta.selectionEnd = insertAt + marker.length + 1 - segOff
     })
-  }, [content, hasInlineImages, note.id, onUpdate, pushHistoryNow])
+  }, [content, flushDeferredContentUpdate, hasInlineImages, note.id, onUpdate, pushHistoryNow])
 
   const handleDeleteAttachment = useCallback((id) => {
     deleteAttachment(id)
@@ -1850,7 +1946,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     const cursor = target.selectionStart ?? 0
     setPendingCalc(null)
     setContent(e.target.value)
-    onUpdate({ content: e.target.value })
+    scheduleContentUpdate(e.target.value)
     pushHistory(e.target.value)
     if (jsonSession) setJsonSession(null)
     updateEnterCommandHint(target, e.target.value)
@@ -1936,12 +2032,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     if (snippetPicker) closeSnippetPicker()
     if (gitPicker) closeGitPicker()
     setContent(newContent)
-    onUpdate({ content: newContent })
+    scheduleContentUpdate(newContent)
     pushHistory(newContent)
     if (jsonSession) setJsonSession(null)
-  }, [onUpdate, pushHistory, closeSnippetPicker, closeGitPicker, snippetPicker, gitPicker, jsonSession])
+  }, [scheduleContentUpdate, pushHistory, closeSnippetPicker, closeGitPicker, snippetPicker, gitPicker, jsonSession])
 
   const handleKeyDown = (e) => {
+    if (e.ctrlKey || e.metaKey || e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab') {
+      flushDeferredContentUpdate()
+    }
     // Tab stop cycling (active when a template was just expanded)
     if (tabStops && !snippetPicker) {
       if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -2213,14 +2312,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }
 
   const syncCodeScroll = (e) => {
+    setLineNumberViewportHeight(e.target.clientHeight)
     if (codePreRef.current) {
       codePreRef.current.scrollTop = e.target.scrollTop
       codePreRef.current.scrollLeft = e.target.scrollLeft
     }
-    if (showLineNumbers && lineNumsRef.current) {
-      lineNumsRef.current.scrollTop = e.target.scrollTop
-    }
+    setLineNumberScrollTop(e.target.scrollTop)
   }
+
+  useEffect(() => {
+    const target = activeEditorRef.current
+    if (!target) return
+    setLineNumberScrollTop(target.scrollTop ?? 0)
+    setLineNumberViewportHeight(target.clientHeight ?? 0)
+  }, [activeEditorRef, codeViewActive, mode, showLineNumbers])
 
   const copyToClipboard = async () => {
     await navigator.clipboard.writeText(content)
@@ -2347,9 +2452,24 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
   const codeDisplayContent = collapsedCodeView.text
   const codeViewReadOnly = codeViewActive && collapsedCodeView.foldedSymbols.length > 0
-  const displayedLineNumbers = useMemo(() => (
-    codeViewActive ? collapsedCodeView.visibleLineNumbers : Array.from({ length: lineCount }, (_, index) => index + 1)
-  ), [codeViewActive, collapsedCodeView.visibleLineNumbers, lineCount])
+  const displayedLineNumbers = codeViewActive ? collapsedCodeView.visibleLineNumbers : null
+  const lineNumberCount = displayedLineNumbers?.length ?? lineCount
+  const lineNumberRowHeight = 20.8
+  const lineNumberVirtualItems = useMemo(() => {
+    const overscan = 24
+    const viewportRows = Math.ceil((lineNumberViewportHeight || 1) / lineNumberRowHeight)
+    const first = Math.max(0, Math.floor(lineNumberScrollTop / lineNumberRowHeight) - overscan)
+    const last = Math.min(lineNumberCount - 1, first + viewportRows + overscan * 2)
+    const items = []
+    for (let index = first; index <= last; index++) {
+      items.push({
+        index,
+        lineNumber: displayedLineNumbers?.[index] ?? index + 1,
+        start: index * lineNumberRowHeight,
+      })
+    }
+    return items
+  }, [displayedLineNumbers, lineNumberCount, lineNumberScrollTop, lineNumberViewportHeight])
   const codeSymbolsByStartLine = useMemo(() => new Map(
     codeSymbols.map(symbol => [symbol.startLine, symbol])
   ), [codeSymbols])
@@ -2396,6 +2516,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [codeDisplayContent, codeLanguage, codeViewActive])
 
   const markdownHtml = useMemo(() => {
+    if (mode !== 'markdown') return ''
     if (!content.trim()) return ''
     try {
       _scratchBlockIdx = 0
@@ -2413,7 +2534,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     } catch {
       return ''
     }
-  }, [content, sections])
+  }, [content, mode, sections])
 
   // Derived scope/term from the raw query (supports "in:code <term>" / "in:text <term>")
   const findParsed = useMemo(() => parseSearchScope(findQuery), [findQuery])
@@ -2452,7 +2573,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         ta.setSelectionRange(ns, ne)
         const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
         ta.scrollTop = Math.max(0, ta.value.slice(0, ns).split('\n').length * lineHeight - ta.clientHeight * 0.35)
-        if (lineNumsRef.current) lineNumsRef.current.scrollTop = ta.scrollTop
+        setLineNumberScrollTop(ta.scrollTop)
       })
     }
   }, [findResults, findMatchIndex, replaceQuery, findMode, findParsed, content, onUpdate])
@@ -2550,6 +2671,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [displayMarkdownHtml])
 
   const searchHighlightHtml = useMemo(() => {
+    if (largeNoteMode && !largeNoteFeatures.overlays) return null
     if (!searchQuery || findOpen) return null
     const matches = findMatches(editorDisplayContent, searchQuery, 'exact')
     if (!matches.length) return null
@@ -2562,10 +2684,11 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     html += escapeHtml(editorDisplayContent.slice(last))
     return html
-  }, [searchQuery, editorDisplayContent, findOpen])
+  }, [searchQuery, editorDisplayContent, findOpen, largeNoteFeatures.overlays, largeNoteMode])
 
   const findHighlightHtml = useMemo(() => {
     if (!findOpen || !findResults.length) return null
+    if (largeNoteMode && !largeNoteFeatures.overlays && findResults.length > 200) return null
     let html = ''
     let last = 0
     for (let i = 0; i < findResults.length; i++) {
@@ -2577,9 +2700,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     html += escapeHtml(editorDisplayContent.slice(last))
     return html
-  }, [findOpen, findResults, findMatchIndex, editorDisplayContent])
+  }, [findOpen, findResults, findMatchIndex, editorDisplayContent, largeNoteFeatures.overlays, largeNoteMode])
 
   const selMatchData = useMemo(() => {
+    if (largeNoteMode && !largeNoteFeatures.overlays) return null
     const term = sel.text
     if (findOpen || !term || term.length < 2 || term.includes('\n') || /^\s+$/.test(term)) return null
     const matches = []
@@ -2600,7 +2724,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     html += escapeHtml(editorDisplayContent.slice(last))
     return { html, count: matches.length }
-  }, [sel.text, editorDisplayContent, findOpen])
+  }, [sel.text, editorDisplayContent, findOpen, largeNoteFeatures.overlays, largeNoteMode])
 
   const sectionMatches = useMemo(() => {
     if (!findOpen || !findResults.length) return []
@@ -2608,21 +2732,25 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [findOpen, findResults, sections, content])
 
   const looksLikeRequest = useMemo(() => {
+    if (largeNoteMode && !largeNoteFeatures.detectors) return false
     return detectRequestType(content) !== null
-  }, [content])
+  }, [content, largeNoteFeatures.detectors, largeNoteMode])
 
-  const looksLikeShell = useMemo(() => hasShellBlocks(content), [content])
+  const looksLikeShell = useMemo(() => (
+    largeNoteMode && !largeNoteFeatures.detectors ? false : hasShellBlocks(content)
+  ), [content, largeNoteFeatures.detectors, largeNoteMode])
 
   const looksLikeTable = useMemo(() => {
+    if (largeNoteMode && !largeNoteFeatures.detectors) return false
     const ta = textareaRef.current
     const selected = ta && ta.selectionStart !== ta.selectionEnd
       ? content.slice(ta.selectionStart, ta.selectionEnd)
       : content
     const fenceMatch = selected.match(/^```csv\s*\n([\s\S]*?)\n```\s*$/)
     return fenceMatch ? looksLikeCsvTable(fenceMatch[1]) : looksLikeCsvTable(selected)
-  }, [content, sel.text])
+  }, [content, largeNoteFeatures.detectors, largeNoteMode, sel.text])
 
-  const jsonValid = isValidJson(content)
+  const jsonValid = (!largeNoteMode || largeNoteFeatures.detectors) && isValidJson(content)
   const selectedJsonValid = isValidJson(sel.text)
   const hasSelection = sel.text.length > 0
 
@@ -3537,7 +3665,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         </div>
       )}
 
-      {secretScanEnabled && (
+      {secretScanEnabled && (!largeNoteMode || largeNoteFeatures.secretScan) && (
         <SecretAlert
           content={content}
           clearedHash={note.secretsClearedHash ?? null}
@@ -3546,6 +3674,65 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       )}
 
       {/* ── Content area ── */}
+      {largeNoteMode && mode === 'edit' && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/70 shrink-0">
+          <span className="text-[10px] font-mono text-amber-400">large note mode</span>
+          <span className="text-[10px] font-mono text-zinc-600">
+            outline {idleSectionsReady ? 'ready' : 'loading during idle'} - visual overlays limited
+          </span>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => setLargeNoteFeatures(prev => ({ ...prev, overlays: !prev.overlays }))}
+            className={`ml-auto px-2 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+              largeNoteFeatures.overlays
+                ? 'text-amber-200 bg-amber-900/40 border-amber-700'
+                : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600'
+            }`}
+            title="Toggle full search and selection highlight overlays for this large note"
+          >
+            overlays {largeNoteFeatures.overlays ? 'on' : 'off'}
+          </button>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => setLargeNoteFeatures(prev => ({ ...prev, minimap: !prev.minimap }))}
+            className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+              largeNoteFeatures.minimap
+                ? 'text-amber-200 bg-amber-900/40 border-amber-700'
+                : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600'
+            }`}
+            title="Toggle scroll map/minimap for this large note"
+          >
+            minimap {largeNoteFeatures.minimap ? 'on' : 'off'}
+          </button>
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => setLargeNoteFeatures(prev => ({ ...prev, detectors: !prev.detectors }))}
+            className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+              largeNoteFeatures.detectors
+                ? 'text-amber-200 bg-amber-900/40 border-amber-700'
+                : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600'
+            }`}
+            title="Toggle JSON/table/HTTP/shell detection for this large note"
+          >
+            detectors {largeNoteFeatures.detectors ? 'on' : 'off'}
+          </button>
+          {secretScanEnabled && (
+            <button
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => setLargeNoteFeatures(prev => ({ ...prev, secretScan: !prev.secretScan }))}
+              className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+                largeNoteFeatures.secretScan
+                  ? 'text-amber-200 bg-amber-900/40 border-amber-700'
+                  : 'text-zinc-500 hover:text-zinc-300 border-zinc-800 hover:border-zinc-600'
+              }`}
+              title="Toggle secret scanning for this large note"
+            >
+              secrets {largeNoteFeatures.secretScan ? 'on' : 'off'}
+            </button>
+          )}
+        </div>
+      )}
+
       {mode === 'edit' && (
         <div className="flex flex-1 overflow-hidden">
           {hasInlineImages && !jsonSession && !codeViewActive ? (
@@ -3572,7 +3759,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           {showLineNumbers && (
             <div
               ref={lineNumsRef}
-              className="select-none shrink-0 overflow-y-hidden pt-4 pb-4 pr-3 pl-2 text-right border-r border-zinc-800/60"
+              className="select-none shrink-0 overflow-hidden pr-3 pl-2 text-right border-r border-zinc-800/60 relative"
               style={{
                 fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace",
                 fontSize: '13px',
@@ -3581,26 +3768,40 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                 width: `${Math.max(String(lineCount).length + (codeViewActive && isCodeOutlineLanguage(codeLanguage) ? 6 : 2), 4)}ch`,
               }}
             >
-              {displayedLineNumbers.map((lineNumber) => {
-                const sourceIndex = lineNumber - 1
-                const symbol = codeViewActive ? codeSymbolsByStartLine.get(sourceIndex) : null
-                const isCollapsed = symbol ? !!codeCollapsedIds[symbol.id] : false
-                return (
-                  <div key={lineNumber} className="flex items-center justify-end gap-1" style={{ lineHeight: CODE_LINE_HEIGHT }}>
-                    {symbol && (
-                      <button
-                        onMouseDown={e => e.preventDefault()}
-                        onClick={() => toggleCodeSymbolFold(symbol.id)}
-                        title={`${isCollapsed ? 'Unfold' : 'Fold'} ${symbol.kind} ${symbol.label}`}
-                        className="inline-flex h-4 w-4 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-[10px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-200"
-                      >
-                        {isCollapsed ? '+' : '-'}
-                      </button>
-                    )}
-                    <span>{lineNumber}</span>
-                  </div>
-                )
-              })}
+              <div
+                className="relative"
+                style={{ height: `${lineNumberCount * lineNumberRowHeight + 32}px` }}
+              >
+                {lineNumberVirtualItems.map(item => {
+                  const lineNumber = item.lineNumber
+                  const sourceIndex = lineNumber - 1
+                  const symbol = codeViewActive ? codeSymbolsByStartLine.get(sourceIndex) : null
+                  const isCollapsed = symbol ? !!codeCollapsedIds[symbol.id] : false
+                  return (
+                    <div
+                      key={`${item.index}:${lineNumber}`}
+                      className="absolute left-0 right-0 flex items-center justify-end gap-1"
+                      style={{
+                        height: `${lineNumberRowHeight}px`,
+                        lineHeight: CODE_LINE_HEIGHT,
+                        transform: `translateY(${16 + item.start - lineNumberScrollTop}px)`,
+                      }}
+                    >
+                      {symbol && (
+                        <button
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => toggleCodeSymbolFold(symbol.id)}
+                          title={`${isCollapsed ? 'Unfold' : 'Fold'} ${symbol.kind} ${symbol.label}`}
+                          className="inline-flex h-4 w-4 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-[10px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-200"
+                        >
+                          {isCollapsed ? '+' : '-'}
+                        </button>
+                      )}
+                      <span>{lineNumber}</span>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )}
           {!codeViewActive ? (
@@ -3643,7 +3844,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                 onKeyUp={handleEditorSelect}
                 onClick={handleEditorClick}
                 onScroll={e => {
-                  if (showLineNumbers && lineNumsRef.current) lineNumsRef.current.scrollTop = e.target.scrollTop
+                  setLineNumberViewportHeight(e.target.clientHeight)
+                  setLineNumberScrollTop(e.target.scrollTop)
                   if (searchBackdropRef.current) searchBackdropRef.current.scrollTop = e.target.scrollTop
                   updateEnterCommandHint(e.target, e.target.value)
                   reportCurrentLocation(e.target)

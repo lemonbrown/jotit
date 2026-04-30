@@ -1,7 +1,6 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { parseDiff, parseNumstat } from '../utils/parseDiff'
-
-// ── Primitives ────────────────────────────────────────────────────────────────
 
 function TabBtn({ active, onClick, children }) {
   return (
@@ -32,8 +31,6 @@ function Pill({ children, color = 'zinc' }) {
   )
 }
 
-// ── Commits tab ───────────────────────────────────────────────────────────────
-
 function CommitsTab({ log }) {
   const commits = useMemo(() =>
     String(log ?? '').split('\n').filter(Boolean).map(line => {
@@ -48,7 +45,7 @@ function CommitsTab({ log }) {
   }
 
   return (
-    <div className="divide-y divide-zinc-800/60">
+    <div className="h-full overflow-auto divide-y divide-zinc-800/60">
       {commits.map((c, i) => (
         <div key={i} className="flex items-baseline gap-3 px-5 py-2.5 hover:bg-zinc-900/40">
           <span className="font-mono text-[11px] text-blue-400 shrink-0 select-all">{c.hash}</span>
@@ -59,13 +56,11 @@ function CommitsTab({ log }) {
   )
 }
 
-// ── Files tab ─────────────────────────────────────────────────────────────────
-
 function FilesTab({ fileStats, parsedFiles, onFileClick }) {
   const files = useMemo(() => {
     if (fileStats.length) return fileStats
     return parsedFiles.map(f => ({
-      path: f.toPath || f.fromPath,
+      path: getFilePath(f),
       additions: f.hunks.reduce((s, h) => s + h.lines.filter(l => l.type === 'add').length, 0),
       deletions: f.hunks.reduce((s, h) => s + h.lines.filter(l => l.type === 'del').length, 0),
       isBinary: f.isBinary,
@@ -82,7 +77,7 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
   }
 
   return (
-    <div className="divide-y divide-zinc-800/60">
+    <div className="h-full overflow-auto divide-y divide-zinc-800/60">
       {files.map((f, i) => {
         const adds = f.additions ?? 0
         const dels = f.deletions ?? 0
@@ -92,7 +87,7 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
 
         return (
           <button
-            key={i}
+            key={`${f.path}:${i}`}
             onClick={() => onFileClick(f.path)}
             className="w-full flex items-center gap-3 px-5 py-2 hover:bg-zinc-900/50 transition-colors text-left"
           >
@@ -109,8 +104,8 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
                       key={j}
                       className={`w-2 h-3 rounded-sm ${
                         j < addBlocks ? 'bg-emerald-500' :
-                        j < filled   ? 'bg-red-500' :
-                                       'bg-zinc-700'
+                        j < filled ? 'bg-red-500' :
+                        'bg-zinc-700'
                       }`}
                     />
                   ))}
@@ -124,143 +119,194 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
   )
 }
 
-// ── Diff tab ──────────────────────────────────────────────────────────────────
+function getFilePath(file) {
+  return file.toPath || file.fromPath || '(unknown file)'
+}
 
-function DiffHunk({ hunk }) {
+function getFileCounts(file) {
+  return file.hunks.reduce((counts, hunk) => {
+    for (const line of hunk.lines) {
+      if (line.type === 'add') counts.additions += 1
+      if (line.type === 'del') counts.deletions += 1
+    }
+    return counts
+  }, { additions: 0, deletions: 0 })
+}
+
+function buildDiffRows(files, expandedPaths) {
+  const rows = []
+  for (const file of files) {
+    const path = getFilePath(file)
+    const expanded = expandedPaths.has(path)
+    rows.push({ type: 'file', key: `file:${path}`, file, path, expanded, ...getFileCounts(file) })
+
+    if (!expanded) continue
+    if (file.isBinary) {
+      rows.push({ type: 'message', key: `binary:${path}`, text: 'Binary file - not shown.' })
+      continue
+    }
+    if (!file.hunks.length) {
+      rows.push({ type: 'message', key: `empty:${path}`, text: 'No textual diff.' })
+      continue
+    }
+
+    file.hunks.forEach((hunk, hunkIndex) => {
+      rows.push({ type: 'hunk', key: `hunk:${path}:${hunkIndex}`, hunk })
+      hunk.lines.forEach((line, lineIndex) => {
+        rows.push({ type: 'line', key: `line:${path}:${hunkIndex}:${lineIndex}`, line })
+      })
+    })
+  }
+  return rows
+}
+
+function DiffLineRow({ line }) {
+  const isAdd = line.type === 'add'
+  const isDel = line.type === 'del'
+  const isNoeol = line.type === 'noeol'
   return (
-    <div>
-      <div className="px-4 py-1 bg-blue-950/25 border-y border-blue-900/30 font-mono text-[11px] text-blue-400/60 flex gap-2 overflow-x-auto">
-        <span className="shrink-0">{hunk.header}</span>
-        {hunk.context && <span className="text-zinc-600 truncate">{hunk.context}</span>}
+    <div className={`grid grid-cols-[40px_40px_20px_minmax(max-content,1fr)] min-w-max ${
+      isAdd ? 'bg-emerald-950/40 hover:bg-emerald-950/60' :
+      isDel ? 'bg-red-950/40 hover:bg-red-950/60' :
+      'hover:bg-zinc-800/30'
+    }`}>
+      <div className="px-2 text-right font-mono text-[10px] text-zinc-600 select-none border-r border-zinc-800/80 bg-zinc-950/50 leading-5">
+        {line.oldLine ?? ''}
       </div>
-      <table className="w-full border-collapse">
-        <tbody>
-          {hunk.lines.map((line, i) => {
-            const isAdd  = line.type === 'add'
-            const isDel  = line.type === 'del'
-            const isNoeol = line.type === 'noeol'
-            return (
-              <tr
-                key={i}
-                className={
-                  isAdd  ? 'bg-emerald-950/40 hover:bg-emerald-950/60' :
-                  isDel  ? 'bg-red-950/40 hover:bg-red-950/60' :
-                           'hover:bg-zinc-800/30'
-                }
-              >
-                <td className="w-10 px-2 text-right font-mono text-[10px] text-zinc-600 select-none border-r border-zinc-800/80 bg-zinc-950/50 leading-5">
-                  {line.oldLine ?? ''}
-                </td>
-                <td className="w-10 px-2 text-right font-mono text-[10px] text-zinc-600 select-none border-r border-zinc-800/80 bg-zinc-950/50 leading-5">
-                  {line.newLine ?? ''}
-                </td>
-                <td className={`w-5 text-center font-mono text-[11px] select-none leading-5 ${
-                  isAdd ? 'text-emerald-400' : isDel ? 'text-red-400' : 'text-zinc-700'
-                }`}>
-                  {isAdd ? '+' : isDel ? '-' : isNoeol ? '\\' : ' '}
-                </td>
-                <td className={`px-2 py-0 font-mono text-xs whitespace-pre leading-5 ${
-                  isAdd   ? 'text-emerald-200' :
-                  isDel   ? 'text-red-300' :
-                  isNoeol ? 'text-zinc-500 italic text-[10px]' :
-                            'text-zinc-400'
-                }`}>
-                  {isNoeol ? '\ No newline at end of file' : line.content}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      <div className="px-2 text-right font-mono text-[10px] text-zinc-600 select-none border-r border-zinc-800/80 bg-zinc-950/50 leading-5">
+        {line.newLine ?? ''}
+      </div>
+      <div className={`text-center font-mono text-[11px] select-none leading-5 ${
+        isAdd ? 'text-emerald-400' : isDel ? 'text-red-400' : 'text-zinc-700'
+      }`}>
+        {isAdd ? '+' : isDel ? '-' : isNoeol ? '\\' : ' '}
+      </div>
+      <div className={`px-2 py-0 font-mono text-xs whitespace-pre leading-5 ${
+        isAdd ? 'text-emerald-200' :
+        isDel ? 'text-red-300' :
+        isNoeol ? 'text-zinc-500 italic text-[10px]' :
+        'text-zinc-400'
+      }`}>
+        {isNoeol ? '\\ No newline at end of file' : line.content}
+      </div>
     </div>
   )
 }
 
-function DiffFile({ file, fileRef, defaultExpanded }) {
-  const [expanded, setExpanded] = useState(defaultExpanded)
-  const path = file.toPath || file.fromPath
-  const addCount = useMemo(() =>
-    file.hunks.reduce((s, h) => s + h.lines.filter(l => l.type === 'add').length, 0),
-    [file.hunks]
-  )
-  const delCount = useMemo(() =>
-    file.hunks.reduce((s, h) => s + h.lines.filter(l => l.type === 'del').length, 0),
-    [file.hunks]
-  )
-
-  return (
-    <div ref={fileRef} className="border border-zinc-800 rounded-lg overflow-hidden mb-3">
+function DiffRow({ row, onToggleFile }) {
+  if (row.type === 'file') {
+    return (
       <button
-        onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-zinc-800/50 hover:bg-zinc-800/80 transition-colors text-left"
+        onClick={() => onToggleFile(row.path)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-zinc-800/50 hover:bg-zinc-800/80 transition-colors text-left border-y border-zinc-800"
       >
-        <span className="text-zinc-500 text-[10px] select-none">{expanded ? '▾' : '▸'}</span>
-        <span className="flex-1 font-mono text-xs text-zinc-200 truncate min-w-0">{path}</span>
-        {file.isNew     && <Pill color="green">new</Pill>}
-        {file.isDeleted && <Pill color="red">deleted</Pill>}
-        {file.isBinary  && <Pill>binary</Pill>}
-        {!file.isBinary && (
+        <span className="text-zinc-500 text-[10px] select-none">{row.expanded ? 'v' : '>'}</span>
+        <span className="flex-1 font-mono text-xs text-zinc-200 truncate min-w-0">{row.path}</span>
+        {row.file.isNew && <Pill color="green">new</Pill>}
+        {row.file.isDeleted && <Pill color="red">deleted</Pill>}
+        {row.file.isBinary && <Pill>binary</Pill>}
+        {!row.file.isBinary && (
           <span className="font-mono text-[11px] shrink-0">
-            <span className="text-emerald-400">+{addCount}</span>
+            <span className="text-emerald-400">+{row.additions}</span>
             <span className="text-zinc-600 mx-1">/</span>
-            <span className="text-red-400">-{delCount}</span>
+            <span className="text-red-400">-{row.deletions}</span>
           </span>
         )}
       </button>
-      {expanded && (
-        <div className="overflow-x-auto border-t border-zinc-800/60">
-          {file.isBinary ? (
-            <p className="px-4 py-3 font-mono text-xs text-zinc-500">Binary file — not shown.</p>
-          ) : file.hunks.length === 0 ? (
-            <p className="px-4 py-3 font-mono text-xs text-zinc-500">No textual diff.</p>
-          ) : (
-            file.hunks.map((hunk, i) => <DiffHunk key={i} hunk={hunk} />)
-          )}
-        </div>
-      )}
-    </div>
-  )
+    )
+  }
+
+  if (row.type === 'hunk') {
+    return (
+      <div className="px-4 py-1 bg-blue-950/25 border-y border-blue-900/30 font-mono text-[11px] text-blue-400/60 flex gap-2 min-w-max">
+        <span className="shrink-0">{row.hunk.header}</span>
+        {row.hunk.context && <span className="text-zinc-600">{row.hunk.context}</span>}
+      </div>
+    )
+  }
+
+  if (row.type === 'message') {
+    return <div className="px-4 py-3 font-mono text-xs text-zinc-500 min-w-max">{row.text}</div>
+  }
+
+  return <DiffLineRow line={row.line} />
 }
 
 function DiffTab({ files, scrollToPath, onScrolled }) {
-  const fileEls = useRef({})
-  const totalLines = useMemo(() =>
-    files.reduce((s, f) => s + f.hunks.reduce((hs, h) => hs + h.lines.length, 0), 0),
-    [files]
-  )
-  const defaultExpanded = totalLines <= 500
+  const scrollRef = useRef(null)
+  const [expandedPaths, setExpandedPaths] = useState(() => new Set(files.map(getFilePath)))
+
+  useEffect(() => {
+    setExpandedPaths(new Set(files.map(getFilePath)))
+  }, [files])
+
+  const rows = useMemo(() => buildDiffRows(files, expandedPaths), [expandedPaths, files])
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: index => {
+      const row = rows[index]
+      if (row?.type === 'file') return 37
+      if (row?.type === 'hunk') return 26
+      if (row?.type === 'message') return 42
+      return 20
+    },
+    overscan: 24,
+  })
 
   useEffect(() => {
     if (!scrollToPath) return
-    const el = fileEls.current[scrollToPath]
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setExpandedPaths(prev => {
+      if (prev.has(scrollToPath)) return prev
+      const next = new Set(prev)
+      next.add(scrollToPath)
+      return next
+    })
+  }, [scrollToPath])
+
+  useEffect(() => {
+    if (!scrollToPath) return
+    const index = rows.findIndex(row => row.type === 'file' && row.path === scrollToPath)
+    if (index !== -1) {
+      virtualizer.scrollToIndex(index, { align: 'start' })
       onScrolled()
     }
-  }, [scrollToPath, onScrolled])
+  }, [onScrolled, rows, scrollToPath, virtualizer])
+
+  const toggleFile = useCallback((path) => {
+    setExpandedPaths(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }, [])
 
   if (!files.length) {
     return <p className="px-5 py-6 text-sm text-zinc-500">No diff available.</p>
   }
 
   return (
-    <div className="py-3 px-3">
-      {files.map((file, i) => {
-        const path = file.toPath || file.fromPath
-        return (
-          <DiffFile
-            key={path || i}
-            file={file}
-            fileRef={el => { fileEls.current[path] = el }}
-            defaultExpanded={defaultExpanded}
-          />
-        )
-      })}
+    <div ref={scrollRef} className="h-full overflow-auto">
+      <div className="relative min-w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map(item => {
+          const row = rows[item.index]
+          return (
+            <div
+              key={row.key}
+              ref={virtualizer.measureElement}
+              data-index={item.index}
+              className="absolute left-0 top-0 w-full"
+              style={{ transform: `translateY(${item.start}px)` }}
+            >
+              <DiffRow row={row} onToggleFile={toggleFile} />
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
-
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 export default function GitPRView({ prData, onClose }) {
   const [tab, setTab] = useState('files')
@@ -270,10 +316,10 @@ export default function GitPRView({ prData, onClose }) {
   const repoName = repo?.displayName ?? repo?.name ?? ''
 
   const parsedFiles = useMemo(() => parseDiff(diffRaw ?? ''), [diffRaw])
-  const fileStats   = useMemo(() => parseNumstat(numstatRaw ?? ''), [numstatRaw])
+  const fileStats = useMemo(() => parseNumstat(numstatRaw ?? ''), [numstatRaw])
 
   const commitCount = String(log ?? '').split('\n').filter(Boolean).length
-  const fileCount   = fileStats.length || parsedFiles.length
+  const fileCount = fileStats.length || parsedFiles.length
 
   const jumpToFile = useCallback((path) => {
     setTab('diff')
@@ -282,11 +328,10 @@ export default function GitPRView({ prData, onClose }) {
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 overflow-hidden">
-      {/* Header */}
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900 shrink-0">
         <span className="font-mono text-[11px] text-zinc-500 shrink-0">PR #{prNumber}</span>
         <span className="text-sm font-medium text-zinc-200 truncate">{repoName}</span>
-        <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">← {base}</span>
+        <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">&lt;- {base}</span>
         <button
           onClick={onClose}
           aria-label="Close PR view"
@@ -298,7 +343,6 @@ export default function GitPRView({ prData, onClose }) {
         </button>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-zinc-800 bg-zinc-900/60 shrink-0 overflow-x-auto">
         <TabBtn active={tab === 'commits'} onClick={() => setTab('commits')}>
           Commits{' '}
@@ -317,8 +361,7 @@ export default function GitPRView({ prData, onClose }) {
         </TabBtn>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-h-0">
         {tab === 'commits' && <CommitsTab log={log} />}
         {tab === 'files' && (
           <FilesTab
