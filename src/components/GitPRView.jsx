@@ -312,14 +312,21 @@ export default function GitPRView({ prData, onClose }) {
   const [tab, setTab] = useState('files')
   const [scrollToPath, setScrollToPath] = useState(null)
 
-  const { prNumber, base, log, numstat: numstatRaw, diff: diffRaw, repo } = prData
+  const { prNumber, base, log, numstat: numstatRaw, diff: diffRaw, repo, viewType } = prData
   const repoName = repo?.displayName ?? repo?.name ?? ''
+  const isPR = viewType !== 'diff'
+  const headerLabel = isPR ? `PR #${prNumber}` : 'Git diff'
+  const baseLabel = isPR ? base : (repo?.branch ? `working tree on ${repo.branch}` : 'working tree')
 
   const parsedFiles = useMemo(() => parseDiff(diffRaw ?? ''), [diffRaw])
   const fileStats = useMemo(() => parseNumstat(numstatRaw ?? ''), [numstatRaw])
 
   const commitCount = String(log ?? '').split('\n').filter(Boolean).length
   const fileCount = fileStats.length || parsedFiles.length
+
+  useEffect(() => {
+    if (!isPR && tab === 'commits') setTab('files')
+  }, [isPR, tab])
 
   const jumpToFile = useCallback((path) => {
     setTab('diff')
@@ -329,12 +336,12 @@ export default function GitPRView({ prData, onClose }) {
   return (
     <div className="h-full flex flex-col bg-zinc-950 overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900 shrink-0">
-        <span className="font-mono text-[11px] text-zinc-500 shrink-0">PR #{prNumber}</span>
+        <span className="font-mono text-[11px] text-zinc-500 shrink-0">{headerLabel}</span>
         <span className="text-sm font-medium text-zinc-200 truncate">{repoName}</span>
-        <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">&lt;- {base}</span>
+        {baseLabel && <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">{isPR ? '<- ' : ''}{baseLabel}</span>}
         <button
           onClick={onClose}
-          aria-label="Close PR view"
+          aria-label={isPR ? 'Close PR view' : 'Close git diff view'}
           className="ml-auto shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors p-0.5"
         >
           <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
@@ -344,12 +351,14 @@ export default function GitPRView({ prData, onClose }) {
       </div>
 
       <div className="flex border-b border-zinc-800 bg-zinc-900/60 shrink-0 overflow-x-auto">
-        <TabBtn active={tab === 'commits'} onClick={() => setTab('commits')}>
-          Commits{' '}
-          <span className="ml-1 px-1.5 py-px rounded bg-zinc-700 text-zinc-400 text-[10px]">
-            {commitCount}
-          </span>
-        </TabBtn>
+        {isPR && (
+          <TabBtn active={tab === 'commits'} onClick={() => setTab('commits')}>
+            Commits{' '}
+            <span className="ml-1 px-1.5 py-px rounded bg-zinc-700 text-zinc-400 text-[10px]">
+              {commitCount}
+            </span>
+          </TabBtn>
+        )}
         <TabBtn active={tab === 'files'} onClick={() => setTab('files')}>
           Files{' '}
           <span className="ml-1 px-1.5 py-px rounded bg-zinc-700 text-zinc-400 text-[10px]">
@@ -362,7 +371,7 @@ export default function GitPRView({ prData, onClose }) {
       </div>
 
       <div className="flex-1 min-h-0">
-        {tab === 'commits' && <CommitsTab log={log} />}
+        {isPR && tab === 'commits' && <CommitsTab log={log} />}
         {tab === 'files' && (
           <FilesTab
             fileStats={fileStats}

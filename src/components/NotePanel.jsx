@@ -1568,11 +1568,15 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       setMode('gitpr')
       const requestId = ++gitPRLoadRequestRef.current
       const repoId = gitPRViewRef.repoId || await resolveGitRepoId('')
-      const data = await getGitPR(repoId, gitPRViewRef.prNumber, gitPRViewRef.base, agentToken)
+      const data = gitPRViewRef.viewType === 'diff'
+        ? await getGitDiff(repoId, agentToken)
+        : await getGitPR(repoId, gitPRViewRef.prNumber, gitPRViewRef.base, agentToken)
       if (requestId !== gitPRLoadRequestRef.current) return
-      setGitPRData(data)
+      const viewType = gitPRViewRef.viewType === 'diff' ? 'diff' : 'pr'
+      setGitPRData({ ...data, viewType })
       setGitPRViewRef({
         repoId,
+        viewType,
         prNumber: data.prNumber,
         base: data.base,
         repoName: data.repo?.displayName ?? data.repo?.name ?? repoId,
@@ -1670,9 +1674,23 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       if (parsed.command === 'diff') {
         const repoId = await resolveGitRepoId(parsed.repoId)
         const data = await getGitDiff(repoId, agentToken)
+        const repoName = data.repo.displayName ?? data.repo.name ?? repoId
+        const gitPRView = {
+          repoId,
+          viewType: 'diff',
+          repoName,
+          updatedAt: Date.now(),
+        }
+        const noteData = note.noteData && typeof note.noteData === 'object'
+          ? { ...note.noteData, gitPRView }
+          : { gitPRView }
+        onUpdate({ noteData })
+        setGitPRViewRef(gitPRView)
+        setGitPRData({ ...data, viewType: 'diff' })
+        setMode('gitpr')
         const diff = data.diff || '(no diff)'
         const stat = data.stat ? `${data.stat}\n\n` : ''
-        replaceGitCommand(range, formatGitCommandResult(`Git diff: ${data.repo.displayName ?? data.repo.name ?? repoId}`, `${stat}\`\`\`diff\n${diff}\n\`\`\``))
+        replaceGitCommand(range, formatGitCommandResult(`Git diff: ${repoName}`, `${stat}\`\`\`diff\n${diff}\n\`\`\``))
         return true
       }
 
@@ -2800,8 +2818,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const showCommandToolbars = !simpleEditor && !hideCommandToolbars
   const gitPRViewButtonData = gitPRData
     ? {
+      viewType: gitPRData.viewType ?? 'pr',
       prNumber: gitPRData.prNumber,
       repoName: gitPRData.repo?.displayName ?? gitPRData.repo?.name ?? '',
+      base: gitPRData.base,
       error: '',
       loading: false,
     }
@@ -3033,10 +3053,14 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               gitPRViewButtonData.error
                 ? gitPRViewButtonData.error
                 : gitPRViewButtonData.loading
-                  ? `Loading PR #${gitPRViewButtonData.prNumber}`
+                  ? gitPRViewButtonData.viewType === 'diff'
+                    ? 'Loading git diff'
+                    : `Loading PR #${gitPRViewButtonData.prNumber}`
                 : mode === 'gitpr'
                   ? 'Back to note'
-                  : `Open PR #${gitPRViewButtonData.prNumber} viewer`
+                  : gitPRViewButtonData.viewType === 'diff'
+                    ? 'Open git diff viewer'
+                    : `Open PR #${gitPRViewButtonData.prNumber} viewer`
             }
             className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
               mode === 'gitpr'
@@ -3051,7 +3075,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
             {gitPRViewButtonData.loading && (
               <span className="w-3 h-3 rounded-full border border-violet-400/40 border-t-violet-200 animate-spin" />
             )}
-            PR #{gitPRViewButtonData.prNumber}
+            {gitPRViewButtonData.viewType === 'diff' ? 'Git diff' : `PR #${gitPRViewButtonData.prNumber}`}
           </button>
         )}
         <button
@@ -4306,12 +4330,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         <div className="h-full flex flex-col bg-zinc-950">
           <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900 shrink-0">
             <span className="font-mono text-[11px] text-zinc-500 shrink-0">
-              PR #{gitPRViewButtonData?.prNumber ?? ''}
+              {gitPRViewButtonData?.viewType === 'diff' ? 'Git diff' : `PR #${gitPRViewButtonData?.prNumber ?? ''}`}
             </span>
             <span className="text-sm font-medium text-zinc-200 truncate">
-              {gitPRViewButtonData?.repoName || 'Loading pull request'}
+              {gitPRViewButtonData?.repoName || (gitPRViewButtonData?.viewType === 'diff' ? 'Loading git diff' : 'Loading pull request')}
             </span>
-            {gitPRViewButtonData?.base && (
+            {gitPRViewButtonData?.viewType !== 'diff' && gitPRViewButtonData?.base && (
               <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">&lt;- {gitPRViewButtonData.base}</span>
             )}
             <button
@@ -4327,7 +4351,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           <div className="flex-1 flex items-center justify-center px-6">
             <div className="flex items-center gap-3 text-zinc-400">
               <span className="w-5 h-5 rounded-full border-2 border-violet-500/30 border-t-violet-300 animate-spin" />
-              <span className="text-sm font-mono">Loading PR view...</span>
+              <span className="text-sm font-mono">{gitPRViewButtonData?.viewType === 'diff' ? 'Loading git diff...' : 'Loading PR view...'}</span>
             </div>
           </div>
         </div>

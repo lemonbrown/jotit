@@ -67,7 +67,10 @@ export default function Settings({
       if (status.available) {
         const { models } = await getLLMModels(token)
         setOllamaModels(models ?? [])
-        if (models?.length && !ollamaModel) setOllamaModel(models[0].name)
+        if (models?.length) {
+          const modelNames = new Set(models.map(model => model.name))
+          if (!ollamaModel || !modelNames.has(ollamaModel)) setOllamaModel(models[0].name)
+        }
       } else {
         setOllamaModels([])
       }

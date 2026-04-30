@@ -509,9 +509,12 @@ app.get('/git/diff', requireToken(token), async (req, res) => {
   if (!repo) return res.status(404).json({ error: 'Repo not found' })
 
   try {
-    const diff = await runGit(['diff', '--stat'], repo.path)
-    const patch = await runGit(['diff', '--', '.'], repo.path)
-    res.json({ ok: true, repo, stat: diff, diff: patch.slice(0, MAX_SHELL_OUTPUT_BYTES) })
+    const [stat, numstat, patch] = await Promise.all([
+      runGit(['diff', '--stat'], repo.path),
+      runGit(['diff', '--numstat'], repo.path),
+      runGit(['diff', '--', '.'], repo.path),
+    ])
+    res.json({ ok: true, repo, stat, numstat, diff: patch.slice(0, MAX_SHELL_OUTPUT_BYTES) })
   } catch (error) {
     res.status(500).json({ error: error.message ?? 'Could not read git diff' })
   }

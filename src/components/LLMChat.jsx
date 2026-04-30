@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useLLMChat } from '../hooks/useLLMChat'
+import { useLLMSettings } from '../hooks/useLLMSettings'
 import { buildAllNotesLLMContext, buildNoteLLMContext, buildReferencedNotesContext } from '../utils/llmNoteContext'
 
 const BASE_MODES = [
@@ -93,13 +94,15 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
   const pickerRef = useRef(null)
   const token = settings?.localAgentToken ?? ''
   const autoSentRef = useRef(false)
+  const { ollamaModel: activeModel } = useLLMSettings()
+  const chatModel = activeModel || model
 
   const MODES = [
     ...BASE_MODES,
     ...(regexContext ? [{ id: 'regex', label: 'Regex' }] : []),
   ]
 
-  const { messages, isStreaming, error, sendMessage, clear } = useLLMChat({ token, model })
+  const { messages, isStreaming, error, sendMessage, clear } = useLLMChat({ token, model: chatModel })
 
   // ── Picker results ──────────────────────────────────────────────────────────
 
@@ -277,9 +280,9 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-3">
-          {model && (
+          {chatModel && (
             <span className="text-[10px] text-zinc-500 font-mono bg-zinc-800 px-2 py-0.5 rounded">
-              {model}
+              {chatModel}
             </span>
           )}
           {messages.length > 0 && (

@@ -38,6 +38,7 @@ import PaneResizer from './components/PaneResizer'
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
 const COMMAND_TOOLBARS_HIDDEN_KEY = 'jotit_command_toolbars_hidden'
 const NOTE_LIST_METADATA_HIDDEN_KEY = 'jotit_note_list_metadata_hidden'
+const NOTE_LIST_ONE_LINE_KEY = 'jotit_note_list_one_line'
 const TIPS_CREATED_KEY = 'jotit_tips_created'
 const NOTEGRID_WIDTH_KEY = 'jotit_notegrid_width'
 const NOTEGRID_DEFAULT_WIDTH = 420
@@ -107,6 +108,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   ))
   const [noteListMetadataHidden, setNoteListMetadataHidden] = useState(() => (
     localStorage.getItem(NOTE_LIST_METADATA_HIDDEN_KEY) === 'true'
+  ))
+  const [noteListOneLine, setNoteListOneLine] = useState(() => (
+    localStorage.getItem(NOTE_LIST_ONE_LINE_KEY) === 'true'
   ))
   const [tipsCreated, setTipsCreated] = useState(() => localStorage.getItem(TIPS_CREATED_KEY) === 'true')
   const [editorFocusNonce, setEditorFocusNonce] = useState(0)
@@ -706,6 +710,10 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setNoteListMetadataHidden(hidden => !hidden)
   }, [])
 
+  const toggleNoteListOneLine = useCallback(() => {
+    setNoteListOneLine(active => !active)
+  }, [])
+
   useEffect(() => {
     localStorage.setItem(COMMAND_TOOLBARS_HIDDEN_KEY, commandToolbarsHidden ? 'true' : 'false')
   }, [commandToolbarsHidden])
@@ -713,6 +721,10 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   useEffect(() => {
     localStorage.setItem(NOTE_LIST_METADATA_HIDDEN_KEY, noteListMetadataHidden ? 'true' : 'false')
   }, [noteListMetadataHidden])
+
+  useEffect(() => {
+    localStorage.setItem(NOTE_LIST_ONE_LINE_KEY, noteListOneLine ? 'true' : 'false')
+  }, [noteListOneLine])
 
   useEffect(() => {
     setOnSyncHeld(ids => setSyncHeldIds(ids))
@@ -1207,6 +1219,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             onPeekOpenChange={setNotePeekOpen}
             noteMetadataHidden={noteListMetadataHidden}
             onToggleNoteMetadata={toggleNoteListMetadata}
+            oneLineMode={noteListOneLine}
+            onToggleOneLineMode={toggleNoteListOneLine}
             onNoteDragStart={(noteId) => {
               setDraggedNoteId(noteId)
               setDragOverCollectionId(null)

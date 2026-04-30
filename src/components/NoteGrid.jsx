@@ -19,6 +19,8 @@ export default function NoteGrid({
   onPeekOpenChange,
   noteMetadataHidden = false,
   onToggleNoteMetadata,
+  oneLineMode = false,
+  onToggleOneLineMode,
   onNoteDragStart,
   onNoteDragEnd,
   style,
@@ -347,9 +349,22 @@ export default function NoteGrid({
         >
           badges
         </button>
+        <button
+          type="button"
+          onClick={() => onToggleOneLineMode?.()}
+          aria-pressed={oneLineMode}
+          title={oneLineMode ? 'Show note cards' : 'Show notes as one-line stacked rows'}
+          className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors ${
+            oneLineMode
+              ? 'border-blue-800/70 bg-blue-950/40 text-blue-300 hover:bg-blue-950/70'
+              : 'border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300'
+          }`}
+        >
+          rows
+        </button>
       </div>
 
-      <div className={isPeekOpen ? 'card-grid card-grid-peek' : 'card-grid'}>
+      <div className={oneLineMode && !isPeekOpen ? 'card-grid-list' : isPeekOpen ? 'card-grid card-grid-peek' : 'card-grid'}>
         {notes.map(note => (
           <NoteCard
             key={note.id}
@@ -360,6 +375,7 @@ export default function NoteGrid({
             searchMatch={searchMatches?.get(note.id) ?? null}
             searchQuery={searchQuery}
             expanded={isPeekOpen}
+            oneLine={oneLineMode && !isPeekOpen}
             showMetadata={!noteMetadataHidden}
             onHoverEnd={handleCardHoverEnd}
             onDragStart={(noteId) => {

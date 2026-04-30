@@ -1,5 +1,7 @@
 import { memo } from 'react'
 import NotePreviewBody, { buildNotePreviewModel } from './NotePreviewBody'
+import CategoryBadge from './CategoryBadge'
+import { timeAgo } from '../utils/helpers'
 
 function NoteCard({
   note,
@@ -9,6 +11,7 @@ function NoteCard({
   searchMatch = null,
   searchQuery,
   expanded = false,
+  oneLine = false,
   showMetadata = true,
   onHoverStart,
   onHoverMove,
@@ -21,6 +24,7 @@ function NoteCard({
   onTogglePin,
 }) {
   const model = buildNotePreviewModel(note, searchMatch, { expanded })
+  const title = model.searchHeading || model.firstLine || 'empty'
 
   return (
     <div
@@ -38,9 +42,11 @@ function NoteCard({
       }}
       onDragEnd={() => onDragEnd?.()}
       className={[
-        'relative flex flex-col p-3 rounded-lg border cursor-pointer select-none',
+        'relative flex rounded-lg border cursor-pointer select-none',
         'transition-all duration-150 overflow-hidden',
-        expanded ? 'h-[230px]' : 'h-[148px]',
+        oneLine
+          ? 'h-9 items-center gap-2 px-2 py-1'
+          : `flex-col p-3 ${expanded ? 'h-[230px]' : 'h-[148px]'}`,
         isActive
           ? 'bg-slate-900 border-blue-500 shadow-lg shadow-blue-950/50 ring-1 ring-blue-500/30'
           : 'bg-zinc-900 border-zinc-800 hover:border-zinc-600 hover:bg-zinc-800/80',
@@ -49,6 +55,51 @@ function NoteCard({
       {isProcessing && (
         <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
       )}
+      {oneLine ? (
+        <>
+          {(isPinned || onTogglePin) && (
+            <button
+              title={isPinned ? 'Unpin from this collection' : 'Pin to top of this collection'}
+              onClick={(e) => { e.stopPropagation(); onTogglePin?.() }}
+              className={`shrink-0 p-0.5 rounded transition-colors ${
+                isPinned
+                  ? 'text-amber-400 hover:text-amber-300'
+                  : 'text-zinc-700 hover:text-zinc-500'
+              }`}
+            >
+              <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M5 4a2 2 0 012-2h6a2 2 0 012 2v14l-5-2.5L5 18V4z" />
+              </svg>
+            </button>
+          )}
+          <div className={`note-content truncate flex-1 min-w-0 text-[12px] font-medium ${model.firstLine ? 'text-zinc-200' : 'italic text-zinc-700'}`}>
+            {title}
+          </div>
+          {showMetadata && model.documentBadge && (
+            <span className="shrink-0 rounded border border-cyan-900/60 bg-cyan-950/40 px-1 py-px font-mono text-[9px] leading-none text-cyan-300">
+              {model.documentBadge}
+            </span>
+          )}
+          {showMetadata && model.badges.slice(0, 1).map(category => <CategoryBadge key={category} category={category} size="xs" />)}
+          {!syncEnabled && (
+            <button
+              title={note.syncIncluded ? 'Syncing - click to stop syncing this note' : 'Not syncing - click to sync this note'}
+              onClick={(e) => { e.stopPropagation(); onToggleSync?.(note.id, !note.syncIncluded) }}
+              className={`shrink-0 p-0.5 rounded transition-colors ${
+                note.syncIncluded
+                  ? 'text-blue-400 hover:text-blue-300'
+                  : 'text-zinc-700 hover:text-zinc-500'
+              }`}
+            >
+              <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fillRule="evenodd" d="M5.5 17a4.5 4.5 0 01-1.44-8.765 4.5 4.5 0 018.302-3.046 3.5 3.5 0 014.504 4.272A4 4 0 0115 17H5.5zm3.75-2.75a.75.75 0 001.5 0V9.66l1.95 2.1a.75.75 0 101.1-1.02l-3.25-3.5a.75.75 0 00-1.1 0l-3.25 3.5a.75.75 0 101.1 1.02l1.95-2.1v4.59z" clipRule="evenodd" />
+              </svg>
+            </button>
+          )}
+          <span className="shrink-0 text-[10px] text-zinc-700">{timeAgo(note.updatedAt)}</span>
+        </>
+      ) : (
+        <>
       {(isPinned || onTogglePin) && (
         <button
           title={isPinned ? 'Unpin from this collection' : 'Pin to top of this collection'}
@@ -86,6 +137,8 @@ function NoteCard({
         showMetadata={showMetadata}
         compact
       />
+        </>
+      )}
     </div>
   )
 }
@@ -98,6 +151,7 @@ export default memo(NoteCard, (prevProps, nextProps) => (
   prevProps.searchMatch === nextProps.searchMatch &&
   prevProps.searchQuery === nextProps.searchQuery &&
   prevProps.expanded === nextProps.expanded &&
+  prevProps.oneLine === nextProps.oneLine &&
   prevProps.showMetadata === nextProps.showMetadata &&
   prevProps.onHoverStart === nextProps.onHoverStart &&
   prevProps.onHoverMove === nextProps.onHoverMove &&

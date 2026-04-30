@@ -113,6 +113,9 @@ export default function SyncSection({
                 className="flex-1 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono outline-none focus:border-zinc-500 transition-colors disabled:opacity-50"
               >
                 {ollamaModels.length === 0 && ollamaModel && <option value={ollamaModel}>{ollamaModel}</option>}
+                {ollamaModels.length > 0 && ollamaModel && !ollamaModels.some(model => model.name === ollamaModel) && (
+                  <option value={ollamaModel}>{ollamaModel} (missing)</option>
+                )}
                 {ollamaModels.length === 0 && !ollamaModel && (
                   <option value="">{ollamaAvailable === false ? 'Ollama not reachable' : ollamaLoading ? 'Loading...' : 'No models found'}</option>
                 )}
@@ -128,6 +131,11 @@ export default function SyncSection({
             </div>
             {!ollamaModels.length && ollamaAvailable === null && (
               <p className="text-[11px] text-zinc-600">Make sure jotit-agent is running and click Refresh.</p>
+            )}
+            {ollamaModel && (
+              <p className="text-[11px] text-zinc-600">
+                Active chat model: <code className="font-mono text-zinc-400">{ollamaModel}</code>
+              </p>
             )}
           </div>
         )}

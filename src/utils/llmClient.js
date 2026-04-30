@@ -1,4 +1,5 @@
 const AGENT_BASE = 'http://localhost:3210'
+const KEY_MODEL = 'jotit_llm_model'
 
 function agentHeaders(token) {
   return {
@@ -30,12 +31,13 @@ export async function getLLMModels(token) {
 }
 
 export async function streamLLMChat({ token, model, messages, context, contextMode }, onChunk, onDone, onError) {
+  const activeModel = model || localStorage.getItem(KEY_MODEL)
   let res
   try {
     res = await fetch(`${AGENT_BASE}/ollama/chat`, {
       method: 'POST',
       headers: agentHeaders(token),
-      body: JSON.stringify({ model, messages, context, contextMode }),
+      body: JSON.stringify({ model: activeModel, messages, context, contextMode }),
     })
   } catch (err) {
     onError(err.message ?? 'Could not reach jotit-agent')
