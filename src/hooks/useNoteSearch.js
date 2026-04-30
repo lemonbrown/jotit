@@ -2,6 +2,7 @@ import { startTransition, useCallback, useDeferredValue, useEffect, useRef, useS
 import { searchNotesLocallyDetailed } from '../utils/search'
 import { searchNotesPlainText } from '../utils/plainSearch'
 import { rerankResultsWithNib } from '../utils/searchNib'
+import { searchNotesWithLocalEmbeddings } from '../utils/localEmbeddings'
 
 const TOKEN_KEY = 'jotit_auth_token'
 const EXACT_PREFIX = 'em:'
@@ -38,7 +39,8 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
   const improveWithNib = useCallback(async () => {
     const query = searchInput.trim()
     if (!query || !searchResults?.length || isNibSearching) return
-    if (!nibOptions.llmEnabled || !nibOptions.agentToken || !nibOptions.ollamaModel) return
+    if (!nibOptions.llmEnabled || !nibOptions.ollamaModel) return
+    if ((nibOptions.llmProvider ?? 'ollama') === 'ollama' && !nibOptions.agentToken) return
 
     const sequence = searchSequenceRef.current
     setIsNibSearching(true)
@@ -59,7 +61,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
     } finally {
       if (searchSequenceRef.current === sequence) setIsNibSearching(false)
     }
-  }, [isNibSearching, nibOptions.agentToken, nibOptions.llmEnabled, nibOptions.ollamaModel, searchInput, searchResults])
+  }, [isNibSearching, nibOptions.agentToken, nibOptions.llmEnabled, nibOptions.llmProvider, nibOptions.ollamaModel, searchInput, searchResults])
 
   useEffect(() => {
     const raw = deferredSearchInput.trim()
@@ -98,8 +100,25 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
     }, 60)
 
     if (!user) {
-      setIsSearching(false)
-      return () => clearTimeout(localSearchTimer)
+      let cancelled = false
+      setIsSearching(true)
+      ;(async () => {
+        try {
+          const local = searchNotesLocallyDetailed(notesRef.current, query)
+          const results = await searchNotesWithLocalEmbeddings(local, notesRef.current, query)
+          if (cancelled || searchSequenceRef.current !== sequence) return
+          startTransition(() => {
+            if (cancelled || searchSequenceRef.current !== sequence) return
+            setSearchResults(results)
+          })
+        } finally {
+          if (!cancelled && searchSequenceRef.current === sequence) setIsSearching(false)
+        }
+      })()
+      return () => {
+        cancelled = true
+        clearTimeout(localSearchTimer)
+      }
     }
 
     let cancelled = false

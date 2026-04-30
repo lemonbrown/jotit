@@ -22,6 +22,8 @@ function NoteCard({
   onToggleSync,
   isPinned = false,
   onTogglePin,
+  shareSelected = false,
+  onToggleShareSelection,
 }) {
   const model = buildNotePreviewModel(note, searchMatch, { expanded })
   const title = model.searchHeading || model.firstLine || 'empty'
@@ -54,6 +56,21 @@ function NoteCard({
     >
       {isProcessing && (
         <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+      )}
+      {onToggleShareSelection && (
+        <button
+          title={shareSelected ? 'Remove from multi-note share' : 'Add to multi-note share'}
+          onClick={(e) => { e.stopPropagation(); onToggleShareSelection?.() }}
+          className={`absolute top-2 right-2 z-10 flex h-5 w-5 items-center justify-center rounded border transition-colors ${
+            shareSelected
+              ? 'border-blue-600 bg-blue-600 text-white'
+              : 'border-zinc-700 bg-zinc-950/80 text-transparent hover:text-zinc-400'
+          }`}
+        >
+          <svg className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fillRule="evenodd" d="M16.704 5.29a1 1 0 010 1.42l-7.25 7.25a1 1 0 01-1.415 0l-3.25-3.25A1.004 1.004 0 116.21 9.29l2.542 2.543 6.543-6.543a1 1 0 011.409 0z" clipRule="evenodd" />
+          </svg>
+        </button>
       )}
       {oneLine ? (
         <>
@@ -161,5 +178,7 @@ export default memo(NoteCard, (prevProps, nextProps) => (
   prevProps.syncEnabled === nextProps.syncEnabled &&
   prevProps.onToggleSync === nextProps.onToggleSync &&
   prevProps.isPinned === nextProps.isPinned &&
-  prevProps.onTogglePin === nextProps.onTogglePin
+  prevProps.onTogglePin === nextProps.onTogglePin &&
+  prevProps.shareSelected === nextProps.shareSelected &&
+  prevProps.onToggleShareSelection === nextProps.onToggleShareSelection
 ))

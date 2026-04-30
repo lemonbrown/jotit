@@ -7,12 +7,14 @@ export default function EncryptionSection({
   regenState,
   secretScanBlockSync,
   secretScanEnabled,
+  secretScanNibEnabled,
   setRegenError,
   setRegenMode,
   setRegenPassword,
   setRegenState,
   setSecretScanBlockSync,
   setSecretScanEnabled,
+  setSecretScanNibEnabled,
   user,
 }) {
   return (
@@ -89,7 +91,10 @@ export default function EncryptionSection({
             onClick={() => {
               const next = !secretScanEnabled
               setSecretScanEnabled(next)
-              if (!next) setSecretScanBlockSync(false)
+              if (!next) {
+                setSecretScanBlockSync(false)
+                setSecretScanNibEnabled(false)
+              }
             }}
             className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${secretScanEnabled ? 'bg-amber-600 border-amber-500' : 'bg-zinc-700 border-zinc-600'}`}
           >
@@ -97,21 +102,39 @@ export default function EncryptionSection({
           </button>
         </div>
         {secretScanEnabled && (
-          <div className="flex items-center justify-between pl-3 border-l border-zinc-800">
-            <div>
-              <label className="block text-xs font-medium text-zinc-500">Block auto-sync and require confirmation to share</label>
-              <p className="text-[11px] text-zinc-600 mt-0.5">
-                Notes with uncleared secrets won't sync automatically and will prompt before publishing.
-              </p>
+          <div className="space-y-2 pl-3 border-l border-zinc-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="block text-xs font-medium text-zinc-500">Block auto-sync and require confirmation to share</label>
+                <p className="text-[11px] text-zinc-600 mt-0.5">
+                  Notes with uncleared secrets won't sync automatically and will prompt before publishing.
+                </p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={secretScanBlockSync}
+                onClick={() => setSecretScanBlockSync(v => !v)}
+                className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${secretScanBlockSync ? 'bg-amber-600 border-amber-500' : 'bg-zinc-700 border-zinc-600'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${secretScanBlockSync ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
             </div>
-            <button
-              role="switch"
-              aria-checked={secretScanBlockSync}
-              onClick={() => setSecretScanBlockSync(v => !v)}
-              className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${secretScanBlockSync ? 'bg-amber-600 border-amber-500' : 'bg-zinc-700 border-zinc-600'}`}
-            >
-              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${secretScanBlockSync ? 'translate-x-4' : 'translate-x-0'}`} />
-            </button>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="block text-xs font-medium text-zinc-500">Let Nib help detect secrets</label>
+                <p className="text-[11px] text-zinc-600 mt-0.5">
+                  Reviews the open note with your configured Nib model. Remote providers receive note content.
+                </p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={secretScanNibEnabled}
+                onClick={() => setSecretScanNibEnabled(v => !v)}
+                className={`relative ml-4 shrink-0 w-9 h-5 rounded-full border transition-colors ${secretScanNibEnabled ? 'bg-amber-600 border-amber-500' : 'bg-zinc-700 border-zinc-600'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${secretScanNibEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
           </div>
         )}
       </div>

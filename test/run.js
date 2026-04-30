@@ -10,8 +10,11 @@ import collectionTests from './collections.test.js'
 import noteCommandTests from './note-commands.test.js'
 import gitCommandTests from './git-commands.test.js'
 import dateTimeTests from './datetime.test.js'
+import nibTemplateTests from './nib-templates.test.js'
+import stashTests from './stash.test.js'
+import secretScannerTests from './secret-scanner.test.js'
 
-const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests, ...noteCommandTests, ...gitCommandTests, ...dateTimeTests]
+const suites = [...authTests, ...searchUtilityTests, ...syncTests, ...searchServerTests, ...attachmentTests, ...publicSharingTests, ...sqliteWorkspaceTests, ...openApiTests, ...collectionTests, ...noteCommandTests, ...gitCommandTests, ...dateTimeTests, ...nibTemplateTests, ...stashTests, ...secretScannerTests]
 
 let failures = 0
 

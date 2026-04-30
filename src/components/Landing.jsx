@@ -50,7 +50,7 @@ const FEATURE_GROUPS = [
   },
   {
     title: 'Search for the thing you almost remember',
-    body: 'Search is built for messy developer notes: chunks, headings, entities, keywords, and optional semantic embeddings for signed-in users. Embeddings help search by meaning instead of only exact words, so a query can find related notes even when you forgot the exact phrasing you originally used.',
+    body: 'Search is built for messy developer notes: chunks, headings, entities, keywords, and optional semantic embeddings. Local Ollama embeddings work without signing in; signed-in users can also use server-backed semantic search.',
   },
   {
     title: 'Tools inside the note flow',

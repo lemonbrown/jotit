@@ -56,7 +56,7 @@ function CommitsTab({ log }) {
   )
 }
 
-function FilesTab({ fileStats, parsedFiles, onFileClick }) {
+function FilesTab({ fileStats, parsedFiles, onFileClick, onCopyFile, onReviewFile, copiedPath, selectedPaths, onToggleSelect }) {
   const files = useMemo(() => {
     if (fileStats.length) return fileStats
     return parsedFiles.map(f => ({
@@ -84,14 +84,30 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
         const total = adds + dels
         const filled = Math.min(Math.round((total / maxChanges) * 10), 10)
         const addBlocks = total ? Math.round((adds / total) * filled) : 0
+        const isSelected = selectedPaths?.has(f.path)
 
         return (
-          <button
+          <div
             key={`${f.path}:${i}`}
-            onClick={() => onFileClick(f.path)}
-            className="w-full flex items-center gap-3 px-5 py-2 hover:bg-zinc-900/50 transition-colors text-left"
+            className={`w-full flex items-center gap-3 px-5 py-2 transition-colors text-left ${isSelected ? 'bg-violet-950/30 hover:bg-violet-950/40' : 'hover:bg-zinc-900/50'}`}
           >
-            <span className="flex-1 font-mono text-xs text-zinc-300 truncate min-w-0">{f.path}</span>
+            {onToggleSelect && (
+              <input
+                type="checkbox"
+                checked={isSelected ?? false}
+                onChange={() => onToggleSelect(f.path)}
+                onClick={e => e.stopPropagation()}
+                className="w-3.5 h-3.5 shrink-0 accent-violet-500 cursor-pointer"
+                title="Select for batch review"
+              />
+            )}
+            <button
+              onClick={() => onFileClick(f.path)}
+              className="flex-1 font-mono text-xs text-zinc-300 hover:text-zinc-100 truncate min-w-0 text-left"
+              title="Open file diff"
+            >
+              {f.path}
+            </button>
             {f.isBinary ? (
               <Pill>binary</Pill>
             ) : (
@@ -112,7 +128,23 @@ function FilesTab({ fileStats, parsedFiles, onFileClick }) {
                 </div>
               </>
             )}
-          </button>
+            <button
+              onClick={() => onCopyFile(f.path)}
+              className="px-1.5 py-0.5 rounded border border-zinc-800 text-[10px] font-mono text-zinc-500 hover:text-zinc-200 hover:border-zinc-600 shrink-0"
+              title="Copy this file diff"
+            >
+              {copiedPath === f.path ? 'copied' : 'copy'}
+            </button>
+            {onReviewFile && (
+              <button
+                onClick={() => onReviewFile(f.path)}
+                className="px-1.5 py-0.5 rounded border border-violet-900/70 text-[10px] font-mono text-violet-400 hover:text-violet-200 hover:border-violet-700 shrink-0"
+                title="Send this file diff to Nib for review"
+              >
+                Nib
+              </button>
+            )}
+          </div>
         )
       })}
     </div>
@@ -131,6 +163,48 @@ function getFileCounts(file) {
     }
     return counts
   }, { additions: 0, deletions: 0 })
+}
+
+function serializeParsedFileDiff(file) {
+  const path = getFilePath(file)
+  const fromPath = file.fromPath || path
+  const toPath = file.toPath || path
+  const lines = [`diff --git a/${fromPath} b/${toPath}`]
+  if (file.isNew) lines.push('new file')
+  if (file.isDeleted) lines.push('deleted file')
+  if (file.isBinary) {
+    lines.push(`Binary files a/${fromPath} and b/${toPath} differ`)
+    return lines.join('\n')
+  }
+  for (const hunk of file.hunks) {
+    lines.push(hunk.header)
+    for (const line of hunk.lines) {
+      if (line.type === 'add') lines.push(`+${line.content}`)
+      else if (line.type === 'del') lines.push(`-${line.content}`)
+      else if (line.type === 'noeol') lines.push('\\ No newline at end of file')
+      else lines.push(` ${line.content}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildRawFileDiffMap(rawDiff) {
+  const map = new Map()
+  const raw = String(rawDiff ?? '')
+  if (!raw.trim()) return map
+
+  const matches = [...raw.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)]
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i]
+    const start = match.index ?? 0
+    const end = i + 1 < matches.length ? (matches[i + 1].index ?? raw.length) : raw.length
+    const block = raw.slice(start, end).trimEnd()
+    const fromPath = match[1]
+    const toPath = match[2]
+    map.set(fromPath, block)
+    map.set(toPath, block)
+  }
+  return map
 }
 
 function buildDiffRows(files, expandedPaths) {
@@ -193,15 +267,31 @@ function DiffLineRow({ line }) {
   )
 }
 
-function DiffRow({ row, onToggleFile }) {
+function DiffRow({ row, onToggleFile, onCopyFile, onReviewFile, copiedPath, selectedPaths, onToggleSelect }) {
   if (row.type === 'file') {
+    const isSelected = selectedPaths?.has(row.path)
     return (
-      <button
-        onClick={() => onToggleFile(row.path)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-zinc-800/50 hover:bg-zinc-800/80 transition-colors text-left border-y border-zinc-800"
+      <div
+        className={`w-full flex items-center gap-2 px-3 py-2 transition-colors text-left border-y border-zinc-800 ${isSelected ? 'bg-violet-950/40 hover:bg-violet-950/50' : 'bg-zinc-800/50 hover:bg-zinc-800/80'}`}
       >
-        <span className="text-zinc-500 text-[10px] select-none">{row.expanded ? 'v' : '>'}</span>
-        <span className="flex-1 font-mono text-xs text-zinc-200 truncate min-w-0">{row.path}</span>
+        {onToggleSelect && (
+          <input
+            type="checkbox"
+            checked={isSelected ?? false}
+            onChange={() => onToggleSelect(row.path)}
+            onClick={e => e.stopPropagation()}
+            className="w-3.5 h-3.5 shrink-0 accent-violet-500 cursor-pointer"
+            title="Select for batch review"
+          />
+        )}
+        <button
+          onClick={() => onToggleFile(row.path)}
+          className="flex flex-1 items-center gap-2 min-w-0 text-left"
+          title={row.expanded ? 'Collapse file diff' : 'Expand file diff'}
+        >
+          <span className="text-zinc-500 text-[10px] select-none">{row.expanded ? 'v' : '>'}</span>
+          <span className="flex-1 font-mono text-xs text-zinc-200 truncate min-w-0">{row.path}</span>
+        </button>
         {row.file.isNew && <Pill color="green">new</Pill>}
         {row.file.isDeleted && <Pill color="red">deleted</Pill>}
         {row.file.isBinary && <Pill>binary</Pill>}
@@ -212,7 +302,23 @@ function DiffRow({ row, onToggleFile }) {
             <span className="text-red-400">-{row.deletions}</span>
           </span>
         )}
-      </button>
+        <button
+          onClick={() => onCopyFile(row.path)}
+          className="px-1.5 py-0.5 rounded border border-zinc-700 text-[10px] font-mono text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 shrink-0"
+          title="Copy this file diff"
+        >
+          {copiedPath === row.path ? 'copied' : 'copy'}
+        </button>
+        {onReviewFile && (
+          <button
+            onClick={() => onReviewFile(row.path)}
+            className="px-1.5 py-0.5 rounded border border-violet-800/80 text-[10px] font-mono text-violet-300 hover:text-violet-100 hover:border-violet-600 shrink-0"
+            title="Send this file diff to Nib for review"
+          >
+            Nib
+          </button>
+        )}
+      </div>
     )
   }
 
@@ -232,7 +338,7 @@ function DiffRow({ row, onToggleFile }) {
   return <DiffLineRow line={row.line} />
 }
 
-function DiffTab({ files, scrollToPath, onScrolled }) {
+function DiffTab({ files, scrollToPath, onScrolled, onCopyFile, onReviewFile, copiedPath, selectedPaths, onToggleSelect }) {
   const scrollRef = useRef(null)
   const [expandedPaths, setExpandedPaths] = useState(() => new Set(files.map(getFilePath)))
 
@@ -299,7 +405,15 @@ function DiffTab({ files, scrollToPath, onScrolled }) {
               className="absolute left-0 top-0 w-full"
               style={{ transform: `translateY(${item.start}px)` }}
             >
-              <DiffRow row={row} onToggleFile={toggleFile} />
+              <DiffRow
+                row={row}
+                onToggleFile={toggleFile}
+                onCopyFile={onCopyFile}
+                onReviewFile={onReviewFile}
+                copiedPath={copiedPath}
+                selectedPaths={selectedPaths}
+                onToggleSelect={onToggleSelect}
+              />
             </div>
           )
         })}
@@ -308,9 +422,11 @@ function DiffTab({ files, scrollToPath, onScrolled }) {
   )
 }
 
-export default function GitPRView({ prData, onClose }) {
+export default function GitPRView({ prData, onClose, onReviewDiff }) {
   const [tab, setTab] = useState('files')
   const [scrollToPath, setScrollToPath] = useState(null)
+  const [copiedPath, setCopiedPath] = useState('')
+  const [selectedPaths, setSelectedPaths] = useState(() => new Set())
 
   const { prNumber, base, log, numstat: numstatRaw, diff: diffRaw, repo, viewType } = prData
   const repoName = repo?.displayName ?? repo?.name ?? ''
@@ -320,18 +436,98 @@ export default function GitPRView({ prData, onClose }) {
 
   const parsedFiles = useMemo(() => parseDiff(diffRaw ?? ''), [diffRaw])
   const fileStats = useMemo(() => parseNumstat(numstatRaw ?? ''), [numstatRaw])
+  const rawFileDiffs = useMemo(() => buildRawFileDiffMap(diffRaw), [diffRaw])
 
   const commitCount = String(log ?? '').split('\n').filter(Boolean).length
   const fileCount = fileStats.length || parsedFiles.length
+
+  const allPaths = useMemo(() => {
+    if (fileStats.length) return fileStats.map(f => f.path)
+    return parsedFiles.map(getFilePath)
+  }, [fileStats, parsedFiles])
+
+  const batchLineCount = useMemo(() => {
+    let total = 0
+    for (const path of selectedPaths) {
+      const diffText = rawFileDiffs.get(path) ?? ''
+      total += diffText.split('\n').length
+    }
+    return total
+  }, [selectedPaths, rawFileDiffs])
 
   useEffect(() => {
     if (!isPR && tab === 'commits') setTab('files')
   }, [isPR, tab])
 
+  useEffect(() => {
+    setSelectedPaths(new Set())
+  }, [diffRaw])
+
   const jumpToFile = useCallback((path) => {
     setTab('diff')
     setScrollToPath(path)
   }, [])
+
+  const togglePathSelection = useCallback((path) => {
+    setSelectedPaths(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }, [])
+
+  const selectAllPaths = useCallback(() => {
+    setSelectedPaths(new Set(allPaths))
+  }, [allPaths])
+
+  const clearSelection = useCallback(() => {
+    setSelectedPaths(new Set())
+  }, [])
+
+  const getFileDiffText = useCallback((path) => {
+    const raw = rawFileDiffs.get(path)
+    if (raw) return raw
+    const parsed = parsedFiles.find(file => getFilePath(file) === path || file.fromPath === path || file.toPath === path)
+    return parsed ? serializeParsedFileDiff(parsed) : ''
+  }, [parsedFiles, rawFileDiffs])
+
+  const copyFileDiff = useCallback(async (path) => {
+    const diffText = getFileDiffText(path)
+    if (!diffText) return
+    await navigator.clipboard.writeText(diffText)
+    setCopiedPath(path)
+    setTimeout(() => setCopiedPath(current => current === path ? '' : current), 1500)
+  }, [getFileDiffText])
+
+  const reviewFileDiff = useCallback((path) => {
+    const diffText = getFileDiffText(path)
+    if (!diffText || !onReviewDiff) return
+    onReviewDiff({
+      path,
+      diffText,
+      viewType,
+      prNumber,
+      repoName,
+      base,
+    })
+  }, [base, getFileDiffText, onReviewDiff, prNumber, repoName, viewType])
+
+  const reviewBatchDiff = useCallback(() => {
+    if (!selectedPaths.size || !onReviewDiff) return
+    const paths = [...selectedPaths]
+    const diffText = paths.map(p => getFileDiffText(p)).filter(Boolean).join('\n\n')
+    if (!diffText) return
+    onReviewDiff({
+      path: null,
+      paths,
+      diffText,
+      viewType,
+      prNumber,
+      repoName,
+      base,
+    })
+  }, [base, getFileDiffText, onReviewDiff, prNumber, repoName, selectedPaths, viewType])
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 overflow-hidden">
@@ -370,6 +566,32 @@ export default function GitPRView({ prData, onClose }) {
         </TabBtn>
       </div>
 
+      {selectedPaths.size > 0 && onReviewDiff && (
+        <div className="flex items-center gap-2 px-4 py-1.5 bg-violet-950/40 border-b border-violet-800/40 shrink-0">
+          <span className="text-xs text-violet-300 font-mono">
+            {selectedPaths.size} file{selectedPaths.size !== 1 ? 's' : ''} · ~{batchLineCount} lines
+          </span>
+          <button
+            onClick={selectAllPaths}
+            className="px-2 py-0.5 rounded text-[11px] text-violet-400 hover:text-violet-200 hover:bg-violet-900/40 transition-colors"
+          >
+            Select all
+          </button>
+          <button
+            onClick={clearSelection}
+            className="px-2 py-0.5 rounded text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors"
+          >
+            Clear
+          </button>
+          <button
+            onClick={reviewBatchDiff}
+            className="ml-auto px-2.5 py-1 rounded border border-violet-700 text-[11px] font-mono text-violet-300 hover:text-violet-100 hover:border-violet-500 hover:bg-violet-900/30 transition-colors"
+          >
+            Nib batch
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 min-h-0">
         {isPR && tab === 'commits' && <CommitsTab log={log} />}
         {tab === 'files' && (
@@ -377,6 +599,11 @@ export default function GitPRView({ prData, onClose }) {
             fileStats={fileStats}
             parsedFiles={parsedFiles}
             onFileClick={jumpToFile}
+            onCopyFile={copyFileDiff}
+            onReviewFile={onReviewDiff ? reviewFileDiff : null}
+            copiedPath={copiedPath}
+            selectedPaths={selectedPaths}
+            onToggleSelect={onReviewDiff ? togglePathSelection : null}
           />
         )}
         {tab === 'diff' && (
@@ -384,6 +611,11 @@ export default function GitPRView({ prData, onClose }) {
             files={parsedFiles}
             scrollToPath={scrollToPath}
             onScrolled={() => setScrollToPath(null)}
+            onCopyFile={copyFileDiff}
+            onReviewFile={onReviewDiff ? reviewFileDiff : null}
+            copiedPath={copiedPath}
+            selectedPaths={selectedPaths}
+            onToggleSelect={onReviewDiff ? togglePathSelection : null}
           />
         )}
       </div>

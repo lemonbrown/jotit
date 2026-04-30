@@ -73,6 +73,33 @@ function getNoteCardMeta(note) {
 
 function normalizePublicNote(slug, shared) {
   if (!shared) return null
+  if (Array.isArray(shared.notes)) {
+    const notes = shared.notes
+      .map(note => serializeNoteForPublicPage(note))
+      .filter(note => note.content.trim())
+    return {
+      slug,
+      publishedAt: Number(shared.publishedAt ?? 0),
+      title: String(shared.title ?? `${notes.length} shared notes`),
+      notes,
+    }
+  }
+
+  if (shared.note?.viewMode === 'bundle') {
+    const bundle = parseJson(shared.note.content, null)
+    if (bundle && Array.isArray(bundle.notes)) {
+      const notes = bundle.notes
+        .map(note => serializeNoteForPublicPage(note))
+        .filter(note => note.content.trim())
+      return {
+        slug,
+        publishedAt: Number(shared.publishedAt ?? 0),
+        title: String(bundle.title ?? `${notes.length} shared notes`),
+        notes,
+      }
+    }
+  }
+
   return {
     slug,
     publishedAt: Number(shared.publishedAt ?? 0),
@@ -88,6 +115,21 @@ function normalizePublicNote(slug, shared) {
 
 function summarizeSharedNote(slug, shared) {
   const normalized = normalizePublicNote(slug, shared)
+  if (Array.isArray(normalized?.notes)) {
+    const previews = normalized.notes.map(note => getNoteCardMeta(note).title).filter(Boolean)
+    return {
+      slug,
+      url: `/n/${slug}`,
+      noteId: null,
+      title: normalized.title || `${normalized.notes.length} shared notes`,
+      preview: previews.slice(0, 4).join(' | '),
+      viewMode: 'bundle',
+      noteCount: normalized.notes.length,
+      publishedAt: Number(normalized.publishedAt ?? 0),
+      updatedAt: Math.max(0, ...normalized.notes.map(note => Number(note.updatedAt ?? 0))),
+    }
+  }
+
   const { title, preview } = getNoteCardMeta(normalized?.note)
 
   return {
@@ -178,6 +220,23 @@ async function pgSavePublicNote(pgPool, slug, note) {
   )
 }
 
+async function pgSavePublicBundle(pgPool, slug, bundleId, bundle) {
+  const updatedAt = Math.max(Date.now(), ...bundle.notes.map(note => Number(note.updatedAt ?? 0)))
+  await pgPool.query(
+    `INSERT INTO public_notes (slug, note_id, content, categories, view_mode, published_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      slug,
+      bundleId,
+      JSON.stringify(bundle),
+      '[]',
+      'bundle',
+      Date.now(),
+      updatedAt,
+    ],
+  )
+}
+
 async function pgUpdatePublicNote(pgPool, slug, note, publishedAt) {
   await pgPool.query(
     `UPDATE public_notes
@@ -194,6 +253,27 @@ async function pgUpdatePublicNote(pgPool, slug, note, publishedAt) {
       note.viewMode ?? null,
       publishedAt ?? Date.now(),
       note.updatedAt ?? Date.now(),
+    ],
+  )
+}
+
+async function pgUpdatePublicBundle(pgPool, slug, bundle, publishedAt) {
+  const updatedAt = Math.max(Date.now(), ...bundle.notes.map(note => Number(note.updatedAt ?? 0)))
+  await pgPool.query(
+    `UPDATE public_notes
+        SET content = $2,
+            categories = $3,
+            view_mode = $4,
+            published_at = $5,
+            updated_at = $6
+      WHERE slug = $1`,
+    [
+      slug,
+      JSON.stringify(bundle),
+      '[]',
+      'bundle',
+      publishedAt ?? Date.now(),
+      updatedAt,
     ],
   )
 }
@@ -223,6 +303,16 @@ function findExistingSharedSlug(publicNotes, noteId) {
   return Object.entries(publicNotes)
     .filter(([, shared]) => shared?.note?.id === noteId)
     .sort((a, b) => Number(b[1]?.publishedAt ?? 0) - Number(a[1]?.publishedAt ?? 0))[0]?.[0] ?? null
+}
+
+function normalizePublicBundle(notes, title = '') {
+  const normalized = Array.isArray(notes)
+    ? notes.map(note => serializeNoteForPublicPage(note)).filter(note => note.content.trim())
+    : []
+  return {
+    title: String(title ?? '').trim() || `${normalized.length} shared notes`,
+    notes: normalized,
+  }
 }
 
 async function pgGetBucketOwner(userDb, bucketName) {
@@ -549,6 +639,48 @@ export function registerPublicSharing(app, { bucketsFile, publicNotesFile, pgPoo
     }
     savePublicNotes(publicNotes)
     res.json({ ok: true, url: `/n/${slug}`, slug, reused: Boolean(existingSlug) })
+  })
+
+  app.post('/api/public-note/publish-bundle', async (req, res) => {
+    const { notes, title } = req.body ?? {}
+    const bundle = normalizePublicBundle(notes, title)
+    if (bundle.notes.length < 2) return sendJsonError(res, 400, 'Select at least two notes to share')
+
+    const ids = bundle.notes.map(note => note.id).filter(Boolean).sort()
+    const bundleId = `bundle:${crypto.createHash('sha1').update(ids.join('|') || JSON.stringify(bundle.notes.map(note => note.title))).digest('hex')}`
+
+    if (pgPool) {
+      try {
+        const existing = await pgFindPublicNoteByNoteId(pgPool, bundleId)
+        if (existing?.slug) {
+          await pgUpdatePublicBundle(pgPool, existing.slug, bundle, existing.publishedAt)
+          return res.json({ ok: true, url: `/n/${existing.slug}`, slug: existing.slug, reused: true, noteCount: bundle.notes.length })
+        }
+
+        const slug = await pgGenerateSlug(pgPool)
+        await pgSavePublicBundle(pgPool, slug, bundleId, bundle)
+        return res.json({ ok: true, url: `/n/${slug}`, slug, reused: false, noteCount: bundle.notes.length })
+      } catch (e) {
+        return sendJsonError(res, 500, `Database error: ${e.message}`)
+      }
+    }
+
+    const publicNotes = loadPublicNotes()
+    const existingSlug = findExistingSharedSlug(publicNotes, bundleId)
+    const slug = existingSlug ?? generatePublicSlug(publicNotes)
+    const existingPublishedAt = existingSlug ? Number(publicNotes[existingSlug]?.publishedAt ?? Date.now()) : Date.now()
+    publicNotes[slug] = {
+      publishedAt: existingPublishedAt,
+      note: {
+        id: bundleId,
+        content: JSON.stringify(bundle),
+        categories: [],
+        updatedAt: Math.max(Date.now(), ...bundle.notes.map(note => Number(note.updatedAt ?? 0))),
+        viewMode: 'bundle',
+      },
+    }
+    savePublicNotes(publicNotes)
+    res.json({ ok: true, url: `/n/${slug}`, slug, reused: Boolean(existingSlug), noteCount: bundle.notes.length })
   })
 
   app.get('/api/public-note/:slug', async (req, res) => {

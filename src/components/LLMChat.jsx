@@ -1,7 +1,12 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { marked } from 'marked'
 import { useLLMChat } from '../hooks/useLLMChat'
 import { useLLMSettings } from '../hooks/useLLMSettings'
+import { getLLMModels } from '../utils/llmClient'
 import { buildAllNotesLLMContext, buildNoteLLMContext, buildReferencedNotesContext } from '../utils/llmNoteContext'
+import { loadStashItems, resolveStashRefs } from '../utils/stash'
+
+const NIB_MARKDOWN_RESPONSES_KEY = 'jotit_nib_markdown_responses'
 
 const BASE_MODES = [
   { id: 'note', label: 'Note' },
@@ -78,7 +83,7 @@ function ReferenceChips({ notes, onRemove }) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-export default function LLMChat({ note, notes = [], selectionText = '', onJumpToSelection, regexContext = null, initialMessage = '', settings, model, onClose, pane = false }) {
+export default function LLMChat({ note, notes = [], selectionText = '', onJumpToSelection, regexContext = null, initialMessage = '', initialMessageNonce = '', autoSendInitialMessage = true, settings, model, onClose, onCreateNoteFromContent, pane = false }) {
   const [input, setInput] = useState(initialMessage)
   const [contextMode, setContextMode] = useState(() => {
     if (regexContext) return 'regex'
@@ -88,14 +93,29 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
   const [referencedNotes, setReferencedNotes] = useState([])
   const [atPicker, setAtPicker] = useState(null) // null | { start: number, query: string }
   const [pickerIndex, setPickerIndex] = useState(0)
+  const [renderMarkdown, setRenderMarkdown] = useState(() => localStorage.getItem(NIB_MARKDOWN_RESPONSES_KEY) === 'true')
+  const [savedMessageIndex, setSavedMessageIndex] = useState(null)
+  const [stashItems, setStashItems] = useState(() => loadStashItems())
+  const [ollamaModels, setOllamaModels] = useState([])
+  const [ollamaModelLoading, setOllamaModelLoading] = useState(false)
+  const [ollamaModelError, setOllamaModelError] = useState('')
 
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
   const pickerRef = useRef(null)
+  const ollamaModelRef = useRef(null)
   const token = settings?.localAgentToken ?? ''
-  const autoSentRef = useRef(false)
-  const { ollamaModel: activeModel } = useLLMSettings()
-  const chatModel = activeModel || model
+  const autoSentRef = useRef(null)
+  const {
+    llmProvider,
+    setLLMProvider,
+    ollamaModel,
+    setOllamaModel,
+    remoteModel,
+    setRemoteModel,
+  } = useLLMSettings()
+  const activeSettingsModel = llmProvider === 'ollama' ? ollamaModel : remoteModel
+  const chatModel = activeSettingsModel || model
 
   const MODES = [
     ...BASE_MODES,
@@ -103,6 +123,52 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
   ]
 
   const { messages, isStreaming, error, sendMessage, clear } = useLLMChat({ token, model: chatModel })
+
+  useEffect(() => {
+    ollamaModelRef.current = ollamaModel
+  }, [ollamaModel])
+
+  const refreshOllamaModels = useCallback(async () => {
+    if (!token?.trim()) {
+      setOllamaModelError('local agent token missing')
+      setOllamaModels([])
+      return
+    }
+    setOllamaModelLoading(true)
+    setOllamaModelError('')
+    try {
+      const data = await getLLMModels(token)
+      const models = data.models ?? []
+      setOllamaModels(models)
+      const selectedModel = ollamaModelRef.current
+      if (models.length && (!selectedModel || !models.some(item => item.name === selectedModel))) {
+        setOllamaModel(models[0].name)
+      }
+    } catch (err) {
+      setOllamaModels([])
+      setOllamaModelError(err.message ?? 'could not load models')
+    } finally {
+      setOllamaModelLoading(false)
+    }
+  }, [setOllamaModel, token])
+
+  useEffect(() => {
+    if (llmProvider === 'ollama') refreshOllamaModels()
+  }, [llmProvider, refreshOllamaModels])
+
+  useEffect(() => {
+    const refreshStash = () => setStashItems(loadStashItems())
+    window.addEventListener('jotit:stash-changed', refreshStash)
+    return () => window.removeEventListener('jotit:stash-changed', refreshStash)
+  }, [])
+
+  const toggleMarkdown = () => {
+    setRenderMarkdown(prev => {
+      const next = !prev
+      localStorage.setItem(NIB_MARKDOWN_RESPONSES_KEY, String(next))
+      return next
+    })
+  }
 
   // ── Picker results ──────────────────────────────────────────────────────────
 
@@ -135,16 +201,24 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     if (!selectionText && !regexContext) inputRef.current?.focus()
   }, [])
 
+  useEffect(() => {
+    if (autoSendInitialMessage || !initialMessageNonce) return
+    setInput(initialMessage)
+    inputRef.current?.focus()
+  }, [autoSendInitialMessage, initialMessage, initialMessageNonce])
+
   // ── Auto-send initial message ───────────────────────────────────────────────
 
   useEffect(() => {
-    if (!initialMessage.trim() || autoSentRef.current) return
-    autoSentRef.current = true
-    const ctx = regexContext ? buildRegexContext(regexContext) : buildNoteLLMContext(note)
+    if (!autoSendInitialMessage) return
+    const nonce = initialMessageNonce || 'initial'
+    if (!initialMessage.trim() || autoSentRef.current === nonce) return
+    autoSentRef.current = nonce
+    const ctx = resolveStashRefs(regexContext ? buildRegexContext(regexContext) : buildNoteLLMContext(note), stashItems)
     const mode = regexContext ? 'regex' : contextMode
-    sendMessage(initialMessage.trim(), ctx, mode)
+    sendMessage(resolveStashRefs(initialMessage.trim(), stashItems), ctx, mode)
     setInput('')
-  }, [])
+  }, [autoSendInitialMessage, contextMode, initialMessage, initialMessageNonce, note, regexContext, sendMessage, stashItems])
 
   // ── Escape closes nib (not picker) ─────────────────────────────────────────
 
@@ -178,15 +252,30 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
       const refCtx = buildReferencedNotesContext(referencedNotes)
       ctx = ctx ? `${ctx}\n\n${refCtx}` : refCtx
     }
-    return ctx
-  }, [contextMode, regexContext, notes, selectionText, note, referencedNotes])
+    return resolveStashRefs(ctx, stashItems)
+  }, [contextMode, regexContext, notes, selectionText, note, referencedNotes, stashItems])
 
   // ── Send ────────────────────────────────────────────────────────────────────
 
   const handleSend = () => {
     if (!input.trim() || isStreaming) return
-    sendMessage(input.trim(), buildContext(), contextMode)
+    sendMessage(resolveStashRefs(input.trim(), stashItems), buildContext(), contextMode)
     setInput('')
+  }
+
+  const sendResponseToNote = (message, index) => {
+    if (!onCreateNoteFromContent || !message?.content?.trim()) return
+    const sourceTitle = noteTitle(note)
+    const content = [
+      'Nib response',
+      '',
+      sourceTitle ? `Source: ${sourceTitle}` : null,
+      `Created: ${new Date().toLocaleString()}`,
+      '',
+      message.content.trim(),
+    ].filter(Boolean).join('\n')
+    onCreateNoteFromContent(content)
+    setSavedMessageIndex(index)
   }
 
   // ── Note reference selection ────────────────────────────────────────────────
@@ -280,10 +369,50 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-3">
-          {chatModel && (
-            <span className="text-[10px] text-zinc-500 font-mono bg-zinc-800 px-2 py-0.5 rounded">
-              {chatModel}
-            </span>
+          <select
+            value={llmProvider}
+            onChange={e => setLLMProvider(e.target.value)}
+            disabled={isStreaming}
+            title="Nib provider"
+            className="max-w-[7rem] rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300 outline-none transition-colors focus:border-zinc-500 disabled:opacity-50"
+          >
+            <option value="ollama">Ollama</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+          {llmProvider === 'ollama' ? (
+            <div className="flex items-center gap-1">
+              <select
+                value={ollamaModel}
+                onChange={e => setOllamaModel(e.target.value)}
+                disabled={isStreaming || ollamaModelLoading || !ollamaModels.length}
+                title={ollamaModelError || 'Ollama model'}
+                className="max-w-[11rem] rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300 outline-none transition-colors focus:border-zinc-500 disabled:opacity-50"
+              >
+                {!ollamaModels.length && ollamaModel && <option value={ollamaModel}>{ollamaModel}</option>}
+                {!ollamaModels.length && !ollamaModel && <option value="">{ollamaModelLoading ? 'Loading...' : 'No models'}</option>}
+                {ollamaModels.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
+              </select>
+              <button
+                type="button"
+                onClick={refreshOllamaModels}
+                disabled={isStreaming || ollamaModelLoading}
+                title={ollamaModelError || 'Refresh Ollama models'}
+                className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-50"
+              >
+                {ollamaModelLoading ? '...' : 'R'}
+              </button>
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={remoteModel}
+              onChange={e => setRemoteModel(e.target.value)}
+              disabled={isStreaming}
+              placeholder="openrouter model"
+              title="OpenRouter model"
+              spellCheck={false}
+              className="w-44 rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300 placeholder-zinc-600 outline-none transition-colors focus:border-zinc-500 disabled:opacity-50"
+            />
           )}
           {messages.length > 0 && (
             <button
@@ -294,6 +423,18 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
               Clear
             </button>
           )}
+          <button
+            onClick={toggleMarkdown}
+            title={renderMarkdown ? 'Show Nib responses as plain text' : 'Render Nib responses as Markdown'}
+            aria-pressed={renderMarkdown}
+            className={`text-[11px] transition-colors ${
+              renderMarkdown
+                ? 'text-violet-300 hover:text-violet-100'
+                : 'text-zinc-600 hover:text-zinc-400'
+            }`}
+          >
+            MD
+          </button>
           <button
             onClick={onClose}
             title="Close (Esc)"
@@ -395,16 +536,34 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
         )}
         {messages.map((msg, i) => (
           <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div
-              className={`max-w-[85%] px-3 py-2 rounded-lg text-[13px] whitespace-pre-wrap leading-relaxed ${
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white rounded-br-sm'
-                  : 'bg-zinc-800 text-zinc-200 rounded-bl-sm'
-              }`}
-            >
-              {msg.content}
-              {msg.role === 'assistant' && isStreaming && i === messages.length - 1 && (
-                <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-zinc-400 align-middle animate-pulse rounded-sm" />
+            <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%]`}>
+              <div
+                className={`w-full px-3 py-2 rounded-lg text-[13px] leading-relaxed ${
+                  msg.role === 'user'
+                    ? 'bg-blue-600 text-white rounded-br-sm whitespace-pre-wrap'
+                    : renderMarkdown
+                      ? 'bg-zinc-800 text-zinc-200 rounded-bl-sm'
+                      : 'bg-zinc-800 text-zinc-200 rounded-bl-sm whitespace-pre-wrap'
+                }`}
+              >
+                {msg.role === 'assistant' && renderMarkdown ? (
+                  <div
+                    className="md-prose nib-markdown max-w-none"
+                    dangerouslySetInnerHTML={{ __html: marked.parse(msg.content, { gfm: true, breaks: true }) }}
+                  />
+                ) : msg.content}
+                {msg.role === 'assistant' && isStreaming && i === messages.length - 1 && (
+                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-zinc-400 align-middle animate-pulse rounded-sm" />
+                )}
+              </div>
+              {msg.role === 'assistant' && onCreateNoteFromContent && !(isStreaming && i === messages.length - 1) && (
+                <button
+                  onClick={() => sendResponseToNote(msg, i)}
+                  title="Create a note from this response"
+                  className="mt-1 text-[10px] text-zinc-600 hover:text-zinc-300 transition-colors"
+                >
+                  {savedMessageIndex === i ? 'Sent to note' : 'Send to note'}
+                </button>
               )}
             </div>
           </div>

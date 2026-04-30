@@ -132,17 +132,32 @@ export function useNoteWorkspace() {
   const openNibPane = useCallback((payload = {}) => {
     const sourceNoteId = payload.noteId ?? activeNoteId
     if (sourceNoteId) setActiveNoteId(sourceNoteId)
+    const initialMessageNonce = payload.initialMessage != null ? generateId() : undefined
 
     setEditorPanes(prev => {
-      const existing = prev.find(pane => pane.type === 'nib' && pane.sourceNoteId === sourceNoteId)
+      const existing = payload.reuseExisting
+        ? prev.find(pane => pane.type === 'nib')
+        : prev.find(pane => pane.type === 'nib' && pane.sourceNoteId === sourceNoteId)
       if (existing) {
         setActivePaneId(existing.id)
-        return prev.map(pane => pane.id === existing.id ? { ...pane, ...payload, type: 'nib', sourceNoteId } : pane)
+        return prev.map(pane => pane.id === existing.id ? {
+          ...pane,
+          ...payload,
+          type: 'nib',
+          sourceNoteId,
+          ...(initialMessageNonce ? { initialMessageNonce } : {}),
+        } : pane)
       }
 
       const paneId = generateId()
       setActivePaneId(paneId)
-      return [...prev, { id: paneId, type: 'nib', sourceNoteId, ...payload }]
+      return [...prev, {
+        id: paneId,
+        type: 'nib',
+        sourceNoteId,
+        ...payload,
+        ...(initialMessageNonce ? { initialMessageNonce } : {}),
+      }]
     })
   }, [activeNoteId])
 

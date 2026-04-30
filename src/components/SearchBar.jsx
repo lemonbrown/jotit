@@ -71,30 +71,51 @@ export default function SearchBar({
           </button>
         )}
       </div>
-      {draftValue && (
+      <div className="shrink-0 inline-flex rounded-md border border-zinc-700 overflow-hidden bg-zinc-900">
         <button
-          onClick={onToggleMode}
-          title={searchMode === 'plain' ? 'Plain text search - click for smart search' : 'Smart search - click for plain text'}
-          className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+          onClick={() => searchMode !== 'plain' && onToggleMode()}
+          title="Plain text search"
+          aria-pressed={searchMode === 'plain'}
+          className={`px-2 py-1 text-[10px] font-mono transition-colors ${
             searchMode === 'plain'
-              ? 'border-blue-500 text-blue-400 bg-blue-950/50'
-              : 'border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500'
+              ? 'text-blue-300 bg-blue-950/60'
+              : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
           }`}
         >
-          Aa
+          Plain
         </button>
-      )}
-      {draftValue && llmEnabled && searchMode !== 'plain' && (
         <button
-          onClick={onImproveWithNib}
-          disabled={isNibSearching}
-          title={nibSearchApplied ? 'Nib-ranked results' : 'Improve ranking with Nib'}
+          onClick={() => searchMode === 'plain' && onToggleMode()}
+          title="Smart search with local/server search intelligence"
+          aria-pressed={searchMode !== 'plain'}
+          className={`px-2 py-1 text-[10px] font-mono border-l border-zinc-700 transition-colors ${
+            searchMode !== 'plain'
+              ? 'text-emerald-300 bg-emerald-950/40'
+              : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+          }`}
+        >
+          Smart
+        </button>
+      </div>
+      {draftValue && searchMode !== 'plain' && (
+        <button
+          onClick={llmEnabled ? onImproveWithNib : undefined}
+          disabled={!llmEnabled || isNibSearching}
+          title={
+            !llmEnabled
+              ? 'Enable Nib in Settings to rerank smart search results'
+              : nibSearchApplied
+                ? 'Nib-ranked results'
+                : 'Improve ranking with Nib'
+          }
           className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
-            nibSearchApplied
-              ? 'border-violet-600 text-violet-300 bg-violet-950/50'
+            !llmEnabled
+              ? 'border-zinc-800 text-zinc-700 bg-zinc-900 cursor-not-allowed'
+            : nibSearchApplied
+              ? 'border-emerald-600 text-emerald-300 bg-emerald-950/50'
               : isNibSearching
-                ? 'border-violet-900 text-violet-600 bg-violet-950/20'
-                : 'border-violet-900 text-violet-500 hover:text-violet-300 hover:border-violet-700 bg-violet-950/20'
+                ? 'border-emerald-900 text-emerald-600 bg-emerald-950/20'
+                : 'border-emerald-900 text-emerald-500 hover:text-emerald-300 hover:border-emerald-700 bg-emerald-950/20'
           }`}
         >
           {isNibSearching ? '...' : 'Nib'}

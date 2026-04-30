@@ -3,6 +3,7 @@ import { parseRequests } from '../utils/httpParser'
 import { buildOpenApiDiscoveryUrls, extractOpenApiDiscoveryUrls, getOpenApiSpecFileName } from '../utils/openapi/discovery'
 import { parseOpenApiJson } from '../utils/openapi/parse'
 import { loadSettings } from '../utils/storage'
+import { loadStashItems, resolveStashRefs } from '../utils/stash'
 import HttpRequestPane, { LOCAL_AGENT_ORIGIN, isAgentEnabled } from './HttpRequestPane'
 
 function getRequestOrigin(req) {
@@ -63,6 +64,7 @@ export default function HttpRunner({
   const hasSelection = initialText && initialText.trim().length > 0
   const [useSelection, setUseSelection] = useState(hasSelection)
   const [agentStatus, setAgentStatus] = useState({ checking: true, available: false })
+  const [stashItems, setStashItems] = useState(() => loadStashItems())
 
   useEffect(() => {
     let cancelled = false
@@ -77,7 +79,13 @@ export default function HttpRunner({
     return () => { cancelled = true }
   }, [])
 
-  const activeContent = useSelection && hasSelection ? initialText : noteContent
+  useEffect(() => {
+    const refreshStash = () => setStashItems(loadStashItems())
+    window.addEventListener('jotit:stash-changed', refreshStash)
+    return () => window.removeEventListener('jotit:stash-changed', refreshStash)
+  }, [])
+
+  const activeContent = resolveStashRefs(useSelection && hasSelection ? initialText : noteContent, stashItems)
   const requests = requestsOverride?.length ? requestsOverride : parseRequests(activeContent)
   const [activeIdx, setActiveIdx] = useState(0)
   const active = requests[activeIdx] ?? requests[0]

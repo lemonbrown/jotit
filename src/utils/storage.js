@@ -29,10 +29,13 @@ export function saveNotes(notes) {
 const SETTINGS_DEFAULTS = {
   serverProxy: false,
   localAgentToken: '',
+  embeddingProvider: 'openai',
+  ollamaEmbedModel: 'nomic-embed-text',
   bucketName: '',
   theme: 'dark',
   secretScanEnabled: false,
   secretScanBlockSync: false,
+  secretScanNibEnabled: false,
   syncEnabled: true,
 }
 

@@ -25,6 +25,7 @@ export {
   setSyncExcluded,
   setAllSyncExcluded,
   markSynced,
+  setNoteEmbeddingSync,
   deleteNoteSync,
 } from './db/notes.js'
 export {

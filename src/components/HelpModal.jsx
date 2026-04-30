@@ -117,13 +117,11 @@ export default function HelpModal({ onClose }) {
 
           <Section title="Search" rows={[
             [['text'],               'Instant filter by content or category tags'],
-            [['AI semantic'],        'Signed-in users get server-backed semantic search when AI is enabled'],
+            [['AI semantic'],        'Smart search can use local Ollama embeddings without signing in'],
           ]} />
 
           <Section title="AI" rows={[
-            [['Account-gated'],      'Server AI features require a signed-in account'],
-            [['Semantic search'],    'Global search can rank by meaning for signed-in users'],
-            [['Key ownership'],      'The server owns the AI key; users do not bring their own'],
+            [['Local embeddings'],   'Ollama embeddings run through jotit-agent for local notes']
           ]} />
 
           <Section title="Database" rows={[

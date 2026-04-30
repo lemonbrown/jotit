@@ -5,6 +5,7 @@ export default function SyncSection({
   embedSaving,
   embedStatus,
   llmEnabled,
+  llmProvider = 'ollama',
   localAgentStatus,
   localAgentToken,
   ollamaAvailable,
@@ -13,11 +14,18 @@ export default function SyncSection({
   ollamaModels,
   onEmbedModelChange,
   onSaveEmbedConfig,
+  onLlmProviderChange,
   onToggleEmbedProvider,
   onToggleLlm,
   onToggleServerProxy,
   onToggleSync,
   serverProxy,
+  remoteApiKey = '',
+  remoteBaseUrl = 'https://openrouter.ai/api/v1',
+  remoteModel = '',
+  setRemoteApiKey,
+  setRemoteBaseUrl,
+  setRemoteModel,
   setLocalAgentToken,
   setOllamaModel,
   syncEnabled,
@@ -89,10 +97,11 @@ export default function SyncSection({
           <div>
             <label className="block text-xs font-medium text-zinc-400">✒ Nib</label>
             <p className="text-[11px] text-zinc-600 mt-0.5">
-              Query your notes with a locally running model via <code className="font-mono">jotit-agent</code>.
+              Query your notes with a local model or an OpenAI-compatible remote provider.
             </p>
-            {ollamaAvailable === true && <p className="text-[11px] text-emerald-400 mt-1">Ollama connected</p>}
-            {ollamaAvailable === false && <p className="text-[11px] text-zinc-600 mt-1">Ollama not reachable</p>}
+            {llmProvider === 'ollama' && ollamaAvailable === true && <p className="text-[11px] text-emerald-400 mt-1">Ollama connected</p>}
+            {llmProvider === 'ollama' && ollamaAvailable === false && <p className="text-[11px] text-zinc-600 mt-1">Ollama not reachable</p>}
+            {llmProvider !== 'ollama' && remoteApiKey && remoteModel && <p className="text-[11px] text-emerald-400 mt-1">Remote provider configured</p>}
           </div>
           <button
             role="switch"
@@ -105,6 +114,54 @@ export default function SyncSection({
         </div>
         {llmEnabled && (
           <div className="mt-3 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => onLlmProviderChange?.('ollama')}
+                className={`rounded-md border px-3 py-2 text-xs transition-colors ${llmProvider === 'ollama' ? 'border-emerald-700 bg-emerald-950/30 text-emerald-200' : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+              >
+                Ollama
+              </button>
+              <button
+                type="button"
+                onClick={() => onLlmProviderChange?.('openrouter')}
+                className={`rounded-md border px-3 py-2 text-xs transition-colors ${llmProvider !== 'ollama' ? 'border-emerald-700 bg-emerald-950/30 text-emerald-200' : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+              >
+                OpenRouter
+              </button>
+            </div>
+            {llmProvider !== 'ollama' && (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={remoteBaseUrl}
+                  onChange={e => setRemoteBaseUrl?.(e.target.value)}
+                  placeholder="https://openrouter.ai/api/v1"
+                  spellCheck={false}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+                />
+                <input
+                  type="password"
+                  value={remoteApiKey}
+                  onChange={e => setRemoteApiKey?.(e.target.value)}
+                  placeholder="OpenRouter API key"
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+                />
+                <input
+                  type="text"
+                  value={remoteModel}
+                  onChange={e => setRemoteModel?.(e.target.value)}
+                  placeholder="openai/gpt-4o-mini"
+                  spellCheck={false}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 font-mono placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors"
+                />
+                <p className="text-[11px] text-zinc-600">
+                  OpenRouter uses an OpenAI-compatible chat completions API at <code className="font-mono">/chat/completions</code>. Your key is stored locally in this browser.
+                </p>
+              </div>
+            )}
+            {llmProvider === 'ollama' && (
+              <>
             <div className="flex items-center gap-2">
               <select
                 value={ollamaModel}
@@ -136,6 +193,8 @@ export default function SyncSection({
               <p className="text-[11px] text-zinc-600">
                 Active chat model: <code className="font-mono text-zinc-400">{ollamaModel}</code>
               </p>
+            )}
+              </>
             )}
           </div>
         )}
@@ -179,7 +238,7 @@ export default function SyncSection({
                 </button>
               </div>
               <p className="text-[11px] text-zinc-600">
-                Run <code className="font-mono">ollama pull nomic-embed-text</code> first. After saving, use Reindex on the AI status page to rebuild embeddings.
+                Run <code className="font-mono">ollama pull nomic-embed-text</code> first. Local smart search will build missing embeddings as you search. Signed-in server search can still use Reindex.
               </p>
             </div>
           )}
@@ -197,7 +256,7 @@ export default function SyncSection({
           {embedStatus?.ok && (
             <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-              Saved - run Reindex to rebuild embeddings with the new provider
+              Saved. Local smart search will build missing embeddings as needed; signed-in server search can be reindexed separately.
             </p>
           )}
           {embedStatus?.error && <p className="text-[11px] text-red-400">{embedStatus.error}</p>}

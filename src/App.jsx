@@ -71,7 +71,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [pins, setPins] = useState(() => new Map())
   const [settings, setSettings] = useState(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
-  const { llmEnabled, ollamaModel } = useLLMSettings()
+  const { llmEnabled, llmProvider, ollamaModel, remoteModel, remoteApiKey } = useLLMSettings()
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme ?? 'dark'
@@ -117,6 +117,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [draggedNoteId, setDraggedNoteId] = useState(null)
   const [syncHeldIds, setSyncHeldIds] = useState([])
   const [publishSecretGate, setPublishSecretGate] = useState(null) // { note, viewMode, matches }
+  const [selectedShareNoteIds, setSelectedShareNoteIds] = useState(() => new Set())
+  const [shareSelectedState, setShareSelectedState] = useState(null)
+  const [sharingSelected, setSharingSelected] = useState(false)
   const [dragOverCollectionId, setDragOverCollectionId] = useState(null)
   const [nibLiveContext, setNibLiveContext] = useState({
     noteId: null,
@@ -238,8 +241,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     searchQuery,
   } = useNoteSearch(collectionNotesRef, user, searchCollectionId, {
     llmEnabled,
+    llmProvider,
     agentToken: settings.localAgentToken ?? '',
-    ollamaModel,
+    ollamaModel: llmProvider === 'ollama' ? ollamaModel : remoteModel,
   })
   const { isDragging, handleDragEnter, handleDragLeave, handleDragOver, handleDrop } = useNoteDropImport({
     activeCollectionId: writableCollectionId,
@@ -293,6 +297,17 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setEditorFocusNonce(n => n + 1)
     clearSearch()
   }, [addNote, clearSearch, recordLocation, showSinglePaneForNote, writableCollectionId])
+
+  const createNoteFromContentInNewPane = useCallback((content) => {
+    const note = createEmptyNote({ collectionId: writableCollectionId })
+    note.content = content
+    note.updatedAt = Date.now()
+    const created = addNote(note)
+    openNoteInPane(created.id, { newPane: true })
+    setEditorFocusNonce(n => n + 1)
+    clearSearch()
+    return created
+  }, [addNote, clearSearch, openNoteInPane, writableCollectionId])
 
   const createOpenApiNote = useCallback((fileName, document) => {
     const note = createImportedOpenApiNote(fileName, document)
@@ -462,6 +477,17 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setShowSettings(false)
   }, [])
 
+  const saveLocalAiConfig = useCallback((config) => {
+    const nextSettings = {
+      ...settings,
+      embeddingProvider: config.embeddingProvider ?? settings.embeddingProvider ?? 'openai',
+      ollamaEmbedModel: config.ollamaEmbedModel?.trim() || settings.ollamaEmbedModel || 'nomic-embed-text',
+    }
+    setSettings(nextSettings)
+    saveSettings(nextSettings)
+    return nextSettings
+  }, [settings])
+
   const handleToggleNoteSync = useCallback((noteId, included) => {
     setSyncIncluded(noteId, included)
     scheduleDbPersist()
@@ -546,16 +572,38 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [])
 
   const handleLoadAiConfig = useCallback(async () => {
+    if (!user) {
+      return {
+        embeddingProvider: settings.embeddingProvider ?? 'openai',
+        ollamaEmbedModel: settings.ollamaEmbedModel ?? 'nomic-embed-text',
+      }
+    }
+
     try {
       const res = await fetch('/api/ai/config')
-      if (!res.ok) return null
-      return res.json()
+      if (!res.ok) {
+        return {
+          embeddingProvider: settings.embeddingProvider ?? 'openai',
+          ollamaEmbedModel: settings.ollamaEmbedModel ?? 'nomic-embed-text',
+        }
+      }
+      const config = await res.json()
+      return {
+        embeddingProvider: config.embeddingProvider ?? settings.embeddingProvider ?? 'openai',
+        ollamaEmbedModel: config.ollamaEmbedModel ?? settings.ollamaEmbedModel ?? 'nomic-embed-text',
+      }
     } catch {
-      return null
+      return {
+        embeddingProvider: settings.embeddingProvider ?? 'openai',
+        ollamaEmbedModel: settings.ollamaEmbedModel ?? 'nomic-embed-text',
+      }
     }
-  }, [])
+  }, [settings.embeddingProvider, settings.ollamaEmbedModel, user])
 
   const handleSaveAiConfig = useCallback(async (config) => {
+    const nextSettings = saveLocalAiConfig(config)
+    if (!user) return { ok: true, embeddingProvider: nextSettings.embeddingProvider, ollamaEmbedModel: nextSettings.ollamaEmbedModel }
+
     try {
       const res = await fetch('/api/ai/config', {
         method: 'POST',
@@ -568,7 +616,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     } catch (e) {
       return { error: e.message ?? 'Network error' }
     }
-  }, [])
+  }, [saveLocalAiConfig, user])
 
   const handleSetCollectionVisibility = useCallback(async (collection, isPublic) => {
     if (!user) {
@@ -615,6 +663,34 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     }
   }, [updateNote, user])
 
+  const prepareNoteForPublicShare = useCallback((note, viewMode = null) => {
+    let content = note.content ?? ''
+
+    const markerRegex = /\[img:\/\/([^\]]+)\]/g
+    const markerIds = [...content.matchAll(markerRegex)].map(m => m[1])
+
+    if (markerIds.length > 0) {
+      const attachments = getAttachmentsForNote(note.id)
+      const attachMap = Object.fromEntries(attachments.map(a => [a.id, a]))
+
+      const totalBytes = attachments
+        .filter(a => markerIds.includes(a.id))
+        .reduce((sum, a) => sum + (a.data?.length ?? 0), 0)
+
+      if (totalBytes > 5 * 1024 * 1024) {
+        const mb = (totalBytes / (1024 * 1024)).toFixed(1)
+        return { error: `Images are too large to share (${mb} MB). Limit is 5 MB total.` }
+      }
+
+      content = content.replace(markerRegex, (_, id) => {
+        const att = attachMap[id]
+        return att ? `![](${att.data})` : ''
+      })
+    }
+
+    return { note: { ...note, content, viewMode: viewMode ?? null } }
+  }, [])
+
   const handlePublishNote = useCallback(async (note, viewMode) => {
     if (settings.secretScanEnabled) {
       const c = note.content ?? ''
@@ -627,34 +703,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     }
 
     try {
-      let content = note.content ?? ''
-
-      const markerRegex = /\[img:\/\/([^\]]+)\]/g
-      const markerIds = [...content.matchAll(markerRegex)].map(m => m[1])
-
-      if (markerIds.length > 0) {
-        const attachments = getAttachmentsForNote(note.id)
-        const attachMap = Object.fromEntries(attachments.map(a => [a.id, a]))
-
-        const totalBytes = attachments
-          .filter(a => markerIds.includes(a.id))
-          .reduce((sum, a) => sum + (a.data?.length ?? 0), 0)
-
-        if (totalBytes > 5 * 1024 * 1024) {
-          const mb = (totalBytes / (1024 * 1024)).toFixed(1)
-          return { error: `Images are too large to share (${mb} MB). Limit is 5 MB total.` }
-        }
-
-        content = content.replace(markerRegex, (_, id) => {
-          const att = attachMap[id]
-          return att ? `![](${att.data})` : ''
-        })
-      }
+      const prepared = prepareNoteForPublicShare(note, viewMode)
+      if (prepared.error) return { error: prepared.error }
 
       const res = await fetch('/api/public-note/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note: { ...note, content, viewMode: viewMode ?? null } }),
+        body: JSON.stringify({ note: prepared.note }),
       })
       const data = await res.json()
       if (!res.ok) return { error: data.error ?? 'Publish failed' }
@@ -662,7 +717,50 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     } catch (e) {
       return { error: e.message ?? 'Network error' }
     }
-  }, [settings])
+  }, [prepareNoteForPublicShare, settings])
+
+  const selectedShareNotes = useMemo(
+    () => [...selectedShareNoteIds].map(id => notes.find(note => note.id === id)).filter(Boolean),
+    [notes, selectedShareNoteIds]
+  )
+
+  const handlePublishSelectedNotes = useCallback(async () => {
+    if (!user) { setShowAuth(true); return { error: 'Sign in to share notes' } }
+    if (selectedShareNotes.length < 2) return { error: 'Select at least two notes to share' }
+
+    if (settings.secretScanEnabled) {
+      const blocked = selectedShareNotes.find(note => {
+        const c = note.content ?? ''
+        const matches = scanForSecrets(c)
+        const isCleared = note.secretsClearedHash && note.secretsClearedHash === contentHash(c)
+        return matches.length && !isCleared
+      })
+      if (blocked) return { error: `Clear secrets before sharing "${getNoteTitle(blocked)}"` }
+    }
+
+    const prepared = []
+    for (const note of selectedShareNotes) {
+      const result = prepareNoteForPublicShare(note, null)
+      if (result.error) return { error: result.error }
+      prepared.push(result.note)
+    }
+
+    try {
+      const title = selectedShareNotes.length === 2
+        ? `${getNoteTitle(selectedShareNotes[0])} + ${getNoteTitle(selectedShareNotes[1])}`
+        : `${getNoteTitle(selectedShareNotes[0])} + ${selectedShareNotes.length - 1} notes`
+      const res = await fetch('/api/public-note/publish-bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, notes: prepared }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Publish failed' }
+      return { ok: true, url: data.url, slug: data.slug, noteCount: data.noteCount ?? prepared.length }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [prepareNoteForPublicShare, selectedShareNotes, settings.secretScanEnabled, user])
 
   const handleListSharedLinks = useCallback(async () => {
     try {
@@ -732,6 +830,11 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   }, [])
 
   const displayedNotes = useMemo(() => searchResults?.map(result => result.note) ?? sortedCollectionNotes, [sortedCollectionNotes, searchResults])
+  const nibConnected = llmEnabled && (
+    llmProvider === 'ollama'
+      ? Boolean(ollamaModel)
+      : Boolean(remoteApiKey && remoteModel)
+  )
   const displayedNoteById = useMemo(
     () => new Map(displayedNotes.map(note => [note.id, note])),
     [displayedNotes]
@@ -753,6 +856,39 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     scheduleDbPersist()
     setNotes(prev => prev.some(note => note.id === id) ? prev : [hydrated, ...prev])
   }, [defaultCollectionId, displayedNoteById, notesRef, setNotes])
+
+  const toggleShareNoteSelection = useCallback((noteId) => {
+    setShareSelectedState(null)
+    setSelectedShareNoteIds(prev => {
+      const next = new Set(prev)
+      if (next.has(noteId)) next.delete(noteId)
+      else next.add(noteId)
+      return next
+    })
+  }, [])
+
+  const clearShareNoteSelection = useCallback(() => {
+    setShareSelectedState(null)
+    setSelectedShareNoteIds(new Set())
+  }, [])
+
+  const publishShareNoteSelection = useCallback(async () => {
+    if (sharingSelected) return
+    setSharingSelected(true)
+    setShareSelectedState(null)
+    try {
+      const result = await handlePublishSelectedNotes()
+      if (result?.ok) {
+        const absolute = `${window.location.origin}${result.url}`
+        try { await navigator.clipboard.writeText(absolute) } catch {}
+        setShareSelectedState({ ok: true, url: result.url, copied: true })
+      } else {
+        setShareSelectedState({ error: result?.error ?? 'Publish failed' })
+      }
+    } finally {
+      setSharingSelected(false)
+    }
+  }, [handlePublishSelectedNotes, sharingSelected])
 
   useEffect(() => {
     if (!activeNoteId) return
@@ -957,7 +1093,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             onChange={handleSearch}
             isSearching={isSearching}
             aiEnabled={aiEnabled}
-            llmEnabled={llmEnabled}
+            llmEnabled={nibConnected}
             isNibSearching={isNibSearching}
             nibSearchApplied={nibSearchApplied}
             inputRef={searchRef}
@@ -973,9 +1109,12 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
               {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
             </span>
           )}
-          <div className={`flex items-center gap-1 text-[11px] ${aiEnabled ? 'text-green-500' : 'text-zinc-700'}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${aiEnabled ? 'bg-green-500' : 'bg-zinc-700'}`} />
-            <span className="hidden sm:inline">AI</span>
+          <div
+            title={nibConnected ? `Nib connected: ${llmProvider === 'ollama' ? ollamaModel : remoteModel}` : 'Nib provider not connected'}
+            className={`flex items-center gap-1 text-[11px] ${nibConnected ? 'text-green-500' : 'text-zinc-700'}`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${nibConnected ? 'bg-green-500' : 'bg-zinc-700'}`} />
+            <span className="hidden sm:inline">Nib</span>
           </div>
           <div className="flex items-center gap-0.5">
             <button
@@ -1203,6 +1342,12 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             onToggleNoteSync={user ? handleToggleNoteSync : undefined}
             pinnedIds={pinnedIds}
             onTogglePin={activeCollectionId !== ALL_COLLECTION_ID ? handleTogglePin : undefined}
+            selectedShareNoteIds={selectedShareNoteIds}
+            onToggleShareSelection={toggleShareNoteSelection}
+            onClearShareSelection={clearShareNoteSelection}
+            onShareSelected={publishShareNoteSelection}
+            shareSelectedState={shareSelectedState}
+            sharingSelected={sharingSelected}
             onSelectNote={(id, options = {}) => {
               if (diffLoaderRef.current) {
                 const note = notes.find(item => item.id === id)
@@ -1295,15 +1440,18 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                 )}
                 {isNibPane ? (
                   <LLMChat
-                    key={`${paneId}:nib:${pane.sourceNoteId ?? 'none'}`}
+                    key={`${paneId}:nib`}
                     note={nibNote}
                     notes={notes}
                     selectionText={nibContext.selectionText}
                     regexContext={pane.regexContext ?? null}
                     initialMessage={pane.initialMessage ?? ''}
+                    initialMessageNonce={pane.initialMessageNonce ?? ''}
+                    autoSendInitialMessage={pane.autoSendInitialMessage ?? true}
                     settings={{ localAgentToken: settings.localAgentToken ?? '' }}
-                    model={ollamaModel}
+                    model={llmProvider === 'ollama' ? ollamaModel : remoteModel}
                     pane
+                    onCreateNoteFromContent={createNoteFromContentInNewPane}
                     onJumpToSelection={() => {
                       if (nibContext.noteId) openNoteInPane(nibContext.noteId)
                     }}
@@ -1341,10 +1489,12 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     searchQuery={searchQuery}
                     simpleEditor={simpleEditorMode}
                     secretScanEnabled={settings.secretScanEnabled ?? false}
+                    secretScanNibEnabled={settings.secretScanNibEnabled ?? false}
                     hideCommandToolbars={simpleEditorMode || commandToolbarsHidden}
-                    llmEnabled={llmEnabled}
-                    ollamaModel={ollamaModel}
+                    llmEnabled={nibConnected}
+                    ollamaModel={llmProvider === 'ollama' ? ollamaModel : remoteModel}
                     agentToken={settings.localAgentToken ?? ''}
+                    nibTemplates={settings.nibTemplates ?? {}}
                     onOpenNibPane={openNibPane}
                     onNibContextChange={activePaneId === paneId ? handleNibContextChange : undefined}
                     onDiffModeChange={(loader) => {

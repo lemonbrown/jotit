@@ -36,6 +36,12 @@ const PATTERNS = [
     severity: 'high',
   },
   {
+    type: 'openrouter_api_key',
+    label: 'OpenRouter API Key',
+    pattern: /\bsk-or-v1-[0-9a-f]{32,}\b/gi,
+    severity: 'high',
+  },
+  {
     type: 'slack_token',
     label: 'Slack Token',
     pattern: /\bxox[baprs]-[0-9A-Za-z\-]{10,}\b/g,

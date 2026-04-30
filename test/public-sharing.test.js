@@ -177,6 +177,53 @@ async function testPublicNotePageApiReturnsSharedNoteData() {
   }
 }
 
+async function testPublishBundleCreatesSinglePublicLinkForMultipleNotes() {
+  const files = makeTempFiles()
+  try {
+    const app = createMockApp()
+    registerPublicSharing(app, { ...files, pgPool: null })
+
+    const publishHandlers = app.routes.post.get('/api/public-note/publish-bundle')
+    const publishRes = createMockResponse()
+    await runHandlers(publishHandlers, {
+      body: {
+        title: 'Release notes',
+        notes: [
+          { id: 'bundle-note-1', content: '# First\nBody one', categories: ['a'], updatedAt: 111, viewMode: 'markdown' },
+          { id: 'bundle-note-2', content: '# Second\nBody two', categories: ['b'], updatedAt: 222, viewMode: null },
+        ],
+      },
+    }, publishRes)
+
+    assert.equal(publishRes.statusCode, 200)
+    assert.equal(publishRes.jsonBody.noteCount, 2)
+    assert.match(publishRes.jsonBody.url, /^\/n\//)
+
+    const listHandlers = app.routes.get.get('/api/public-notes')
+    const listRes = createMockResponse()
+    await runHandlers(listHandlers, {}, listRes)
+
+    assert.equal(listRes.statusCode, 200)
+    assert.equal(listRes.jsonBody.links.length, 1)
+    assert.equal(listRes.jsonBody.links[0].title, 'Release notes')
+    assert.equal(listRes.jsonBody.links[0].viewMode, 'bundle')
+    assert.equal(listRes.jsonBody.links[0].noteCount, 2)
+
+    const pageHandlers = app.routes.get.get('/api/public-pages/n/:slug')
+    const pageRes = createMockResponse()
+    await runHandlers(pageHandlers, { params: { slug: publishRes.jsonBody.slug } }, pageRes)
+
+    assert.equal(pageRes.statusCode, 200)
+    assert.equal(pageRes.jsonBody.kind, 'note')
+    assert.equal(pageRes.jsonBody.title, 'Release notes')
+    assert.equal(pageRes.jsonBody.notes.length, 2)
+    assert.equal(pageRes.jsonBody.notes[0].id, 'bundle-note-1')
+    assert.equal(pageRes.jsonBody.notes[1].content, '# Second\nBody two')
+  } finally {
+    rmSync(files.dir, { recursive: true, force: true })
+  }
+}
+
 async function testMissingPublicNotePageApiReturnsJson404() {
   const files = makeTempFiles()
   try {
@@ -249,6 +296,7 @@ export default [
   ['public sharing deletes published note links', testDeletePublicNoteRemovesPublishedLink],
   ['public sharing reuses an existing note link on republish', testRepublishReusesExistingPublicLink],
   ['public note page api returns shared note data', testPublicNotePageApiReturnsSharedNoteData],
+  ['public bundle creates one link for multiple notes', testPublishBundleCreatesSinglePublicLinkForMultipleNotes],
   ['missing public note page api returns json 404', testMissingPublicNotePageApiReturnsJson404],
   ['file bucket page api returns direct notes', testFileBucketPageApiReturnsDirectNotes],
   ['public sharing does not register html page routes', testServerDoesNotRegisterPublicHtmlRoutes],

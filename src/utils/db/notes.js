@@ -88,6 +88,15 @@ export function upsertNoteSync(note, dirty = 1) {
   )
 }
 
+export function setNoteEmbeddingSync(noteId, embedding) {
+  const db = getDb()
+  if (!db || !noteId) return
+  db.run('UPDATE notes SET embedding = ? WHERE id = ?', [
+    embedding?.length ? JSON.stringify(embedding) : null,
+    noteId,
+  ])
+}
+
 export function markPendingDelete(id) {
   const db = getDb()
   if (!db) return

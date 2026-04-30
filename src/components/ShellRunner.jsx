@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { parseShellBlocks } from '../utils/shellParser'
 import { loadSettings } from '../utils/storage'
+import { loadStashItems, resolveStashRefs } from '../utils/stash'
 
 const LOCAL_AGENT_ORIGIN = 'http://127.0.0.1:3210'
 
@@ -14,7 +15,7 @@ function exitCodeColor(code) {
   return code === 0 ? 'text-emerald-400' : 'text-red-400'
 }
 
-function BlockPane({ block, agentStatus, runTrigger = 0, onCreateNoteFromContent }) {
+function BlockPane({ block, agentStatus, stashItems, runTrigger = 0, onCreateNoteFromContent }) {
   const [cwd, setCwd] = useState('')
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -53,7 +54,7 @@ function BlockPane({ block, agentStatus, runTrigger = 0, onCreateNoteFromContent
         body: JSON.stringify({
           command: block.command,
           lang: block.lang,
-          cwd: cwd.trim() || undefined,
+          cwd: resolveStashRefs(cwd.trim(), stashItems) || undefined,
         }),
         signal: abortRef.current.signal,
       })
@@ -67,7 +68,7 @@ function BlockPane({ block, agentStatus, runTrigger = 0, onCreateNoteFromContent
     } finally {
       setLoading(false)
     }
-  }, [agentStatus.available, block.command, cwd])
+  }, [agentStatus.available, block.command, block.lang, cwd, stashItems])
 
   useEffect(() => { runRef.current = run })
 
@@ -234,6 +235,7 @@ export default function ShellRunner({ noteContent, initialText, runTrigger = 0, 
   const hasSelection = initialText && initialText.trim().length > 0
   const [useSelection, setUseSelection] = useState(hasSelection)
   const [agentStatus, setAgentStatus] = useState({ checking: true, available: false })
+  const [stashItems, setStashItems] = useState(() => loadStashItems())
 
   useEffect(() => {
     let cancelled = false
@@ -244,7 +246,13 @@ export default function ShellRunner({ noteContent, initialText, runTrigger = 0, 
     return () => { cancelled = true }
   }, [])
 
-  const activeContent = useSelection && hasSelection ? initialText : noteContent
+  useEffect(() => {
+    const refreshStash = () => setStashItems(loadStashItems())
+    window.addEventListener('jotit:stash-changed', refreshStash)
+    return () => window.removeEventListener('jotit:stash-changed', refreshStash)
+  }, [])
+
+  const activeContent = resolveStashRefs(useSelection && hasSelection ? initialText : noteContent, stashItems)
   const blocks = parseShellBlocks(activeContent)
   const [activeIdx, setActiveIdx] = useState(0)
 
@@ -300,7 +308,7 @@ export default function ShellRunner({ noteContent, initialText, runTrigger = 0, 
         </div>
       )}
 
-      <BlockPane key={`${activeIdx}-${active.command}`} block={active} agentStatus={agentStatus} runTrigger={runTrigger} onCreateNoteFromContent={onCreateNoteFromContent} />
+      <BlockPane key={`${activeIdx}-${active.command}`} block={active} agentStatus={agentStatus} stashItems={stashItems} runTrigger={runTrigger} onCreateNoteFromContent={onCreateNoteFromContent} />
     </div>
   )
 }

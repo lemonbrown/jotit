@@ -47,14 +47,21 @@ import { useNoteSelection } from '../hooks/useNoteSelection'
 import { useNoteMode } from '../hooks/useNoteMode'
 import SecretAlert from './SecretAlert'
 import { runJsInWorker } from '../utils/jsRunner'
-import { NOW_COMMAND, formatCurrentDateTime, getInlineCommandRange } from '../utils/noteCommands'
+import { NOW_COMMAND, NIB_COMMAND, SQL_COMMAND, buildNibTemplatePrompt, formatCurrentDateTime, getInlineCommandRange, getNibCommandSuggestions, getNibCommandTrigger, parseNibCommand } from '../utils/noteCommands'
+import { parseSqlCommand, getSqlDbAtTrigger, filterSqliteNotes, resolveSqliteNoteByRef, formatSqlResultText, extractSqlFromLLMResponse, buildNibSqlPrompt, formatSchemaForPrompt } from '../utils/sqlCommands'
+import { fetchPageContent, stripHtmlToText, buildUrlNibPrompt, buildUrlTersePrompt } from '../utils/webFetch'
+import { getSQLiteAsset } from '../utils/sqliteAssets'
+import { inspectSQLiteDatabase, executeSQLiteQuery } from '../utils/externalSqlite'
 import { getGitCommandSuggestions, getGitCommandTrigger, parseGitCommand, parsePrCommand, formatGitCommandResult } from '../utils/gitCommands'
 import { connectGitRepo, getGitDiff, getGitPR, getGitStatus, listGitRepos, useGitRepo } from '../utils/gitClient'
 import GitPRView from './GitPRView'
+import StashPicker from './StashPicker'
 import { streamLLMChat } from '../utils/llmClient'
 import { matchTemplates, expandTemplate, parseTemplateQuery } from '../utils/noteTemplates'
 import { escapeHtml } from '../utils/escapeHtml'
 import { useSnippetPicker } from '../hooks/useSnippetPicker'
+import { buildNibMessage } from '../utils/nibTemplates'
+import { filterStashItems, getStashCommandTrigger, loadStashItems, resolveStashRefs, stashRef } from '../utils/stash'
 
 const CODE_LINE_HEIGHT = '1.6'
 const LARGE_NOTE_CHAR_THRESHOLD = 200_000
@@ -82,7 +89,6 @@ Working with technical text
 - Select JSON, Base64, URLs, JWTs, timestamps, or hex text and use the transform tools.
 
 Search and navigation
-- Search is local-first. Signed-in users can use server-backed semantic search when available.
 - Use Alt+Left and Alt+Right to move through note locations.
 - Use Shift+Mouse wheel over the notes pane for expanded previews.
 
@@ -107,6 +113,77 @@ function scheduleIdleWork(callback) {
   }
   const id = window.setTimeout(callback, 80)
   return () => window.clearTimeout(id)
+}
+
+function extractFencedSection(text, heading) {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(?:^|\\n)## ${escaped}\\s*\\n\\\`\\\`\\\`[^\\n]*\\n([\\s\\S]*?)\\n\\\`\\\`\\\``, 'i')
+  return text.match(re)?.[1] ?? ''
+}
+
+function getLocalGitViewRefFromContent(text) {
+  const head = String(text ?? '').slice(0, 2000)
+  const prMatch = head.match(/(?:^|\n)PR #(\d+)\s+(?:[-–—]|â€”)\s+([^\n]+)/)
+  if (prMatch) {
+    const base = head.match(/(?:^|\n)Base:\s*([^\n]+)/i)?.[1]?.trim() ?? ''
+    return {
+      source: 'content',
+      viewType: 'pr',
+      prNumber: Number(prMatch[1]),
+      repoName: prMatch[2].trim(),
+      base,
+    }
+  }
+
+  const diffMatch = head.match(/(?:^|\n)Git diff:\s*([^\n]+)/i)
+  if (diffMatch) {
+    return {
+      source: 'content',
+      viewType: 'diff',
+      repoName: diffMatch[1].trim(),
+    }
+  }
+
+  if (/^(diff --git |\s*```diff\s*\ndiff --git )/m.test(head)) {
+    return {
+      source: 'content',
+      viewType: 'diff',
+      repoName: 'Raw diff',
+    }
+  }
+
+  return null
+}
+
+function parseLocalGitViewDataFromContent(text) {
+  const raw = String(text ?? '')
+  const ref = getLocalGitViewRefFromContent(raw)
+  if (!ref) return null
+
+  if (ref.viewType === 'pr') {
+    return {
+      viewType: 'pr',
+      prNumber: ref.prNumber,
+      base: ref.base,
+      repo: { displayName: ref.repoName, name: ref.repoName },
+      log: extractFencedSection(raw, 'Commits'),
+      stat: extractFencedSection(raw, 'Changed Files'),
+      diff: extractFencedSection(raw, 'Diff'),
+    }
+  }
+
+  const fencedDiff = raw.match(/```diff\s*\n([\s\S]*?)\n```/i)?.[1] ?? ''
+  return {
+    viewType: 'diff',
+    repo: { displayName: ref.repoName, name: ref.repoName },
+    stat: raw.match(/^Git diff:/i) ? raw.replace(/```diff[\s\S]*$/i, '').split('\n').slice(2).join('\n').trim() : '',
+    diff: fencedDiff || raw,
+  }
+}
+
+function getInitialEditorMode(note) {
+  if (isOpenApiNote(note)) return 'openapi'
+  return note.noteData?.editorMode === 'markdown' ? 'markdown' : 'edit'
 }
 
 const mdRenderer = new marked.Renderer()
@@ -182,6 +259,28 @@ function snippetLabel(snippet) {
   return firstLine.trim().slice(0, 48) || 'untitled snippet'
 }
 
+function suggestStashKey(text, items = []) {
+  const firstLine = String(text ?? '').split('\n').find(line => line.trim()) ?? 'value'
+  const words = firstLine
+    .replace(/['"`]/g, '')
+    .match(/[A-Za-z0-9]+/g)
+    ?.slice(0, 5) ?? ['value']
+  const base = words
+    .map((word, index) => {
+      const normalized = word.toLowerCase()
+      return index === 0 ? normalized : normalized.charAt(0).toUpperCase() + normalized.slice(1)
+    })
+    .join('')
+    .replace(/^[0-9]+/, '') || 'value'
+  const keys = new Set(items.map(item => item.key))
+  if (!keys.has(base)) return base
+  for (let i = 2; i < 1000; i++) {
+    const key = `${base}${i}`
+    if (!keys.has(key)) return key
+  }
+  return `${base}${Date.now()}`
+}
+
 function getSnippetTrigger(text, cursor) {
   const before = text.slice(0, cursor)
   const match = before.match(/(?:^|[\s([{\n])!(?<query>[^\s!()]*)$/)
@@ -191,8 +290,14 @@ function getSnippetTrigger(text, cursor) {
   return { start: bangIndex, end: cursor, query: match.groups?.query ?? '' }
 }
 
+function isNibCommandRange(range) {
+  return Boolean(parseNibCommand(range?.text))
+}
+
 function isRunnableCommandLine(line) {
   const text = String(line ?? '').trim()
+  if (parseNibCommand(text)) return true
+  if (parseSqlCommand(text)) return true
   const gitCommand = parseGitCommand(text)
   if (gitCommand) {
     if (gitCommand.command === 'help') return false
@@ -205,6 +310,20 @@ function isRunnableCommandLine(line) {
 
   const prCommand = parsePrCommand(text)
   return Boolean(prCommand && prCommand.command !== 'unknown')
+}
+
+function getLineRangeAtCursor(value, cursor) {
+  const text = String(value ?? '')
+  const pos = Math.max(0, Math.min(Number(cursor) || 0, text.length))
+  const lineStart = text.lastIndexOf('\n', Math.max(0, pos - 1)) + 1
+  const nextBreak = text.indexOf('\n', pos)
+  const lineEnd = nextBreak === -1 ? text.length : nextBreak
+  return { start: lineStart, end: lineEnd, text: text.slice(lineStart, lineEnd) }
+}
+
+function isCursorAtRunnableCommandEnd(range, cursor) {
+  const commandEnd = range.start + String(range.text ?? '').replace(/\s+$/g, '').length
+  return cursor === commandEnd
 }
 
 function ScratchOutput({ output }) {
@@ -232,7 +351,7 @@ function ScratchOutput({ output }) {
   )
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, secretScanNibEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', nibTemplates = {}, onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
   const [content, setContent] = useState(note.content)
   const [gitPRData, setGitPRData] = useState(null)
   const [gitPRViewRef, setGitPRViewRef] = useState(note.noteData?.gitPRView ?? null)
@@ -310,6 +429,45 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     })
   }, [note.id, onOpenNibPane])
 
+  const handleReviewGitDiffWithNib = useCallback(({ path, paths, diffText, viewType, prNumber, repoName, base }) => {
+    const isBatch = paths?.length > 1
+    const isPR = viewType !== 'diff'
+    const label = isBatch
+      ? `${isPR ? `PR #${prNumber}` : 'git diff'} (${paths.length} files)`
+      : isPR
+        ? `PR #${prNumber} diff for ${path}`
+        : `git diff for ${path}`
+    const context = [
+      repoName ? `Repository: ${repoName}` : null,
+      isPR && base ? `Base: ${base}` : null,
+      isBatch
+        ? `Files:\n${paths.map(p => `  - ${p}`).join('\n')}`
+        : `File: ${path}`,
+      '',
+      '```diff',
+      diffText,
+      '```',
+    ].filter(Boolean).join('\n')
+    const initialMessage = buildNibMessage({ nibTemplates }, 'codeReview', {
+      label,
+      path,
+      diffText,
+      viewType,
+      prNumber,
+      repoName,
+      base,
+    })
+    onOpenNibPane?.({
+      noteId: note.id,
+      initialMessage,
+      autoSendInitialMessage: false,
+      reuseExisting: true,
+      regexContext: null,
+      selectionText: context,
+      selectionRange: { start: 0, end: 0 },
+    })
+  }, [nibTemplates, note.id, onOpenNibPane])
+
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findMode, setFindMode] = useState('exact')
@@ -329,6 +487,16 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [gitPicker, setGitPicker] = useState(null)
   const [gitActiveIndex, setGitActiveIndex] = useState(0)
   const [knownGitRepos, setKnownGitRepos] = useState([])
+  const [stashItems, setStashItems] = useState(() => loadStashItems())
+  const [stashPicker, setStashPicker] = useState(null)
+  const [stashActiveIndex, setStashActiveIndex] = useState(0)
+  const [stashSavedKey, setStashSavedKey] = useState('')
+  const [nibPicker, setNibPicker] = useState(null)
+  const [nibActiveIndex, setNibActiveIndex] = useState(0)
+  const [sqlDbPicker, setSqlDbPicker] = useState(null)
+  const [sqlDbActiveIndex, setSqlDbActiveIndex] = useState(0)
+  const [sqlLoading, setSqlLoading] = useState(false)
+  const [urlLoading, setUrlLoading] = useState(false)
   const [enterCommandHint, setEnterCommandHint] = useState(null)
   const [lineNumberScrollTop, setLineNumberScrollTop] = useState(0)
   const [lineNumberViewportHeight, setLineNumberViewportHeight] = useState(0)
@@ -356,6 +524,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const hasInlineImages = attachments.length > 0 && /\[img:\/\/[^\]]+\]/.test(content)
   const openApiNote = useMemo(() => isOpenApiNote(note), [note])
   const editorDisplayContent = openApiNote ? (note.noteData?.rawText ?? content) : content
+  const localGitViewRef = useMemo(() => getLocalGitViewRefFromContent(editorDisplayContent), [editorDisplayContent])
   const helpCommandReady = !openApiNote && content.trim() === HELP_COMMAND
   const charCount = editorDisplayContent.length
   const lineCount = useMemo(() => countLines(editorDisplayContent), [editorDisplayContent])
@@ -391,9 +560,22 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setCodeAfter,
   } = useNoteMode({ onDiffModeChange })
 
+  useEffect(() => {
+    const refreshStash = () => setStashItems(loadStashItems())
+    window.addEventListener('jotit:stash-changed', refreshStash)
+    return () => window.removeEventListener('jotit:stash-changed', refreshStash)
+  }, [])
+
   const minimapEnabled = showMinimap && mode === 'edit' && !jsonSession && !hasInlineImages && (!largeNoteMode || largeNoteFeatures.minimap)
   const activeEditorRef = codeViewActive ? codeEditRef : textareaRef
   const scrollMap = useScrollMap(activeEditorRef, content, minimapEnabled)
+  const persistEditorMode = useCallback((editorMode) => {
+    const noteData = note.noteData && typeof note.noteData === 'object'
+      ? { ...note.noteData, editorMode }
+      : { editorMode }
+    if (note.noteData?.editorMode === editorMode) return
+    onUpdate({ noteData })
+  }, [note.noteData, onUpdate])
   const reportCurrentLocation = useCallback((target = textareaRef.current) => {
     if (!target) return
     onLocationChange?.({
@@ -472,6 +654,18 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const gitSuggestions = useMemo(
     () => gitPicker ? getGitCommandSuggestions(gitPicker.query, knownGitRepos) : [],
     [gitPicker, knownGitRepos]
+  )
+  const stashSuggestions = useMemo(
+    () => stashPicker ? filterStashItems(stashItems, stashPicker.query).slice(0, 20) : [],
+    [stashItems, stashPicker]
+  )
+  const nibSuggestions = useMemo(
+    () => nibPicker ? getNibCommandSuggestions(nibPicker.query) : [],
+    [nibPicker]
+  )
+  const sqlDbSuggestions = useMemo(
+    () => sqlDbPicker ? filterSqliteNotes(notes, sqlDbPicker.query) : [],
+    [notes, sqlDbPicker]
   )
 
   const linkedGitRepo = useMemo(() => {
@@ -563,18 +757,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
 
     const cursor = target.selectionStart ?? 0
-    const lineStart = value.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1
-    const nextBreak = value.indexOf('\n', cursor)
-    const lineEnd = nextBreak === -1 ? value.length : nextBreak
-    const line = value.slice(lineStart, lineEnd).trim()
+    const range = getLineRangeAtCursor(value, cursor)
+    const line = range.text.trim()
     if (!isRunnableCommandLine(line)) {
       setEnterCommandHint(null)
       return
     }
+    if (!isCursorAtRunnableCommandEnd(range, cursor)) {
+      setEnterCommandHint(null)
+      return
+    }
 
-    const before = value.slice(0, lineStart)
+    const before = value.slice(0, range.start)
     const lineIndex = before.split('\n').length - 1
-    const column = Math.max(0, cursor - lineStart)
+    const column = Math.max(0, cursor - range.start)
     const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
     const charWidth = 7.8
 
@@ -718,7 +914,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       notes: (notes ?? []).map(n => ({ id: n.id, content: n.content ?? '' })),
       currentNote: { id: note.id, content: note.content ?? '' },
     }
-    runJsInWorker(code, snapshot, (msg) => {
+    runJsInWorker(resolveStashRefs(code, stashItems), snapshot, (msg) => {
       if (msg.type === 'log') {
         setScratchOutputs(prev => {
           const cur = prev[scratchId] ?? { status: 'running', logs: [], result: undefined, error: undefined }
@@ -730,7 +926,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         setScratchOutputs(prev => ({ ...prev, [scratchId]: { ...prev[scratchId], status: 'error', error: msg.message } }))
       }
     })
-  }, [notes, note.id, note.content])
+  }, [notes, note.id, note.content, stashItems])
 
   const runCodeViewScratch = useCallback(() => {
     setCodeViewScratchOutput({ status: 'running', logs: [], result: undefined, error: undefined })
@@ -738,7 +934,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       notes: (notes ?? []).map(n => ({ id: n.id, content: n.content ?? '' })),
       currentNote: { id: note.id, content: note.content ?? '' },
     }
-    runJsInWorker(codeContent, snapshot, (msg) => {
+    runJsInWorker(resolveStashRefs(codeContent, stashItems), snapshot, (msg) => {
       if (msg.type === 'log') {
         setCodeViewScratchOutput(prev => ({ ...prev, logs: [...(prev?.logs ?? []), msg.line] }))
       } else if (msg.type === 'done') {
@@ -747,7 +943,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         setCodeViewScratchOutput(prev => ({ ...prev, status: 'error', error: msg.message }))
       }
     })
-  }, [codeContent, notes, note.id, note.content])
+  }, [codeContent, notes, note.id, note.content, stashItems])
 
   const handleMarkdownClick = useCallback((e) => {
     const btn = e.target.closest('.jotit-run-btn[data-scratch-id]')
@@ -893,7 +1089,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       clearTimeout(deferredContentUpdateRef.current.timer)
       deferredContentUpdateRef.current = null
     }
-    setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
+    setMode(getInitialEditorMode(note))
     setGitPRData(null)
     setGitPRViewRef(note.noteData?.gitPRView ?? null)
     setGitPRLoading(false)
@@ -908,6 +1104,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setSnippetDraftName('')
     setSnippetSaved(false)
     setSnippetPicker(null)
+    setStashPicker(null)
+    setNibPicker(null)
+    setSqlDbPicker(null)
+    setSqlLoading(false)
     setSnippetResults([])
     setTemplateResults([])
     setSnippetActiveIndex(0)
@@ -1192,11 +1392,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const getCurrentLineRange = () => {
     const ta = textareaRef.current
     if (!ta) return { start: 0, end: 0, text: '' }
-    const pos = ta.selectionStart
-    const lineStart = content.lastIndexOf('\n', Math.max(0, pos - 1)) + 1
-    const nextBreak = content.indexOf('\n', pos)
-    const lineEnd = nextBreak === -1 ? content.length : nextBreak
-    return { start: lineStart, end: lineEnd, text: content.slice(lineStart, lineEnd) }
+    return getLineRangeAtCursor(ta.value, ta.selectionStart)
   }
 
   const getCalcRange = () => {
@@ -1392,6 +1588,27 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setGitActiveIndex(0)
   }, [])
 
+  const closeStashPicker = useCallback(() => {
+    setStashPicker(null)
+    setStashActiveIndex(0)
+  }, [])
+
+  const closeNibPicker = useCallback(() => {
+    setNibPicker(null)
+    setNibActiveIndex(0)
+  }, [])
+
+  const closeSqlDbPicker = useCallback(() => {
+    setSqlDbPicker(null)
+    setSqlDbActiveIndex(0)
+  }, [])
+
+  const insertSqlDbSuggestion = useCallback((note) => {
+    if (!sqlDbPicker || !note) return
+    replaceRangeInEditor(sqlDbPicker.atStart, sqlDbPicker.end, `@${note.id} `)
+    closeSqlDbPicker()
+  }, [closeSqlDbPicker, sqlDbPicker, replaceRangeInEditor])
+
   const handleEditorSelect = useCallback((e) => {
     updateSel()
     updateEnterCommandHint(e.target, e.target.value)
@@ -1408,6 +1625,24 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     closeGitPicker()
   }, [closeGitPicker, gitPicker, replaceRangeInEditor])
 
+  const insertNibSuggestion = useCallback((suggestion) => {
+    if (!nibPicker || !suggestion) return
+    replaceRangeInEditor(nibPicker.start, nibPicker.end, suggestion.insertText)
+    closeNibPicker()
+  }, [closeNibPicker, nibPicker, replaceRangeInEditor])
+
+  const insertStashReference = useCallback((item) => {
+    if (!stashPicker || !item) return
+    replaceRangeInEditor(stashPicker.start, stashPicker.end, stashRef(item.key))
+    closeStashPicker()
+  }, [closeStashPicker, replaceRangeInEditor, stashPicker])
+
+  const insertStashValue = useCallback((item) => {
+    if (!stashPicker || !item) return
+    replaceRangeInEditor(stashPicker.start, stashPicker.end, item.value)
+    closeStashPicker()
+  }, [closeStashPicker, replaceRangeInEditor, stashPicker])
+
   const insertSnippet = useCallback((snippet) => {
     if (!snippetPicker) return
     replaceRangeInEditor(snippetPicker.start, snippetPicker.end, snippet.content)
@@ -1416,6 +1651,18 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
   const insertPickerItem = useCallback((item) => {
     if (!snippetPicker) return
+    const range = getCurrentLineRange()
+    const inNibCommand = isNibCommandRange(range) && snippetPicker.start >= range.start && snippetPicker.end <= range.end
+    if (inNibCommand) {
+      if (item.kind === 'template') {
+        replaceRangeInEditor(snippetPicker.start, snippetPicker.end, `!${item.template.command}`)
+      } else {
+        replaceRangeInEditor(snippetPicker.start, snippetPicker.end, item.snippet.content)
+      }
+      closeSnippetPicker()
+      return
+    }
+
     if (item.kind === 'template') {
       const { args } = parseTemplateQuery(snippetPicker.query)
       const { text, stops } = expandTemplate(item.template, { args, selection: sel.text })
@@ -1438,6 +1685,393 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       closeSnippetPicker()
     }
   }, [snippetPicker, sel.text, replaceRangeInEditor, closeSnippetPicker])
+
+  const runNibSqlCommand = useCallback(async (range, parsed) => {
+    if (!agentToken?.trim()) {
+      setTxResult({ opName: '/nib sql', text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
+      return
+    }
+
+    let bytes
+    if (parsed.db) {
+      const dbNote = resolveSqliteNoteByRef(notes, parsed.db)
+      if (!dbNote) {
+        setTxResult({ opName: '/nib sql', text: '', error: `Database @${parsed.db} not found` })
+        return
+      }
+      const assetRef = extractSQLiteAssetRef(dbNote.content)
+      if (!assetRef) {
+        setTxResult({ opName: '/nib sql', text: '', error: 'Note has no SQLite attachment' })
+        return
+      }
+      const asset = await getSQLiteAsset(assetRef.assetId)
+      bytes = asset?.bytes
+    } else {
+      const assetRef = extractSQLiteAssetRef(content)
+      if (!assetRef) {
+        setTxResult({ opName: '/nib sql', text: '', error: 'No SQLite database attached. Use @db to specify one.' })
+        return
+      }
+      const asset = await getSQLiteAsset(assetRef.assetId)
+      bytes = asset?.bytes
+    }
+
+    if (!bytes) {
+      setTxResult({ opName: '/nib sql', text: '', error: 'SQLite file not found in local storage' })
+      return
+    }
+
+    if (!parsed.prompt) {
+      setTxResult({ opName: '/nib sql', text: '', error: 'Describe what you want to query after /nib sql' })
+      return
+    }
+
+    setSqlLoading(true)
+    closeSnippetPicker()
+    closeGitPicker()
+    closeStashPicker()
+    closeNibPicker()
+    closeSqlDbPicker()
+    setTxResult(null)
+    setEnterCommandHint(null)
+
+    const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
+
+    try {
+      const schema = await inspectSQLiteDatabase(bytes)
+      const schemaText = formatSchemaForPrompt(schema)
+      const prompt = buildNibSqlPrompt(schemaText, parsed.prompt)
+
+      let sqlResponse = ''
+      await new Promise((resolve, reject) => {
+        streamLLMChat(
+          { token: agentToken, model: ollamaModel, messages: [{ role: 'user', content: prompt }] },
+          chunk => { sqlResponse += chunk },
+          resolve,
+          err => reject(new Error(typeof err === 'string' ? err : String(err)))
+        )
+      })
+
+      const generatedSql = extractSqlFromLLMResponse(sqlResponse)
+      const result = await executeSQLiteQuery(bytes, generatedSql)
+      const resultText = `SQL: ${generatedSql}\n\n${formatSqlResultText(result)}`
+
+      if (parsed.output === 'note') {
+        const next = content.slice(0, range.start) + content.slice(commandEnd)
+        pushHistoryNow(next)
+        setContent(next)
+        onUpdate({ content: next })
+        onCreateNoteFromContent?.([
+          'SQL result',
+          '',
+          resultText,
+        ].join('\n'))
+      } else if (parsed.output === 'inline') {
+        const next = content.slice(0, range.start) + resultText + '\n' + content.slice(commandEnd)
+        pushHistoryNow(next)
+        setContent(next)
+        onUpdate({ content: next })
+      } else {
+        setTxResult({ opName: '/nib sql', text: resultText, error: null })
+      }
+    } catch (err) {
+      setTxResult({ opName: '/nib sql', text: '', error: String(err?.message ?? err) })
+    } finally {
+      setSqlLoading(false)
+    }
+  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, closeSqlDbPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow, notes])
+
+  const runSqlCommand = useCallback(async (range) => {
+    const parsed = parseSqlCommand(range.text)
+    if (!parsed) return false
+
+    if (!parsed.query) {
+      setTxResult({ opName: SQL_COMMAND, text: '', error: 'Enter a SQL query after /sql' })
+      return true
+    }
+
+    let bytes
+    if (parsed.db) {
+      const dbNote = resolveSqliteNoteByRef(notes, parsed.db)
+      if (!dbNote) {
+        setTxResult({ opName: SQL_COMMAND, text: '', error: `@${parsed.db} not found` })
+        return true
+      }
+      const assetRef = extractSQLiteAssetRef(dbNote.content)
+      if (!assetRef) {
+        setTxResult({ opName: SQL_COMMAND, text: '', error: 'Note has no SQLite attachment' })
+        return true
+      }
+      const asset = await getSQLiteAsset(assetRef.assetId)
+      bytes = asset?.bytes
+    } else {
+      const assetRef = extractSQLiteAssetRef(content)
+      if (!assetRef) {
+        setTxResult({ opName: SQL_COMMAND, text: '', error: 'No SQLite database attached to this note. Use @db to specify one.' })
+        return true
+      }
+      const asset = await getSQLiteAsset(assetRef.assetId)
+      bytes = asset?.bytes
+    }
+
+    if (!bytes) {
+      setTxResult({ opName: SQL_COMMAND, text: '', error: 'SQLite file not found in local storage' })
+      return true
+    }
+
+    setSqlLoading(true)
+    setTxResult(null)
+    setEnterCommandHint(null)
+
+    try {
+      const result = await executeSQLiteQuery(bytes, parsed.query)
+      setTxResult({ opName: SQL_COMMAND, text: formatSqlResultText(result), error: null })
+    } catch (err) {
+      setTxResult({ opName: SQL_COMMAND, text: '', error: String(err?.message ?? err) })
+    } finally {
+      setSqlLoading(false)
+    }
+
+    return true
+  }, [content, notes])
+
+  const runNibUrlCommand = useCallback(async (range, parsed) => {
+    if (!agentToken?.trim()) {
+      setTxResult({ opName: '/nib url', text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
+      return
+    }
+
+    const url = parsed.url?.trim()
+    if (!url) {
+      setTxResult({ opName: '/nib url', text: '', error: 'Enter a URL after /nib url' })
+      return
+    }
+
+    try { new URL(url) } catch {
+      setTxResult({ opName: '/nib url', text: '', error: `Invalid URL: ${url}` })
+      return
+    }
+
+    closeNibPicker()
+    closeSnippetPicker()
+    setTxResult(null)
+    setEnterCommandHint(null)
+    setUrlLoading(true)
+
+    const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
+
+    try {
+      const html = await fetchPageContent(url, { token: agentToken })
+      const pageText = stripHtmlToText(html)
+
+      if (!pageText.trim()) {
+        setTxResult({ opName: '/nib url', text: '', error: 'Page returned no readable content' })
+        return
+      }
+
+      if (!parsed.markdown && !parsed.terse) {
+        const resultText = pageText.trim()
+
+        if (parsed.output === 'note') {
+          const next = content.slice(0, range.start) + content.slice(commandEnd)
+          pushHistoryNow(next)
+          setContent(next)
+          onUpdate({ content: next })
+          onCreateNoteFromContent?.(resultText)
+        } else if (parsed.output === 'inline') {
+          const next = content.slice(0, range.start) + resultText + '\n' + content.slice(commandEnd)
+          pushHistoryNow(next)
+          setContent(next)
+          onUpdate({ content: next })
+        } else {
+          setTxResult({ opName: '/nib url', text: resultText, error: null })
+        }
+        return
+      }
+
+      const prompt = parsed.terse
+        ? buildUrlTersePrompt(pageText, url, parsed.hint, { markdown: parsed.markdown })
+        : buildUrlNibPrompt(pageText, url, parsed.hint)
+      let responseText = ''
+
+      if (parsed.output === 'note') {
+        const next = content.slice(0, range.start) + content.slice(commandEnd)
+        pushHistoryNow(next)
+        setContent(next)
+        onUpdate({ content: next })
+        await new Promise((resolve, reject) => {
+          streamLLMChat(
+            { token: agentToken, model: ollamaModel, messages: [{ role: 'user', content: prompt }] },
+            chunk => { responseText += chunk },
+            () => { onCreateNoteFromContent?.(responseText.trim()); resolve() },
+            err => reject(new Error(typeof err === 'string' ? err : String(err)))
+          )
+        })
+      } else if (parsed.output === 'inline') {
+        const prefix = 'Nib response\n\n'
+        const initial = content.slice(0, range.start) + prefix + content.slice(commandEnd)
+        const insertStart = range.start + prefix.length
+        const streamState = { len: 0 }
+        pushHistoryNow(initial)
+        setContent(initial)
+        onUpdate({ content: initial })
+        await new Promise((resolve, reject) => {
+          streamLLMChat(
+            { token: agentToken, model: ollamaModel, messages: [{ role: 'user', content: prompt }] },
+            chunk => {
+              let next
+              setContent(prev => {
+                const streamEnd = insertStart + streamState.len
+                next = prev.slice(0, streamEnd) + chunk + prev.slice(streamEnd)
+                streamState.len += chunk.length
+                return next
+              })
+              if (next !== undefined) onUpdate({ content: next })
+            },
+            () => { setContent(prev => { pushHistoryNow(prev); return prev }); resolve() },
+            err => reject(new Error(typeof err === 'string' ? err : String(err)))
+          )
+        })
+      } else {
+        await new Promise((resolve, reject) => {
+          streamLLMChat(
+            { token: agentToken, model: ollamaModel, messages: [{ role: 'user', content: prompt }] },
+            chunk => { responseText += chunk },
+            () => { setTxResult({ opName: '/nib url', text: responseText.trim(), error: null }); resolve() },
+            err => reject(new Error(typeof err === 'string' ? err : String(err)))
+          )
+        })
+      }
+    } catch (err) {
+      setTxResult({ opName: '/nib url', text: '', error: String(err?.message ?? err) })
+    } finally {
+      setUrlLoading(false)
+    }
+  }, [agentToken, closeNibPicker, closeSnippetPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow])
+
+  const runNibCommand = useCallback((range) => {
+    const parsed = parseNibCommand(range.text)
+    if (!parsed) return false
+
+    if (parsed.command === 'url') {
+      void runNibUrlCommand(range, parsed)
+      return true
+    }
+
+    if (parsed.command === 'sql') {
+      void runNibSqlCommand(range, parsed)
+      return true
+    }
+
+    if (!agentToken?.trim()) {
+      setTxResult({ opName: NIB_COMMAND, text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
+      return true
+    }
+
+    const noteContent = content.slice(0, range.start) + content.slice(range.end).replace(/^\n/, '')
+    let prompt = parsed.prompt?.trim() || 'Use the note content to produce a concise, useful response.'
+
+    if (parsed.command === 'template') {
+      const templateCommand = parsed.templateCommand.toLowerCase()
+      const template = templates.find(item => item.command.toLowerCase() === templateCommand)
+      if (!template) {
+        setTxResult({ opName: NIB_COMMAND, text: '', error: `Template !${parsed.templateCommand || ''} not found` })
+        return true
+      }
+      prompt = buildNibTemplatePrompt(template, { args: parsed.templateArgs })
+    }
+
+    const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
+    const resolvedPrompt = resolveStashRefs(prompt, stashItems)
+    const resolvedContext = resolveStashRefs(noteContent.trim(), stashItems)
+    let responseText = ''
+
+    closeSnippetPicker()
+    closeGitPicker()
+    closeStashPicker()
+    closeNibPicker()
+    setTxResult(null)
+    setEnterCommandHint(null)
+
+    if (parsed.output === 'note') {
+      const next = content.slice(0, range.start) + content.slice(commandEnd)
+      pushHistoryNow(next)
+      setContent(next)
+      onUpdate({ content: next })
+
+      streamLLMChat(
+        {
+          token: agentToken,
+          model: ollamaModel,
+          messages: [{ role: 'user', content: resolvedPrompt }],
+          context: resolvedContext,
+          contextMode: 'note',
+        },
+        chunk => { responseText += chunk },
+        () => {
+          const sourceTitle = content.split('\n').find(line => line.trim())?.trim() ?? 'Untitled'
+          onCreateNoteFromContent?.([
+            'Nib response',
+            '',
+            `Source: ${sourceTitle}`,
+            `Created: ${new Date().toLocaleString()}`,
+            '',
+            responseText.trim(),
+          ].filter(Boolean).join('\n'))
+        },
+        err => {
+          setTxResult({ opName: NIB_COMMAND, text: '', error: err })
+        }
+      )
+      return true
+    }
+
+    const prefix = 'Nib response\n\n'
+    const initial = content.slice(0, range.start) + prefix + content.slice(commandEnd)
+    const insertStart = range.start + prefix.length
+    const streamState = { len: 0 }
+    pushHistoryNow(initial)
+    setContent(initial)
+    onUpdate({ content: initial })
+
+    streamLLMChat(
+      {
+        token: agentToken,
+        model: ollamaModel,
+        messages: [{ role: 'user', content: resolvedPrompt }],
+        context: resolvedContext,
+        contextMode: 'note',
+      },
+      chunk => {
+        let next
+        setContent(prev => {
+          const streamEnd = insertStart + streamState.len
+          next = prev.slice(0, streamEnd) + chunk + prev.slice(streamEnd)
+          streamState.len += chunk.length
+          return next
+        })
+        if (next !== undefined) onUpdate({ content: next })
+      },
+      () => {
+        setContent(prev => { pushHistoryNow(prev); return prev })
+      },
+      err => {
+        const message = `_(Nib error: ${err})_`
+        let next
+        setContent(prev => {
+          const streamEnd = insertStart + streamState.len
+          next = prev.slice(0, insertStart) + message + prev.slice(streamEnd)
+          streamState.len = message.length
+          return next
+        })
+        if (next !== undefined) {
+          pushHistoryNow(next)
+          onUpdate({ content: next })
+        }
+      }
+    )
+    return true
+  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow, runNibSqlCommand, runNibUrlCommand, stashItems, templates])
 
   const runCalculation = ({ complete = false } = {}) => {
     const range = getCalcRange()
@@ -1529,6 +2163,32 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setTimeout(() => setNowInserted(false), 1500)
   }
 
+  const stashSelectionAsVar = () => {
+    const selectedText = sel.text
+    if (!selectedText.trim()) return
+    const defaultKey = suggestStashKey(selectedText, stashItems)
+    const target = textareaRef.current
+    const before = content.slice(0, sel.start)
+    const lineIndex = before.split('\n').length - 1
+    const lineStart = before.lastIndexOf('\n') + 1
+    const column = sel.start - lineStart
+    const lineHeight = target ? parseFloat(getComputedStyle(target).lineHeight) || 20.8 : 20.8
+    const charWidth = 7.8
+    setStashPicker({
+      start: sel.start,
+      end: sel.end,
+      query: '',
+      top: 24 + lineIndex * lineHeight - (target?.scrollTop ?? 0),
+      left: 24 + column * charWidth - (target?.scrollLeft ?? 0),
+      initialForm: {
+        key: defaultKey,
+        value: selectedText,
+        description: `From ${note.content?.split('\n').find(line => line.trim())?.trim()?.slice(0, 80) || 'note selection'}`,
+      },
+    })
+    setStashActiveIndex(0)
+  }
+
   const resolveGitRepoId = async (explicitRepoId = '') => {
     if (explicitRepoId) return explicitRepoId
     if (note.git?.repoId) return note.git.repoId
@@ -1556,9 +2216,24 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       return
     }
 
-    if (!gitPRViewRef) return
+    const activeGitViewRef = gitPRViewRef ?? localGitViewRef
+    if (!activeGitViewRef) return
+    if (activeGitViewRef.source === 'content') {
+      const data = parseLocalGitViewDataFromContent(editorDisplayContent)
+      if (data) {
+        setGitPRData(data)
+        setMode('gitpr')
+      }
+      return
+    }
     if (!agentToken?.trim()) {
-      setMode('edit')
+      const data = parseLocalGitViewDataFromContent(editorDisplayContent)
+      if (data) {
+        setGitPRData(data)
+        setMode('gitpr')
+      } else {
+        setMode('edit')
+      }
       return
     }
 
@@ -1567,12 +2242,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       setGitPRLoading(true)
       setMode('gitpr')
       const requestId = ++gitPRLoadRequestRef.current
-      const repoId = gitPRViewRef.repoId || await resolveGitRepoId('')
-      const data = gitPRViewRef.viewType === 'diff'
+      const repoId = activeGitViewRef.repoId || await resolveGitRepoId('')
+      const data = activeGitViewRef.viewType === 'diff'
         ? await getGitDiff(repoId, agentToken)
-        : await getGitPR(repoId, gitPRViewRef.prNumber, gitPRViewRef.base, agentToken)
+        : await getGitPR(repoId, activeGitViewRef.prNumber, activeGitViewRef.base, agentToken)
       if (requestId !== gitPRLoadRequestRef.current) return
-      const viewType = gitPRViewRef.viewType === 'diff' ? 'diff' : 'pr'
+      const viewType = activeGitViewRef.viewType === 'diff' ? 'diff' : 'pr'
       setGitPRData({ ...data, viewType })
       setGitPRViewRef({
         repoId,
@@ -1584,6 +2259,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       })
       setMode('gitpr')
     } catch (error) {
+      const localData = parseLocalGitViewDataFromContent(editorDisplayContent)
+      if (localData) {
+        setGitPRData(localData)
+        setMode('gitpr')
+        return
+      }
       const message = error.message ?? String(error)
       setGitPRViewRef(prev => prev ? { ...prev, error: message } : prev)
       setMode('edit')
@@ -1593,8 +2274,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }
 
   const runGitCommand = async (range) => {
-    const parsed = parseGitCommand(range.text)
+    const parsed = parseGitCommand(resolveStashRefs(range.text, stashItems))
     if (!parsed) return false
+    let loadingGitPRStarted = false
     closeGitPicker()
     setEnterCommandHint(null)
 
@@ -1873,7 +2555,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }
 
   const runPrCommand = async (range) => {
-    const parsed = parsePrCommand(range.text)
+    const parsed = parsePrCommand(resolveStashRefs(range.text, stashItems))
     if (!parsed) return false
     closeGitPicker()
     setEnterCommandHint(null)
@@ -1994,6 +2676,42 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       return // Don't open the snippet picker while navigating tab stops
     }
 
+    const commandRange = getLineRangeAtCursor(e.target.value, cursor)
+    if (isRunnableCommandLine(commandRange.text) && isCursorAtRunnableCommandEnd(commandRange, cursor)) {
+      closeSqlDbPicker()
+      closeGitPicker()
+      closeNibPicker()
+      closeSnippetPicker()
+      closeStashPicker()
+      updateEnterCommandHint(target, e.target.value)
+      reportCurrentLocation(target)
+      return
+    }
+
+    const stashTrigger = getStashCommandTrigger(e.target.value, cursor)
+    if (stashTrigger) {
+      const before = e.target.value.slice(0, stashTrigger.start)
+      const lineIndex = before.split('\n').length - 1
+      const lineStart = before.lastIndexOf('\n') + 1
+      const column = stashTrigger.start - lineStart
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setStashPicker({
+        ...stashTrigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + column * charWidth - target.scrollLeft,
+      })
+      setStashActiveIndex(0)
+      setEnterCommandHint(null)
+      if (gitPicker) closeGitPicker()
+      if (nibPicker) closeNibPicker()
+      if (snippetPicker) closeSnippetPicker()
+      reportCurrentLocation(target)
+      return
+    } else if (stashPicker) {
+      closeStashPicker()
+    }
+
     const gitTrigger = getGitCommandTrigger(e.target.value, cursor)
     if (gitTrigger) {
       const lineStart = gitTrigger.start
@@ -2019,10 +2737,58 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       setGitActiveIndex(0)
       setEnterCommandHint(null)
       if (snippetPicker) closeSnippetPicker()
+      if (stashPicker) closeStashPicker()
+      if (nibPicker) closeNibPicker()
       reportCurrentLocation(target)
       return
     } else if (gitPicker) {
       closeGitPicker()
+    }
+
+    const sqlDbTrigger = getSqlDbAtTrigger(e.target.value, cursor)
+    if (sqlDbTrigger) {
+      const before = e.target.value.slice(0, sqlDbTrigger.atStart)
+      const lineIndex = before.split('\n').length - 1
+      const lineStart = before.lastIndexOf('\n') + 1
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setSqlDbPicker({
+        ...sqlDbTrigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + (sqlDbTrigger.atStart - lineStart) * charWidth - target.scrollLeft,
+      })
+      setSqlDbActiveIndex(0)
+      setEnterCommandHint(null)
+      if (nibPicker) closeNibPicker()
+      if (snippetPicker) closeSnippetPicker()
+      if (stashPicker) closeStashPicker()
+      reportCurrentLocation(target)
+      return
+    } else if (sqlDbPicker) {
+      closeSqlDbPicker()
+    }
+
+    const nibTrigger = getNibCommandTrigger(e.target.value, cursor)
+    if (nibTrigger) {
+      const before = e.target.value.slice(0, nibTrigger.start)
+      const lineIndex = before.split('\n').length - 1
+      const visualLineStart = before.lastIndexOf('\n') + 1
+      const column = nibTrigger.start - visualLineStart
+      const lineHeight = parseFloat(getComputedStyle(target).lineHeight) || 20.8
+      const charWidth = 7.8
+      setNibPicker({
+        ...nibTrigger,
+        top: 24 + lineIndex * lineHeight - target.scrollTop,
+        left: 24 + column * charWidth - target.scrollLeft,
+      })
+      setNibActiveIndex(0)
+      setEnterCommandHint(null)
+      if (snippetPicker) closeSnippetPicker()
+      if (stashPicker) closeStashPicker()
+      reportCurrentLocation(target)
+      return
+    } else if (nibPicker) {
+      closeNibPicker()
     }
 
     const trigger = getSnippetTrigger(e.target.value, cursor)
@@ -2038,6 +2804,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         top: 24 + lineIndex * lineHeight - target.scrollTop,
         left: 24 + column * charWidth - target.scrollLeft,
       })
+      if (stashPicker) closeStashPicker()
+      if (nibPicker) closeNibPicker()
     } else if (snippetPicker) {
       closeSnippetPicker()
     }
@@ -2049,11 +2817,13 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setPendingCalc(null)
     if (snippetPicker) closeSnippetPicker()
     if (gitPicker) closeGitPicker()
+    if (stashPicker) closeStashPicker()
+    if (nibPicker) closeNibPicker()
     setContent(newContent)
     scheduleContentUpdate(newContent)
     pushHistory(newContent)
     if (jsonSession) setJsonSession(null)
-  }, [scheduleContentUpdate, pushHistory, closeSnippetPicker, closeGitPicker, snippetPicker, gitPicker, jsonSession])
+  }, [scheduleContentUpdate, pushHistory, closeSnippetPicker, closeGitPicker, closeStashPicker, closeNibPicker, snippetPicker, gitPicker, stashPicker, nibPicker, jsonSession])
 
   const handleKeyDown = (e) => {
     if (e.ctrlKey || e.metaKey || e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab') {
@@ -2074,11 +2844,91 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const commandRange = getCurrentLineRange()
-      if (isRunnableCommandLine(commandRange.text)) {
+      const cursor = e.target.selectionStart ?? 0
+      if (!isCursorAtRunnableCommandEnd(commandRange, cursor)) {
+        setEnterCommandHint(null)
+      } else if (parseNibCommand(commandRange.text)) {
+        e.preventDefault()
+        runNibCommand(commandRange)
+        return
+      } else if (parseSqlCommand(commandRange.text)) {
+        e.preventDefault()
+        void runSqlCommand(commandRange)
+        return
+      } else if (isRunnableCommandLine(commandRange.text)) {
         const gitCommand = parseGitCommand(commandRange.text)
         e.preventDefault()
         if (gitCommand) void runGitCommand(commandRange)
         else void runPrCommand(commandRange)
+        return
+      }
+    }
+    if (sqlDbPicker) {
+      const totalItems = sqlDbSuggestions.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSqlDbActiveIndex(index => Math.min(index + 1, Math.max(0, totalItems - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSqlDbActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && totalItems) {
+        e.preventDefault()
+        insertSqlDbSuggestion(sqlDbSuggestions[sqlDbActiveIndex] ?? sqlDbSuggestions[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeSqlDbPicker()
+        return
+      }
+    }
+    if (nibPicker) {
+      const totalItems = nibSuggestions.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setNibActiveIndex(index => Math.min(index + 1, Math.max(0, totalItems - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setNibActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && totalItems) {
+        e.preventDefault()
+        insertNibSuggestion(nibSuggestions[nibActiveIndex] ?? nibSuggestions[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeNibPicker()
+        return
+      }
+    }
+    if (stashPicker) {
+      const totalItems = stashSuggestions.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setStashActiveIndex(index => Math.min(index + 1, Math.max(0, totalItems - 1)))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setStashActiveIndex(index => Math.max(index - 1, 0))
+        return
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && totalItems) {
+        e.preventDefault()
+        insertStashReference(stashSuggestions[stashActiveIndex] ?? stashSuggestions[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeStashPicker()
         return
       }
     }
@@ -2152,12 +3002,21 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const cursor = e.target.selectionStart ?? 0
       const gitRange = getCurrentLineRange()
-      if (isRunnableCommandLine(gitRange.text) && parseGitCommand(gitRange.text)) {
+      if (!isCursorAtRunnableCommandEnd(gitRange, cursor)) {
+        setEnterCommandHint(null)
+      } else if (parseNibCommand(gitRange.text)) {
+        e.preventDefault()
+        runNibCommand(gitRange)
+        return
+      } else if (parseSqlCommand(gitRange.text)) {
+        e.preventDefault()
+        void runSqlCommand(gitRange)
+        return
+      } else if (isRunnableCommandLine(gitRange.text) && parseGitCommand(gitRange.text)) {
         e.preventDefault()
         void runGitCommand(gitRange)
         return
-      }
-      if (isRunnableCommandLine(gitRange.text) && parsePrCommand(gitRange.text)) {
+      } else if (isRunnableCommandLine(gitRange.text) && parsePrCommand(gitRange.text)) {
         e.preventDefault()
         void runPrCommand(gitRange)
         return
@@ -2418,8 +3277,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     if (next === 'http'  && mode !== 'http')  setHttpInstance(i => i + 1)
     if (next === 'shell' && mode !== 'shell') setShellInstance(i => i + 1)
     if (next === 'diff'  && mode !== 'diff')  setDiffInstance(i => i + 1)
-    setMode(prev => prev === next ? 'edit' : next)
-  }, [mode])
+    setMode(prev => {
+      const nextMode = prev === next ? 'edit' : next
+      if (next === 'markdown') persistEditorMode(nextMode === 'markdown' ? 'markdown' : 'edit')
+      return nextMode
+    })
+  }, [mode, persistEditorMode])
 
   const runShell = useCallback(() => {
     const ta = textareaRef.current
@@ -2827,7 +3690,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
     : gitPRViewRef
       ? { ...gitPRViewRef, loading: gitPRLoading }
-      : null
+      : localGitViewRef
+        ? { ...localGitViewRef, loading: false }
+        : null
 
   return (
     <>
@@ -3141,6 +4006,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           >
             <span className="text-[13px] leading-none">✒</span>
             Nib
+          </button>
+        )}
+        {hasSelection && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={stashSelectionAsVar}
+            title="Save selected text as a /var stash value"
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              stashSavedKey
+                ? 'text-emerald-300 bg-emerald-950/40 border-emerald-800'
+                : 'text-emerald-400 hover:text-emerald-200 bg-emerald-950/20 border-emerald-900 hover:border-emerald-700'
+            }`}
+          >
+            {stashSavedKey ? `{{${stashSavedKey}}}` : 'Var'}
           </button>
         )}
         <button
@@ -3693,6 +4572,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         <SecretAlert
           content={content}
           clearedHash={note.secretsClearedHash ?? null}
+          nibAssistEnabled={secretScanNibEnabled}
+          llmEnabled={llmEnabled}
+          agentToken={agentToken}
+          model={ollamaModel}
           onMarkSafe={hash => onUpdate({ secretsClearedHash: hash })}
         />
       )}
@@ -3903,7 +4786,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                   </span>
                 </div>
               )}
-              {enterCommandHint && !gitPicker && !snippetPicker && (
+              {enterCommandHint && !gitPicker && !nibPicker && !stashPicker && !snippetPicker && (
                 <div
                   className="absolute z-10 pointer-events-none"
                   style={{
@@ -3962,6 +4845,100 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                     </div>
                   </div>
                 </div>
+              )}
+              {nibPicker && (
+                <div
+                  className="absolute z-20 w-[26rem] max-w-[calc(100%-32px)]"
+                  style={{
+                    top: `${Math.max(16, nibPicker.top + 24)}px`,
+                    left: `${Math.max(16, nibPicker.left)}px`,
+                  }}
+                >
+                  <div className="rounded-lg border border-violet-800/80 bg-zinc-950/95 shadow-2xl shadow-black/40 overflow-hidden">
+                    <div className="px-3 py-2 border-b border-zinc-800 bg-zinc-900/80 flex items-center gap-2">
+                      <span className="text-[10px] text-violet-400 font-mono">{nibPicker.query.trim().startsWith('nib') ? 'nib' : 'commands'}</span>
+                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">/{nibPicker.query}</span>
+                      <span className="ml-auto text-[10px] text-zinc-700 font-mono">Enter accept</span>
+                    </div>
+                    <div className="max-h-72 overflow-auto">
+                      {nibSuggestions.length ? nibSuggestions.map((item, index) => (
+                        <button
+                          key={item.id}
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => insertNibSuggestion(item)}
+                          className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                            index === nibActiveIndex ? 'bg-violet-950/60' : 'bg-transparent hover:bg-zinc-900/80'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-[12px] text-violet-300 font-mono shrink-0">{item.label}</span>
+                            <span className="text-[12px] text-zinc-300 truncate">{item.detail}</span>
+                          </div>
+                          <div className="text-[11px] text-zinc-600 font-mono truncate mt-0.5">{item.usage}</div>
+                        </button>
+                      )) : (
+                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no nib suggestions</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {sqlDbPicker && (
+                <div
+                  className="absolute z-20 w-80 max-w-[calc(100%-32px)]"
+                  style={{
+                    top: `${Math.max(16, sqlDbPicker.top + 24)}px`,
+                    left: `${Math.max(16, sqlDbPicker.left)}px`,
+                  }}
+                >
+                  <div className="rounded border border-zinc-700 bg-zinc-900 shadow-xl shadow-black/40 overflow-hidden">
+                    <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800">
+                      <span className="text-[10px] text-sky-400 font-mono">@sqlite db</span>
+                      <span className="text-[11px] text-zinc-500 font-mono truncate min-w-0">{sqlDbPicker.query || 'type to search…'}</span>
+                      <span className="ml-auto text-[10px] text-zinc-700 font-mono">Enter select</span>
+                    </div>
+                    <div className="max-h-56 overflow-auto">
+                      {sqlDbSuggestions.length ? sqlDbSuggestions.map((item, index) => (
+                        <button
+                          key={item.id}
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => insertSqlDbSuggestion(item)}
+                          className={`w-full text-left px-3 py-2 border-b border-zinc-900/80 transition-colors ${
+                            index === sqlDbActiveIndex ? 'bg-sky-950/60' : 'bg-transparent hover:bg-zinc-900/80'
+                          }`}
+                        >
+                          <div className="text-[12px] text-sky-300 font-mono truncate">{item.content.split('\n')[0]}</div>
+                          <div className="text-[11px] text-zinc-600 font-mono truncate mt-0.5">{item.id}</div>
+                        </button>
+                      )) : (
+                        <div className="px-3 py-2 text-[11px] text-zinc-500 font-mono">no sqlite databases found</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {stashPicker && (
+                <StashPicker
+                  items={stashItems}
+                  query={stashPicker.query}
+                  activeIndex={stashActiveIndex}
+                  initialForm={stashPicker.initialForm}
+                  style={{
+                    top: `${Math.max(16, stashPicker.top + 24)}px`,
+                    left: `${Math.max(16, stashPicker.left)}px`,
+                  }}
+                  onItemsChange={setStashItems}
+                  onInsertValue={insertStashValue}
+                  onInsertReference={insertStashReference}
+                  onSaved={(item) => {
+                    if (!stashPicker.initialForm) return
+                    setStashSavedKey(item.key)
+                    setTimeout(() => setStashSavedKey(''), 1600)
+                    closeStashPicker()
+                    requestAnimationFrame(() => textareaRef.current?.focus())
+                  }}
+                  onClose={closeStashPicker}
+                />
               )}
               {snippetPicker && (() => {
                 const pickerItems = [
@@ -4360,6 +5337,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         <GitPRView
           prData={gitPRData}
           onClose={closeGitPRView}
+          onReviewDiff={llmEnabled && onOpenNibPane ? handleReviewGitDiffWithNib : null}
         />
       )}
       {mode === 'shell' && (
@@ -4382,6 +5360,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           pendingNote={diffPendingNote}
           onPendingNoteConsumed={() => setDiffPendingNote(null)}
         />
+      )}
+      {/* ── SQL loading indicator ── */}
+      {sqlLoading && mode === 'edit' && (
+        <div className="border-t border-zinc-700 bg-zinc-900/80 shrink-0 flex items-center gap-2 px-3 py-2">
+          <div className="w-2.5 h-2.5 rounded-full bg-sky-500 animate-pulse shrink-0" />
+          <span className="text-[11px] text-sky-400 font-mono">Running SQL…</span>
+        </div>
+      )}
+      {/* ── URL fetch loading indicator ── */}
+      {urlLoading && mode === 'edit' && (
+        <div className="border-t border-zinc-700 bg-zinc-900/80 shrink-0 flex items-center gap-2 px-3 py-2">
+          <div className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+          <span className="text-[11px] text-amber-400 font-mono">Fetching URL…</span>
+        </div>
       )}
       {/* ── Transform result panel ── */}
       {txResult && mode === 'edit' && (

@@ -121,7 +121,9 @@ export default function SharedLinksModal({ onListSharedLinks, onDeleteSharedLink
                       <div className="text-[11px] text-zinc-600 line-clamp-2">{link.preview}</div>
                     )}
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[10px] text-zinc-700 font-mono">note {link.noteId}</span>
+                      <span className="text-[10px] text-zinc-700 font-mono">
+                        {link.viewMode === 'bundle' ? `${link.noteCount ?? 0} notes` : `note ${link.noteId}`}
+                      </span>
                       {link.viewMode && (
                         <span className="text-[10px] text-zinc-700 font-mono">{link.viewMode}</span>
                       )}

@@ -28,6 +28,12 @@ export default function NoteGrid({
   onToggleNoteSync,
   pinnedIds,
   onTogglePin,
+  selectedShareNoteIds,
+  onToggleShareSelection,
+  onClearShareSelection,
+  onShareSelected,
+  shareSelectedState,
+  sharingSelected = false,
 }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
@@ -306,6 +312,7 @@ export default function NoteGrid({
   }
 
   const previewNote = hoverPreview ? notes.find(note => note.id === hoverPreview.noteId) : null
+  const selectedCount = selectedShareNoteIds?.size ?? 0
 
   return (
     <div
@@ -336,6 +343,32 @@ export default function NoteGrid({
         <div className={`min-w-0 flex-1 text-center text-[10px] select-none transition-colors ${diffActive ? 'text-sky-700' : 'text-zinc-700'}`}>
           {diffActive ? 'diff mode active' : 'scroll to navigate · ctrl+click opens pane · shift+scroll to peek · alt+scroll to pan · alt+hover to preview'}
         </div>
+        {onShareSelected && selectedCount > 0 && (
+          <div className="flex min-w-0 items-center gap-1 rounded-md border border-blue-900/60 bg-blue-950/30 px-1.5 py-1">
+            {shareSelectedState?.ok ? (
+              <a href={shareSelectedState.url} target="_blank" rel="noreferrer" className="max-w-28 truncate font-mono text-[10px] text-emerald-300 hover:text-emerald-200">
+                {shareSelectedState.url}
+              </a>
+            ) : (
+              <span className="font-mono text-[10px] text-blue-200">{selectedCount} selected</span>
+            )}
+            <button
+              type="button"
+              onClick={onShareSelected}
+              disabled={selectedCount < 2 || sharingSelected}
+              title="Share selected notes in one public link"
+              className="rounded border border-blue-800 bg-blue-900/50 px-2 py-0.5 text-[10px] font-medium text-blue-100 transition-colors hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {sharingSelected ? 'Sharing...' : shareSelectedState?.ok ? 'Copied' : 'Share'}
+            </button>
+            <button type="button" onClick={onClearShareSelection} title="Clear selected notes" className="px-1 text-[11px] text-zinc-500 transition-colors hover:text-zinc-200">
+              x
+            </button>
+            {shareSelectedState?.error && (
+              <span className="max-w-40 truncate font-mono text-[10px] text-red-300">{shareSelectedState.error}</span>
+            )}
+          </div>
+        )}
         <button
           type="button"
           onClick={() => onToggleNoteMetadata?.()}
@@ -391,6 +424,8 @@ export default function NoteGrid({
             onToggleSync={onToggleNoteSync}
             isPinned={pinnedIds?.has(note.id) ?? false}
             onTogglePin={onTogglePin ? () => onTogglePin(note.id, note.collectionId) : undefined}
+            shareSelected={selectedShareNoteIds?.has(note.id) ?? false}
+            onToggleShareSelection={onToggleShareSelection ? () => onToggleShareSelection(note.id) : undefined}
           />
         ))}
       </div>

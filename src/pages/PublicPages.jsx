@@ -47,7 +47,10 @@ function PublicNotePage({ path }) {
   const { loading, error, data } = usePublicPageData(path)
   const [headings, setHeadings] = useState([])
   const [cloneState, setCloneState] = useState(null)
+  const [bundleCloneState, setBundleCloneState] = useState({})
+  const [collapsedBundleNotes, setCollapsedBundleNotes] = useState(() => new Set())
   const note = data?.note
+  const bundleNotes = data?.notes ?? []
 
   const cloneSharedNote = async () => {
     if (!data?.slug || !note || cloneState?.loading) return
@@ -64,7 +67,84 @@ function PublicNotePage({ path }) {
     }
   }
 
-  if (loading || error || !note) return <PublicState path={path} loading={loading} error={error} />
+  const cloneBundleNote = async (item, key) => {
+    if (!data?.slug || !item || bundleCloneState[key]?.loading) return
+    setBundleCloneState(prev => ({ ...prev, [key]: { loading: true } }))
+    try {
+      await initDB()
+      const cloned = createPublicCloneNote({
+        shared: { publishedAt: data.publishedAt, note: item },
+        slug: data.slug,
+      })
+      upsertNoteSync(cloned)
+      replaceNoteSearchArtifacts(cloned.id, buildNoteSearchArtifacts(cloned))
+      await persist()
+      setBundleCloneState(prev => ({ ...prev, [key]: { ok: true, noteId: cloned.id } }))
+    } catch (e) {
+      setBundleCloneState(prev => ({ ...prev, [key]: { error: e.message ?? 'Failed to clone shared note' } }))
+    }
+  }
+
+  if (loading || error || (!note && !bundleNotes.length)) return <PublicState path={path} loading={loading} error={error} />
+
+  if (bundleNotes.length) {
+    return (
+      <PublicShell path={path}>
+        <main className="mx-auto max-w-5xl px-3 py-4 md:px-4">
+          <div className="grid gap-4">
+            {bundleNotes.map((item, index) => {
+              const key = item.id ?? String(index)
+              const collapsed = collapsedBundleNotes.has(key)
+              const cloned = bundleCloneState[key]
+              const firstLine = String(item.content ?? '').split('\n').find(line => line.trim())?.trim() ?? 'empty note'
+              return (
+                <section key={key} className="min-w-0 rounded-lg border border-zinc-800 bg-zinc-900 p-4 md:p-5">
+                  <div className={`${collapsed ? '' : 'mb-4'} flex flex-wrap items-center gap-2 border-b border-zinc-800 pb-3 font-mono text-[11px] text-zinc-600`}>
+                    {collapsed && <span className="min-w-0 max-w-full truncate text-zinc-300">{firstLine}</span>}
+                    <span>updated {timeAgo(item.updatedAt)}</span>
+                    {item.viewMode && <span>{item.viewMode}</span>}
+                    <button
+                      type="button"
+                      onClick={() => cloneBundleNote(item, key)}
+                      disabled={cloned?.loading || cloned?.ok}
+                      className="ml-auto rounded border border-blue-900/70 bg-blue-950/30 px-2 py-0.5 text-[10px] text-blue-200 transition-colors hover:bg-blue-950/60 disabled:cursor-default disabled:opacity-60"
+                    >
+                      {cloned?.loading ? 'Cloning...' : cloned?.ok ? 'Cloned' : 'Clone +'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCollapsedBundleNotes(prev => {
+                          const next = new Set(prev)
+                          if (next.has(key)) next.delete(key)
+                          else next.add(key)
+                          return next
+                        })
+                      }}
+                      className="rounded border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+                    >
+                      {collapsed ? 'Expand' : 'Collapse'}
+                    </button>
+                  </div>
+                  {cloned?.ok && !collapsed && (
+                    <div className="mb-4 rounded-md border border-blue-900/60 bg-blue-950/30 px-3 py-2 text-xs text-blue-100">
+                      Cloned into your notes. <a href="/app" className="font-mono text-blue-300 hover:text-blue-200">Open Jot.it</a>
+                    </div>
+                  )}
+                  {cloned?.error && !collapsed && (
+                    <div className="mb-4 rounded-md border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+                      {cloned.error}
+                    </div>
+                  )}
+                  {!collapsed && <PublicMarkdown content={item.content ?? ''} viewMode={item.viewMode} />}
+                </section>
+              )
+            })}
+          </div>
+        </main>
+      </PublicShell>
+    )
+  }
 
   return (
     <PublicShell path={path}>

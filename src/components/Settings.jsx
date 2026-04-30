@@ -6,6 +6,7 @@ import { getLLMStatus, getLLMModels } from '../utils/llmClient'
 import AppearanceSection from './settings/AppearanceSection'
 import ProfileSection, { SLUG_RE } from './settings/ProfileSection'
 import SyncSection from './settings/SyncSection'
+import NibTemplatesSection from './settings/NibTemplatesSection'
 import EncryptionSection from './settings/EncryptionSection'
 import DangerZoneSection from './settings/DangerZoneSection'
 
@@ -35,6 +36,8 @@ export default function Settings({
   const [theme, setTheme] = useState(settings.theme ?? 'dark')
   const [secretScanEnabled, setSecretScanEnabled] = useState(settings.secretScanEnabled ?? false)
   const [secretScanBlockSync, setSecretScanBlockSync] = useState(settings.secretScanBlockSync ?? false)
+  const [secretScanNibEnabled, setSecretScanNibEnabled] = useState(settings.secretScanNibEnabled ?? false)
+  const [nibTemplates, setNibTemplates] = useState(settings.nibTemplates ?? {})
   const [bucketSaving, setBucketSaving] = useState(false)
   const [bucketStatus, setBucketStatus] = useState(null)
   const [removeAllServerState, setRemoveAllServerState] = useState(null)
@@ -42,12 +45,25 @@ export default function Settings({
   const [bucketNotes, setBucketNotes] = useState([])
   const localAgentStatus = useLocalAgentStatus()
 
-  const { llmEnabled, setLLMEnabled, ollamaModel, setOllamaModel } = useLLMSettings()
+  const {
+    llmEnabled,
+    setLLMEnabled,
+    llmProvider,
+    setLLMProvider,
+    ollamaModel,
+    setOllamaModel,
+    remoteBaseUrl,
+    setRemoteBaseUrl,
+    remoteApiKey,
+    setRemoteApiKey,
+    remoteModel,
+    setRemoteModel,
+  } = useLLMSettings()
   const [ollamaAvailable, setOllamaAvailable] = useState(null)
   const [ollamaModels, setOllamaModels] = useState([])
   const [ollamaLoading, setOllamaLoading] = useState(false)
-  const [embedProvider, setEmbedProvider] = useState('openai')
-  const [embedModel, setEmbedModel] = useState('nomic-embed-text')
+  const [embedProvider, setEmbedProvider] = useState(settings.embeddingProvider ?? 'openai')
+  const [embedModel, setEmbedModel] = useState(settings.ollamaEmbedModel ?? 'nomic-embed-text')
   const [embedSaving, setEmbedSaving] = useState(false)
   const [embedStatus, setEmbedStatus] = useState(null)
 
@@ -136,11 +152,12 @@ export default function Settings({
   }
 
   const handleSaveEmbedConfig = async () => {
-    if (!onSaveAiConfig) return
     setEmbedSaving(true)
     setEmbedStatus(null)
     try {
-      const result = await onSaveAiConfig({ embeddingProvider: embedProvider, ollamaEmbedModel: embedModel })
+      const result = onSaveAiConfig
+        ? await onSaveAiConfig({ embeddingProvider: embedProvider, ollamaEmbedModel: embedModel })
+        : { ok: true }
       setEmbedStatus(result?.ok ? { ok: true } : { error: result?.error ?? 'Failed to save' })
     } finally {
       setEmbedSaving(false)
@@ -153,7 +170,19 @@ export default function Settings({
   }
 
   const handleSave = () => {
-    onSave({ ...settings, serverProxy, localAgentToken: localAgentToken.trim(), theme, secretScanEnabled, secretScanBlockSync, syncEnabled })
+    onSave({
+      ...settings,
+      serverProxy,
+      localAgentToken: localAgentToken.trim(),
+      embeddingProvider: embedProvider,
+      ollamaEmbedModel: embedModel.trim() || 'nomic-embed-text',
+      theme,
+      secretScanEnabled,
+      secretScanBlockSync,
+      secretScanNibEnabled,
+      syncEnabled,
+      nibTemplates,
+    })
   }
 
   const handleSaveBucketName = async () => {
@@ -203,6 +232,7 @@ export default function Settings({
             embedSaving={embedSaving}
             embedStatus={embedStatus}
             llmEnabled={llmEnabled}
+            llmProvider={llmProvider}
             localAgentStatus={localAgentStatus}
             localAgentToken={localAgentToken}
             ollamaAvailable={ollamaAvailable}
@@ -213,14 +243,26 @@ export default function Settings({
             onSaveEmbedConfig={handleSaveEmbedConfig}
             onToggleEmbedProvider={() => { setEmbedProvider(p => p === 'ollama' ? 'openai' : 'ollama'); setEmbedStatus(null) }}
             onToggleLlm={() => setLLMEnabled(!llmEnabled)}
+            onLlmProviderChange={setLLMProvider}
             onToggleServerProxy={() => setServerProxy(v => !v)}
             onToggleSync={() => setSyncEnabled(v => !v)}
+            remoteApiKey={remoteApiKey}
+            remoteBaseUrl={remoteBaseUrl}
+            remoteModel={remoteModel}
             serverProxy={serverProxy}
+            setRemoteApiKey={setRemoteApiKey}
+            setRemoteBaseUrl={setRemoteBaseUrl}
+            setRemoteModel={setRemoteModel}
             setLocalAgentToken={setLocalAgentToken}
             setOllamaModel={setOllamaModel}
             showAiConfig={Boolean(onSaveAiConfig)}
             syncEnabled={syncEnabled}
             user={user}
+          />
+
+          <NibTemplatesSection
+            templates={nibTemplates}
+            onChange={setNibTemplates}
           />
 
           <ProfileSection
@@ -244,12 +286,14 @@ export default function Settings({
             regenState={regenState}
             secretScanBlockSync={secretScanBlockSync}
             secretScanEnabled={secretScanEnabled}
+            secretScanNibEnabled={secretScanNibEnabled}
             setRegenError={setRegenError}
             setRegenMode={setRegenMode}
             setRegenPassword={setRegenPassword}
             setRegenState={setRegenState}
             setSecretScanBlockSync={setSecretScanBlockSync}
             setSecretScanEnabled={setSecretScanEnabled}
+            setSecretScanNibEnabled={setSecretScanNibEnabled}
             user={user}
           />
 

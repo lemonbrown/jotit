@@ -29,6 +29,7 @@ export function useNoteMutations({
       const next = prev.map(note => {
         if (note.id !== id) return note
         const updated = { ...note, ...updates, updatedAt: Date.now() }
+        if (updates.content !== undefined && updates.content !== note.content) updated.embedding = null
         upsertNoteSync(updated)
         const searchArtifacts = buildNoteSearchArtifacts(updated)
         replaceNoteSearchArtifacts(updated.id, searchArtifacts)
