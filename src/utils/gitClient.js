@@ -53,3 +53,12 @@ export async function getGitDiff(repoId, token) {
   })
   return readAgentJson(response)
 }
+
+export async function getGitPR(repoId, prNumber, base, token) {
+  const params = new URLSearchParams({ repoId, number: String(prNumber) })
+  if (base) params.set('base', base)
+  const response = await fetch(`${LOCAL_AGENT_ORIGIN}/git/pr?${params}`, {
+    headers: authHeaders(token),
+  })
+  return readAgentJson(response)
+}

@@ -1,25 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useLLMChat } from '../hooks/useLLMChat'
-import { buildAllNotesLLMContext, buildNoteLLMContext } from '../utils/llmNoteContext'
-
-const MAX_ALL_NOTES_CHARS = 80000
-
-function buildAllNotesContext(notes) {
-  const parts = []
-  let total = 0
-  for (const note of (notes ?? [])) {
-    if (!note.content?.trim()) continue
-    const title = note.content.split('\n')[0].slice(0, 80) || 'Untitled'
-    const entry = `### ${title}\n\n${note.content.trim()}\n\n---\n\n`
-    if (total + entry.length > MAX_ALL_NOTES_CHARS) {
-      parts.push('_(additional notes omitted — context limit reached)_')
-      break
-    }
-    parts.push(entry)
-    total += entry.length
-  }
-  return parts.join('')
-}
+import { buildAllNotesLLMContext, buildNoteLLMContext, buildReferencedNotesContext } from '../utils/llmNoteContext'
 
 const BASE_MODES = [
   { id: 'note', label: 'Note' },
@@ -34,6 +15,68 @@ function buildRegexContext({ pattern, flags, testStr, matchCount }) {
   return parts.join('\n\n')
 }
 
+function noteTitle(note) {
+  return String(note?.content ?? '').split('\n')[0].slice(0, 80) || 'Untitled'
+}
+
+// ── Note reference picker ─────────────────────────────────────────────────────
+
+function NotePicker({ query, notes, onSelect, activeIndex, pickerRef }) {
+  if (!notes.length) {
+    return (
+      <div ref={pickerRef} className="absolute bottom-full mb-1 left-0 right-0 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden z-50">
+        <p className="px-3 py-2 text-[12px] text-zinc-500">
+          {query ? 'No matching notes' : 'Type to search notes'}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div ref={pickerRef} className="absolute bottom-full mb-1 left-0 right-0 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl overflow-hidden z-50">
+      {notes.map((note, i) => (
+        <button
+          key={note.id}
+          onMouseDown={e => { e.preventDefault(); onSelect(note) }}
+          className={`w-full text-left px-3 py-2 text-[12px] transition-colors ${
+            i === activeIndex
+              ? 'bg-violet-900/50 text-violet-200'
+              : 'text-zinc-300 hover:bg-zinc-700'
+          }`}
+        >
+          <span className="truncate block">{noteTitle(note)}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Reference chips ───────────────────────────────────────────────────────────
+
+function ReferenceChips({ notes, onRemove }) {
+  if (!notes.length) return null
+  return (
+    <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+      {notes.map(note => (
+        <span
+          key={note.id}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-900/40 border border-violet-800/60 text-[11px] text-violet-300 font-mono max-w-[200px]"
+        >
+          <span className="truncate">@{noteTitle(note)}</span>
+          <button
+            onMouseDown={e => { e.preventDefault(); onRemove(note.id) }}
+            className="shrink-0 text-violet-500 hover:text-violet-200 transition-colors leading-none"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 export default function LLMChat({ note, notes = [], selectionText = '', onJumpToSelection, regexContext = null, initialMessage = '', settings, model, onClose, pane = false }) {
   const [input, setInput] = useState(initialMessage)
   const [contextMode, setContextMode] = useState(() => {
@@ -41,8 +84,13 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     if (selectionText) return 'selection'
     return 'note'
   })
+  const [referencedNotes, setReferencedNotes] = useState([])
+  const [atPicker, setAtPicker] = useState(null) // null | { start: number, query: string }
+  const [pickerIndex, setPickerIndex] = useState(0)
+
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
+  const pickerRef = useRef(null)
   const token = settings?.localAgentToken ?? ''
   const autoSentRef = useRef(false)
 
@@ -53,15 +101,39 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
 
   const { messages, isStreaming, error, sendMessage, clear } = useLLMChat({ token, model })
 
+  // ── Picker results ──────────────────────────────────────────────────────────
+
+  const pickerResults = useMemo(() => {
+    if (!atPicker) return []
+    const q = atPicker.query.toLowerCase()
+    return (notes ?? [])
+      .filter(n => n.id !== note?.id)
+      .filter(n => !referencedNotes.find(r => r.id === n.id))
+      .filter(n => {
+        if (!q) return true
+        const content = String(n.content ?? '').toLowerCase()
+        return content.includes(q)
+      })
+      .slice(0, 6)
+  }, [atPicker, notes, note, referencedNotes])
+
+  // Reset picker index when results change
+  useEffect(() => { setPickerIndex(0) }, [pickerResults])
+
+  // ── Scroll ──────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // ── Focus ───────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!selectionText && !regexContext) inputRef.current?.focus()
   }, [])
 
-  // auto-send initialMessage once on mount
+  // ── Auto-send initial message ───────────────────────────────────────────────
+
   useEffect(() => {
     if (!initialMessage.trim() || autoSentRef.current) return
     autoSentRef.current = true
@@ -71,11 +143,15 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     setInput('')
   }, [])
 
+  // ── Escape closes nib (not picker) ─────────────────────────────────────────
+
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e) => { if (e.key === 'Escape' && !atPicker) onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, atPicker])
+
+  // ── Context mode guards ─────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!selectionText && contextMode === 'selection') setContextMode('note')
@@ -86,12 +162,23 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     setContextMode('selection')
   }, [contextMode, regexContext, selectionText])
 
-  const buildContext = () => {
-    if (contextMode === 'regex') return regexContext ? buildRegexContext(regexContext) : ''
-    if (contextMode === 'all') return buildAllNotesLLMContext(notes)
-    if (contextMode === 'selection') return selectionText
-    return buildNoteLLMContext(note)
-  }
+  // ── Context builder ─────────────────────────────────────────────────────────
+
+  const buildContext = useCallback(() => {
+    let ctx = ''
+    if (contextMode === 'regex') ctx = regexContext ? buildRegexContext(regexContext) : ''
+    else if (contextMode === 'all') ctx = buildAllNotesLLMContext(notes)
+    else if (contextMode === 'selection') ctx = selectionText
+    else ctx = buildNoteLLMContext(note)
+
+    if (referencedNotes.length > 0) {
+      const refCtx = buildReferencedNotesContext(referencedNotes)
+      ctx = ctx ? `${ctx}\n\n${refCtx}` : refCtx
+    }
+    return ctx
+  }, [contextMode, regexContext, notes, selectionText, note, referencedNotes])
+
+  // ── Send ────────────────────────────────────────────────────────────────────
 
   const handleSend = () => {
     if (!input.trim() || isStreaming) return
@@ -99,7 +186,66 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     setInput('')
   }
 
+  // ── Note reference selection ────────────────────────────────────────────────
+
+  const selectPickerNote = useCallback((pickerNote) => {
+    setReferencedNotes(prev => {
+      if (prev.find(n => n.id === pickerNote.id)) return prev
+      return [...prev, pickerNote]
+    })
+    if (atPicker) {
+      const removeLen = 1 + atPicker.query.length // '@' + query text
+      setInput(prev => prev.slice(0, atPicker.start) + prev.slice(atPicker.start + removeLen))
+    }
+    setAtPicker(null)
+    inputRef.current?.focus()
+  }, [atPicker])
+
+  const removeReferencedNote = useCallback((noteId) => {
+    setReferencedNotes(prev => prev.filter(n => n.id !== noteId))
+  }, [])
+
+  // ── Input change — detect @ trigger ────────────────────────────────────────
+
+  const handleInputChange = (e) => {
+    const val = e.target.value
+    const cursor = e.target.selectionStart
+    setInput(val)
+
+    const beforeCursor = val.slice(0, cursor)
+    const atMatch = beforeCursor.match(/@(\S*)$/)
+    if (atMatch) {
+      setAtPicker({ start: cursor - atMatch[0].length, query: atMatch[1] })
+    } else {
+      setAtPicker(null)
+    }
+  }
+
+  // ── Keyboard — picker nav + send ────────────────────────────────────────────
+
   const handleKeyDown = (e) => {
+    if (atPicker && pickerResults.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setPickerIndex(i => Math.min(i + 1, pickerResults.length - 1))
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setPickerIndex(i => Math.max(i - 1, 0))
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        selectPickerNote(pickerResults[pickerIndex])
+        return
+      }
+    }
+    if (e.key === 'Escape' && atPicker) {
+      e.stopPropagation()
+      setAtPicker(null)
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -125,6 +271,9 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
           <span className="text-xs font-semibold text-zinc-200">✒ Nib</span>
           <span className="text-[11px] text-zinc-500 truncate" title={contextLabel()}>
             context: {contextLabel()}
+            {referencedNotes.length > 0 && (
+              <span className="text-violet-400"> + {referencedNotes.length} ref{referencedNotes.length > 1 ? 's' : ''}</span>
+            )}
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0 ml-3">
@@ -238,7 +387,7 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
                 ? `Ask anything across your ${(notes ?? []).length} notes.`
                 : contextMode === 'selection'
                   ? 'Ask about the selected text.'
-                  : 'Ask anything about this note.'}
+                  : 'Ask anything about this note. Type @ to reference another note.'}
           </p>
         )}
         {messages.map((msg, i) => (
@@ -263,16 +412,29 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
+      {/* Input area */}
       <div className="px-3 pb-3 pt-2 border-t border-zinc-800 shrink-0">
-        <div className="flex items-end gap-2">
+        {/* Reference chips */}
+        <ReferenceChips notes={referencedNotes} onRemove={removeReferencedNote} />
+
+        {/* Textarea + picker wrapper */}
+        <div className={`relative flex items-end gap-2 ${referencedNotes.length > 0 ? 'mt-2' : ''}`}>
+          {atPicker && (
+            <NotePicker
+              query={atPicker.query}
+              notes={pickerResults}
+              onSelect={selectPickerNote}
+              activeIndex={pickerIndex}
+              pickerRef={pickerRef}
+            />
+          )}
           <textarea
             ref={inputRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             disabled={isStreaming}
-            placeholder={isStreaming ? 'Responding…' : 'Ask… (Enter to send, Shift+Enter for newline)'}
+            placeholder={isStreaming ? 'Responding…' : 'Ask… (Enter to send, @ to reference a note)'}
             rows={2}
             className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-500 transition-colors resize-none disabled:opacity-50"
           />

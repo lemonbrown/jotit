@@ -44,6 +44,18 @@ export function buildNoteLLMContext(note, { maxChars = MAX_NOTE_CONTEXT_CHARS } 
   return truncateContext(context, maxChars)
 }
 
+const MAX_REFERENCED_NOTE_CHARS = 6000
+
+export function buildReferencedNotesContext(notes) {
+  if (!notes?.length) return ''
+  const parts = notes.map(note => {
+    const title = String(note.content ?? '').split('\n')[0].slice(0, 80) || 'Untitled'
+    const body = truncateContext(String(note.content ?? '').trim(), MAX_REFERENCED_NOTE_CHARS)
+    return `=== ${title} ===\n${body}\n===`
+  })
+  return `[Referenced Notes]\n\n${parts.join('\n\n')}`
+}
+
 export function buildAllNotesLLMContext(notes, { maxChars = MAX_ALL_NOTES_CONTEXT_CHARS } = {}) {
   const parts = []
   let total = 0

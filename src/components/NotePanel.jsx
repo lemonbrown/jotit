@@ -49,7 +49,8 @@ import SecretAlert from './SecretAlert'
 import { runJsInWorker } from '../utils/jsRunner'
 import { NOW_COMMAND, formatCurrentDateTime, getInlineCommandRange } from '../utils/noteCommands'
 import { getGitCommandSuggestions, getGitCommandTrigger, parseGitCommand, parsePrCommand, formatGitCommandResult } from '../utils/gitCommands'
-import { connectGitRepo, getGitDiff, getGitStatus, listGitRepos, useGitRepo } from '../utils/gitClient'
+import { connectGitRepo, getGitDiff, getGitPR, getGitStatus, listGitRepos, useGitRepo } from '../utils/gitClient'
+import GitPRView from './GitPRView'
 import { streamLLMChat } from '../utils/llmClient'
 import { matchTemplates, expandTemplate, parseTemplateQuery } from '../utils/noteTemplates'
 import { escapeHtml } from '../utils/escapeHtml'
@@ -179,6 +180,7 @@ function isRunnableCommandLine(line) {
     if (gitCommand.command === 'unknown') return false
     if (gitCommand.command === 'connect') return Boolean(gitCommand.path)
     if (gitCommand.command === 'use') return Boolean(gitCommand.repoId)
+    if (gitCommand.command === 'pr-view') return Boolean(gitCommand.number)
     return true
   }
 
@@ -213,6 +215,9 @@ function ScratchOutput({ output }) {
 
 export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
   const [content, setContent] = useState(note.content)
+  const [gitPRData, setGitPRData] = useState(null)
+  const [gitPRViewRef, setGitPRViewRef] = useState(note.noteData?.gitPRView ?? null)
+  const [gitPRLoading, setGitPRLoading] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmRemoveServer, setConfirmRemoveServer] = useState(false)
   const [removingFromServer, setRemovingFromServer] = useState(false)
@@ -257,6 +262,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     : ''
 
   const textareaRef = useRef(null)
+  const gitPRLoadRequestRef = useRef(0)
   const searchBackdropRef = useRef(null)
   const codeEditRef = useRef(null)
   const codePreRef = useRef(null)
@@ -800,6 +806,9 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   useEffect(() => {
     setContent(note.content)
     setMode(isOpenApiNote(note) ? 'openapi' : 'edit')
+    setGitPRData(null)
+    setGitPRViewRef(note.noteData?.gitPRView ?? null)
+    setGitPRLoading(false)
     setConfirmDelete(false)
     setShareState(null)
     resetSelectionState()
@@ -1438,6 +1447,51 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     replaceRangeInEditor(range.start, range.end, output)
   }
 
+  const closeGitPRView = () => {
+    gitPRLoadRequestRef.current += 1
+    setGitPRLoading(false)
+    setMode('edit')
+  }
+
+  const openGitPRView = async () => {
+    if (gitPRLoading) return
+    if (gitPRData) {
+      setMode(mode === 'gitpr' ? 'edit' : 'gitpr')
+      return
+    }
+
+    if (!gitPRViewRef) return
+    if (!agentToken?.trim()) {
+      setMode('edit')
+      return
+    }
+
+    let loadingGitPRStarted = false
+    try {
+      setGitPRLoading(true)
+      setMode('gitpr')
+      const requestId = ++gitPRLoadRequestRef.current
+      const repoId = gitPRViewRef.repoId || await resolveGitRepoId('')
+      const data = await getGitPR(repoId, gitPRViewRef.prNumber, gitPRViewRef.base, agentToken)
+      if (requestId !== gitPRLoadRequestRef.current) return
+      setGitPRData(data)
+      setGitPRViewRef({
+        repoId,
+        prNumber: data.prNumber,
+        base: data.base,
+        repoName: data.repo?.displayName ?? data.repo?.name ?? repoId,
+        updatedAt: Date.now(),
+      })
+      setMode('gitpr')
+    } catch (error) {
+      const message = error.message ?? String(error)
+      setGitPRViewRef(prev => prev ? { ...prev, error: message } : prev)
+      setMode('edit')
+    } finally {
+      setGitPRLoading(false)
+    }
+  }
+
   const runGitCommand = async (range) => {
     const parsed = parseGitCommand(range.text)
     if (!parsed) return false
@@ -1459,6 +1513,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           '/git diff',
           '/git summary',
           '/git summary commit',
+          '/git pr <number>',
         ].join('\n')))
         return true
       }
@@ -1655,8 +1710,49 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         return true
       }
 
-      throw new Error('Unknown git command. Try /git repos, /git connect, /git use, /git status, /git diff, /git summary, or /git summary commit.')
+      if (parsed.command === 'pr-view') {
+        if (!parsed.number) throw new Error('Usage: /git pr <number> [--base <branch>]')
+        const repoId = await resolveGitRepoId(parsed.repoId)
+        const pendingGitPRView = {
+          repoId,
+          prNumber: parsed.number,
+          base: parsed.base,
+          repoName: repoId,
+          updatedAt: Date.now(),
+        }
+        setGitPRViewRef(pendingGitPRView)
+        setGitPRLoading(true)
+        loadingGitPRStarted = true
+        setMode('gitpr')
+        const data = await getGitPR(repoId, parsed.number, parsed.base, agentToken)
+        const repoName = data.repo?.displayName ?? data.repo?.name ?? repoId
+        const gitPRView = {
+          repoId,
+          prNumber: data.prNumber,
+          base: data.base,
+          repoName,
+          updatedAt: Date.now(),
+        }
+        const lines = [`PR #${data.prNumber} — ${repoName}`, `Base: ${data.base}`, '']
+        if (data.log) lines.push('## Commits', '```text', data.log.trimEnd(), '```', '')
+        if (data.stat) lines.push('## Changed Files', '```text', data.stat.trimEnd(), '```', '')
+        if (data.diff) lines.push('## Diff', '```diff', data.diff.trimEnd(), '```')
+        replaceGitCommand(range, lines.join('\n').trimEnd())
+        const noteData = note.noteData && typeof note.noteData === 'object'
+          ? { ...note.noteData, gitPRView }
+          : { gitPRView }
+        onUpdate({ noteData })
+        setGitPRViewRef(gitPRView)
+        setGitPRData(data)
+        setGitPRLoading(false)
+        setMode('gitpr')
+        return true
+      }
+
+      throw new Error('Unknown git command. Try /git repos, /git connect, /git use, /git status, /git diff, /git summary, /git summary commit, or /git pr <number>.')
     } catch (error) {
+      setGitPRLoading(false)
+      if (loadingGitPRStarted) setMode('edit')
       replaceGitCommand(range, formatGitCommandResult('Git command failed', error.message ?? String(error)))
       return true
     }
@@ -2574,6 +2670,16 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const tzPopup = null
   const tsPopup = null
   const showCommandToolbars = !simpleEditor && !hideCommandToolbars
+  const gitPRViewButtonData = gitPRData
+    ? {
+      prNumber: gitPRData.prNumber,
+      repoName: gitPRData.repo?.displayName ?? gitPRData.repo?.name ?? '',
+      error: '',
+      loading: false,
+    }
+    : gitPRViewRef
+      ? { ...gitPRViewRef, loading: gitPRLoading }
+      : null
 
   return (
     <>
@@ -2791,6 +2897,35 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         >
           {guidCopied ? '✓ inserted' : 'GUID'}
         </button>
+        {gitPRViewButtonData && (
+          <button
+            onMouseDown={e => e.preventDefault()}
+            onClick={openGitPRView}
+            title={
+              gitPRViewButtonData.error
+                ? gitPRViewButtonData.error
+                : gitPRViewButtonData.loading
+                  ? `Loading PR #${gitPRViewButtonData.prNumber}`
+                : mode === 'gitpr'
+                  ? 'Back to note'
+                  : `Open PR #${gitPRViewButtonData.prNumber} viewer`
+            }
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded border transition-colors font-mono ${
+              mode === 'gitpr'
+                ? 'text-violet-300 bg-violet-950/50 border-violet-800'
+                : gitPRViewButtonData.loading
+                  ? 'text-violet-300 bg-violet-950/30 border-violet-800'
+                : gitPRViewButtonData.error
+                  ? 'text-red-300 bg-red-950/20 border-red-900 hover:border-red-700'
+                : 'text-violet-400 hover:text-violet-200 bg-violet-950/20 border-violet-900 hover:border-violet-700'
+            }`}
+          >
+            {gitPRViewButtonData.loading && (
+              <span className="w-3 h-3 rounded-full border border-violet-400/40 border-t-violet-200 animate-spin" />
+            )}
+            PR #{gitPRViewButtonData.prNumber}
+          </button>
+        )}
         <button
           onMouseDown={e => e.preventDefault()}
           onClick={insertNow}
@@ -3963,6 +4098,42 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
             }${request.body ? `\n\n${request.body}` : ''}`
           )}
           onCreateOpenApiNote={onCreateOpenApiNote}
+        />
+      )}
+      {mode === 'gitpr' && gitPRLoading && (
+        <div className="h-full flex flex-col bg-zinc-950">
+          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 bg-zinc-900 shrink-0">
+            <span className="font-mono text-[11px] text-zinc-500 shrink-0">
+              PR #{gitPRViewButtonData?.prNumber ?? ''}
+            </span>
+            <span className="text-sm font-medium text-zinc-200 truncate">
+              {gitPRViewButtonData?.repoName || 'Loading pull request'}
+            </span>
+            {gitPRViewButtonData?.base && (
+              <span className="text-[11px] text-zinc-600 shrink-0 hidden sm:block">&lt;- {gitPRViewButtonData.base}</span>
+            )}
+            <button
+              onClick={closeGitPRView}
+              aria-label="Close PR view"
+              className="ml-auto shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors p-0.5"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center px-6">
+            <div className="flex items-center gap-3 text-zinc-400">
+              <span className="w-5 h-5 rounded-full border-2 border-violet-500/30 border-t-violet-300 animate-spin" />
+              <span className="text-sm font-mono">Loading PR view...</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {mode === 'gitpr' && !gitPRLoading && gitPRData && (
+        <GitPRView
+          prData={gitPRData}
+          onClose={closeGitPRView}
         />
       )}
       {mode === 'shell' && (

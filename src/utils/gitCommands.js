@@ -43,6 +43,12 @@ export const GIT_COMMAND_SUGGESTIONS = [
     detail: 'Generate a git commit message',
     usage: '/git summary commit [repo-id]',
   },
+  {
+    command: 'pr',
+    insertText: '/git pr ',
+    detail: 'View a pull request by number',
+    usage: '/git pr <number> [--base <branch>]',
+  },
 ]
 
 function tokenizeArgs(input) {
@@ -100,6 +106,12 @@ export function parseGitCommand(line) {
       return { command: 'summary-commit', repoId }
     }
     return { command, repoId: firstArg }
+  }
+  if (command === 'pr') {
+    const number = args.find(a => /^\d+$/.test(a))
+    const baseIdx = args.indexOf('--base')
+    const base = baseIdx !== -1 ? (args[baseIdx + 1] ?? '') : ''
+    return { command: 'pr-view', number: number ? Number(number) : null, base }
   }
   return { command: 'unknown', raw: text }
 }

@@ -517,6 +517,46 @@ app.get('/git/diff', requireToken(token), async (req, res) => {
   }
 })
 
+app.get('/git/pr', requireToken(token), async (req, res) => {
+  const repoId = String(req.query.repoId ?? '')
+  const prNumber = Number(req.query.number)
+  const base = String(req.query.base ?? '').trim()
+
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'PR number must be a positive integer' })
+  }
+
+  const { repo } = resolveRegisteredRepo(repoId)
+  if (!repo) return res.status(404).json({ error: 'Repo not found' })
+
+  const baseBranch = base || repo.baseBranch || 'main'
+  const prRef = `refs/pull/${prNumber}/head`
+
+  try {
+    await runGit(['fetch', 'origin', prRef], repo.path, 25000)
+
+    const [log, stat, numstat, diff] = await Promise.all([
+      runGit(['log', `${baseBranch}...FETCH_HEAD`, '--oneline', '--no-merges'], repo.path),
+      runGit(['diff', '--stat', `${baseBranch}...FETCH_HEAD`], repo.path),
+      runGit(['diff', '--numstat', `${baseBranch}...FETCH_HEAD`], repo.path),
+      runGit(['diff', `${baseBranch}...FETCH_HEAD`], repo.path),
+    ])
+
+    res.json({
+      ok: true,
+      repo,
+      prNumber,
+      base: baseBranch,
+      log,
+      stat,
+      numstat,
+      diff: diff.slice(0, MAX_SHELL_OUTPUT_BYTES),
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message ?? 'Could not fetch PR' })
+  }
+})
+
 app.get('/ollama/status', requireToken(token), async (_req, res) => {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
