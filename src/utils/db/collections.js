@@ -1,7 +1,13 @@
 import { getDb } from './_instance.js'
 import { createDefaultCollectionDraft, DEFAULT_COLLECTION_NAME, LEGACY_DEFAULT_COLLECTION_NAME } from '../collectionFactories.js'
 
+const DEFAULT_KANBAN_COLUMNS = ['Backlog', 'In Progress', 'Review', 'Done']
+
 function deserializeCollection(row) {
+  let kanbanColumns = DEFAULT_KANBAN_COLUMNS
+  if (row.kanban_columns) {
+    try { kanbanColumns = JSON.parse(row.kanban_columns) } catch {}
+  }
   return {
     id:            row.id,
     name:          row.name,
@@ -12,6 +18,7 @@ function deserializeCollection(row) {
     isPublic:      row.is_public === 1,
     dirty:         row.dirty,
     pendingDelete: row.pending_delete === 1,
+    kanbanColumns,
   }
 }
 
@@ -76,8 +83,8 @@ export function upsertCollectionSync(collection, dirty = 1) {
   if (!db || !collection?.id || !collection.name?.trim()) return
   db.run(
     `INSERT OR REPLACE INTO collections
-       (id, name, description, created_at, updated_at, is_default, dirty, pending_delete, is_public)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+       (id, name, description, created_at, updated_at, is_default, dirty, pending_delete, is_public, kanban_columns)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     [
       collection.id,
       collection.name.trim(),
@@ -87,6 +94,7 @@ export function upsertCollectionSync(collection, dirty = 1) {
       collection.isDefault ? 1 : 0,
       dirty,
       collection.isPublic ? 1 : 0,
+      collection.kanbanColumns ? JSON.stringify(collection.kanbanColumns) : null,
     ]
   )
 }
@@ -135,6 +143,16 @@ export function markCollectionsSynced(ids) {
   const stmt = db.prepare('UPDATE collections SET dirty = 0 WHERE id = ?')
   for (const id of ids) stmt.run([id])
   stmt.free()
+}
+
+export function setCollectionKanbanColumns(collectionId, columns) {
+  const db = getDb()
+  if (!db || !collectionId) return
+  db.run('UPDATE collections SET kanban_columns = ?, dirty = 1, updated_at = ? WHERE id = ?', [
+    JSON.stringify(columns),
+    Date.now(),
+    collectionId,
+  ])
 }
 
 export function cleanupPendingCollectionDeletes() {

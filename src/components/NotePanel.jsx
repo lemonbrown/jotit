@@ -1201,11 +1201,18 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     }
 
     requestAnimationFrame(() => {
-      const scrollTop = restoreLocation.scrollTop ?? 0
+      const ta = textareaRef.current
+
+      let scrollTop = restoreLocation.scrollTop ?? 0
+      if (restoreLocation.scrollToOffset != null && ta) {
+        const lineIndex = ta.value.slice(0, restoreLocation.scrollToOffset).split('\n').length - 1
+        const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 20.8
+        scrollTop = Math.max(0, lineIndex * lineHeight - ta.clientHeight * 0.35)
+      }
+
       if (inlineScrollRef.current) {
         inlineScrollRef.current.scrollTop = scrollTop
       } else {
-        const ta = textareaRef.current
         if (!ta) return
         const cursorStart = Math.min(restoreLocation.cursorStart ?? 0, ta.value.length)
         const cursorEnd = Math.min(restoreLocation.cursorEnd ?? cursorStart, ta.value.length)

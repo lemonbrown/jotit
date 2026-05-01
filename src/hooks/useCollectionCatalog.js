@@ -7,6 +7,7 @@ import {
   moveNoteToCollection as moveNoteToCollectionSync,
   schedulePersist,
   setCollectionPublic as setCollectionPublicSync,
+  setCollectionKanbanColumns as setCollectionKanbanColumnsSync,
   upsertCollectionSync,
 } from '../utils/db'
 import { ALL_COLLECTION_ID, createCollectionDraft } from '../utils/collectionFactories'
@@ -123,6 +124,13 @@ export function useCollectionCatalog({ notesRef, setNotes, resetWorkspace, showS
     scheduleSyncPush()
   }, [])
 
+  const updateCollectionKanbanColumns = useCallback((id, columns) => {
+    if (!id || !columns) return
+    setCollectionKanbanColumnsSync(id, columns)
+    setCollections(prev => prev.map(c => c.id === id ? { ...c, kanbanColumns: columns } : c))
+    schedulePersist()
+  }, [])
+
   return {
     activeCollection,
     activeCollectionId,
@@ -135,5 +143,6 @@ export function useCollectionCatalog({ notesRef, setNotes, resetWorkspace, showS
     renameCollection,
     setActiveCollectionId,
     setCollectionPublic,
+    updateCollectionKanbanColumns,
   }
 }

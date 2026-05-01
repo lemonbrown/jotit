@@ -1,7 +1,7 @@
 ﻿import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { loadSettings, saveSettings } from './utils/storage'
 import { useMemo } from 'react'
-import { exportSQLite, getAttachmentsForNote, schedulePersist as scheduleDbPersist, upsertNoteSync, setSyncIncluded, setSyncExcluded, setAllSyncExcluded, pinNote, unpinNote, getAllPins } from './utils/db'
+import { exportSQLite, getAttachmentsForNote, schedulePersist as scheduleDbPersist, upsertNoteSync, setSyncIncluded, setSyncExcluded, setAllSyncExcluded, pinNote, unpinNote, getAllPins, setNoteKanbanStatus } from './utils/db'
 import { scheduleSyncPush, setOnSyncHeld, removeNoteFromServer, removeAllNotesFromServer } from './utils/sync'
 import { scanForSecrets, contentHash } from './utils/secretScanner'
 import { generateAndStoreKeyPair, exportPublicKeyJwk, wrapPrivateKey } from './utils/e2eEncryption'
@@ -19,6 +19,7 @@ import { useCollectionCatalog } from './hooks/useCollectionCatalog'
 import { useServerAiStatus } from './hooks/useServerAiStatus'
 import { useLLMSettings } from './hooks/useLLMSettings'
 import NoteGrid from './components/NoteGrid'
+import KanbanBoard from './components/KanbanBoard'
 import NotePanel from './components/NotePanel'
 import LLMChat from './components/LLMChat'
 import SearchBar from './components/SearchBar'
@@ -137,6 +138,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     navigateLocationHistory,
     openNoteInPane,
     openNibPane,
+    openKanbanPane,
     recordLocation,
     removeNoteFromWorkspace,
     resetWorkspace,
@@ -164,6 +166,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     renameCollection,
     setActiveCollectionId,
     setCollectionPublic,
+    updateCollectionKanbanColumns,
   } = useCollectionCatalog({
     notesRef,
     resetWorkspace,
@@ -492,6 +495,12 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setSyncIncluded(noteId, included)
     scheduleDbPersist()
     setNotes(prev => prev.map(n => n.id === noteId ? { ...n, syncIncluded: included } : n))
+  }, [])
+
+  const handleKanbanStatusChange = useCallback((noteId, status) => {
+    setNoteKanbanStatus(noteId, status)
+    scheduleDbPersist()
+    setNotes(prev => prev.map(n => n.id === noteId ? { ...n, kanbanStatus: status } : n))
   }, [])
 
   const handleRemoveNoteFromServer = useCallback(async (noteId) => {
@@ -953,7 +962,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
         : noteById.get(pane.noteId)
       return { ...pane, type, note }
     })
-    .filter(pane => pane.type === 'nib' || pane.note)
+    .filter(pane => pane.type === 'nib' || pane.type === 'kanban' || pane.note)
+
+  const boardView = openPanes.some(p => p.type === 'kanban')
 
   const openPaneIdStr = openPanes.map(p => p.id).join(',')
   useEffect(() => {
@@ -1374,6 +1385,12 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
               setDraggedNoteId(null)
               setDragOverCollectionId(null)
             }}
+            boardView={boardView}
+            onToggleBoardView={() => {
+              const kanbanPane = openPanes.find(p => p.type === 'kanban')
+              if (kanbanPane) closeEditorPane(kanbanPane.id)
+              else openKanbanPane()
+            }}
           />
         )}
         {shouldShowNotesPane && openPanes.length > 0 && (
@@ -1384,6 +1401,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             {openPanes.map((pane, index) => {
               const { id: paneId, note, type } = pane
               const isNibPane = type === 'nib'
+              const isKanbanPane = type === 'kanban'
               const isMultiPane = openPanes.length > 1
               const isLast = index === openPanes.length - 1
               const nibContext = isNibPane && !pane.regexContext
@@ -1403,7 +1421,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
               <div
                 onMouseDown={() => {
                   setActivePaneId(paneId)
-                  if (!isNibPane && note?.id) setActiveNoteId(note.id)
+                  if (!isNibPane && !isKanbanPane && note?.id) setActiveNoteId(note.id)
                 }}
                 style={
                   isMultiPane && !isLast
@@ -1426,7 +1444,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                   }`}>
                     <span className="text-[10px] text-zinc-600 font-mono shrink-0">pane {index + 1}</span>
                     <span className="text-[11px] text-zinc-400 truncate min-w-0">
-                      {isNibPane ? `Nib${nibNote ? `: ${getNoteTitle(nibNote)}` : ''}` : getNoteTitle(note)}
+                      {isKanbanPane ? 'Board' : isNibPane ? `Nib${nibNote ? `: ${getNoteTitle(nibNote)}` : ''}` : getNoteTitle(note)}
                     </span>
                     <button
                       onMouseDown={e => e.stopPropagation()}
@@ -1438,7 +1456,22 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     </button>
                   </div>
                 )}
-                {isNibPane ? (
+                {isKanbanPane ? (
+                  <KanbanBoard
+                    key={`${paneId}:kanban`}
+                    notes={displayedNotes}
+                    activeNoteId={activeNoteId}
+                    onSelectNote={(id, options = {}) => {
+                      ensureSelectableNoteIsLocal(id)
+                      openNoteInPane(id, { newPane: true, ...options })
+                    }}
+                    columns={activeCollection?.kanbanColumns}
+                    onUpdateColumns={activeCollectionId && activeCollectionId !== ALL_COLLECTION_ID
+                      ? (cols) => updateCollectionKanbanColumns(activeCollectionId, cols)
+                      : undefined}
+                    onKanbanStatusChange={handleKanbanStatusChange}
+                  />
+                ) : isNibPane ? (
                   <LLMChat
                     key={`${paneId}:nib`}
                     note={nibNote}

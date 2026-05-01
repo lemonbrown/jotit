@@ -12,6 +12,7 @@ export {
   moveNoteToCollection,
   markCollectionsSynced,
   cleanupPendingCollectionDeletes,
+  setCollectionKanbanColumns,
 } from './db/collections.js'
 export {
   getAllNotes,
@@ -27,6 +28,7 @@ export {
   markSynced,
   setNoteEmbeddingSync,
   deleteNoteSync,
+  setNoteKanbanStatus,
 } from './db/notes.js'
 export {
   replaceNoteSearchArtifacts,

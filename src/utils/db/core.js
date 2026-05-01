@@ -186,6 +186,8 @@ export async function initDB() {
   try { instance.run('ALTER TABLE notes ADD COLUMN sync_included INTEGER DEFAULT NULL') } catch {}
   try { instance.run('ALTER TABLE notes ADD COLUMN sync_excluded INTEGER NOT NULL DEFAULT 0') } catch {}
   try { instance.run(`CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, command TEXT NOT NULL UNIQUE, name TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`) } catch {}
+  try { instance.run('ALTER TABLE notes ADD COLUMN kanban_status TEXT') } catch {}
+  try { instance.run('ALTER TABLE collections ADD COLUMN kanban_columns TEXT') } catch {}
 
   ensureDefaultCollection()
 

@@ -23,6 +23,7 @@ function deserialize(row) {
     secretsClearedHash: row.secrets_cleared_hash ?? null,
     syncIncluded:       row.sync_included === 1,
     syncExcluded:       row.sync_excluded === 1,
+    kanbanStatus:       row.kanban_status ?? null,
   }
 }
 
@@ -65,8 +66,8 @@ export function upsertNoteSync(note, dirty = 1) {
   const noteDataForStorage = Object.keys(baseNoteData).length ? baseNoteData : null
   db.run(
     `INSERT OR REPLACE INTO notes
-       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded, secrets_cleared_hash, sync_included, sync_excluded)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+       (id, collection_id, content, categories, embedding, note_type, note_data, created_at, updated_at, is_public, dirty, pending_delete, encryption_tier, collection_excluded, secrets_cleared_hash, sync_included, sync_excluded, kanban_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
     [
       note.id,
       collectionId,
@@ -84,6 +85,7 @@ export function upsertNoteSync(note, dirty = 1) {
       note.secretsClearedHash ?? null,
       note.syncIncluded ? 1 : null,
       note.syncExcluded ? 1 : 0,
+      note.kanbanStatus ?? null,
     ]
   )
 }
@@ -161,6 +163,12 @@ export function markSynced(ids) {
   const stmt = db.prepare('UPDATE notes SET dirty = 0 WHERE id = ?')
   for (const id of ids) stmt.run([id])
   stmt.free()
+}
+
+export function setNoteKanbanStatus(noteId, status) {
+  const db = getDb()
+  if (!db || !noteId) return
+  db.run('UPDATE notes SET kanban_status = ?, dirty = 1, updated_at = ? WHERE id = ?', [status ?? null, Date.now(), noteId])
 }
 
 export function deleteNoteSync(id) {

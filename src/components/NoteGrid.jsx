@@ -34,6 +34,8 @@ export default function NoteGrid({
   onShareSelected,
   shareSelectedState,
   sharingSelected = false,
+  boardView = false,
+  onToggleBoardView,
 }) {
   const containerRef = useRef(null)
   const notesRef = useRef(notes)
@@ -50,6 +52,7 @@ export default function NoteGrid({
   const pointerInsideRef = useRef(false)
   const draggingRef = useRef(false)
   const [hoverPreview, setHoverPreview] = useState(null)
+  const [selectionMode, setSelectionMode] = useState(false)
 
   useEffect(() => { notesRef.current = notes }, [notes])
   useEffect(() => { activeIdRef.current = activeNoteId }, [activeNoteId])
@@ -343,7 +346,7 @@ export default function NoteGrid({
         <div className={`min-w-0 flex-1 text-center text-[10px] select-none transition-colors ${diffActive ? 'text-sky-700' : 'text-zinc-700'}`}>
           {diffActive ? 'diff mode active' : 'scroll to navigate · ctrl+click opens pane · shift+scroll to peek · alt+scroll to pan · alt+hover to preview'}
         </div>
-        {onShareSelected && selectedCount > 0 && (
+        {selectionMode && onShareSelected && selectedCount > 0 && (
           <div className="flex min-w-0 items-center gap-1 rounded-md border border-blue-900/60 bg-blue-950/30 px-1.5 py-1">
             {shareSelectedState?.ok ? (
               <a href={shareSelectedState.url} target="_blank" rel="noreferrer" className="max-w-28 truncate font-mono text-[10px] text-emerald-300 hover:text-emerald-200">
@@ -395,6 +398,37 @@ export default function NoteGrid({
         >
           rows
         </button>
+        <button
+          type="button"
+          onClick={() => onToggleBoardView?.()}
+          aria-pressed={boardView}
+          title={boardView ? 'Switch to list view' : 'Switch to board (kanban) view'}
+          className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors ${
+            boardView
+              ? 'border-blue-800/70 bg-blue-950/40 text-blue-300 hover:bg-blue-950/70'
+              : 'border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300'
+          }`}
+        >
+          board
+        </button>
+        {onToggleShareSelection && (
+          <button
+            type="button"
+            onClick={() => {
+              if (selectionMode) onClearShareSelection?.()
+              setSelectionMode(v => !v)
+            }}
+            aria-pressed={selectionMode}
+            title={selectionMode ? 'Hide checkboxes' : 'Show checkboxes for multi-note selection'}
+            className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors ${
+              selectionMode
+                ? 'border-blue-800/70 bg-blue-950/40 text-blue-300 hover:bg-blue-950/70'
+                : 'border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300'
+            }`}
+          >
+            select
+          </button>
+        )}
       </div>
 
       <div className={oneLineMode && !isPeekOpen ? 'card-grid-list' : isPeekOpen ? 'card-grid card-grid-peek' : 'card-grid'}>
@@ -424,8 +458,8 @@ export default function NoteGrid({
             onToggleSync={onToggleNoteSync}
             isPinned={pinnedIds?.has(note.id) ?? false}
             onTogglePin={onTogglePin ? () => onTogglePin(note.id, note.collectionId) : undefined}
-            shareSelected={selectedShareNoteIds?.has(note.id) ?? false}
-            onToggleShareSelection={onToggleShareSelection ? () => onToggleShareSelection(note.id) : undefined}
+            shareSelected={selectionMode && (selectedShareNoteIds?.has(note.id) ?? false)}
+            onToggleShareSelection={selectionMode && onToggleShareSelection ? () => onToggleShareSelection(note.id) : undefined}
           />
         ))}
       </div>

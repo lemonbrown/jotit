@@ -57,8 +57,8 @@ export function buildNotePreviewModel(note, searchMatch = null, { expanded = fal
   }
 }
 
-function highlight(text, query) {
-  if (!query || !text) return text
+export function highlight(text, query) {
+  if (!query || !text || typeof text !== 'string') return text
   const idx = text.toLowerCase().indexOf(query.toLowerCase())
   if (idx === -1) return text
 
@@ -81,7 +81,7 @@ export default function NotePreviewBody({
   return (
     <>
       <div className={`flex items-baseline gap-1.5 min-w-0 ${compact ? 'mb-1' : 'mb-2'}`}>
-        <div className={`note-content truncate flex-1 min-w-0 font-medium ${compact ? 'text-[12px]' : 'text-[13px]'} ${model.firstLine ? 'text-zinc-200' : 'italic text-zinc-700'}`}>
+        <div className={`note-content truncate flex-1 min-w-0 font-medium ${compact ? 'text-[11px]' : 'text-[13px]'} ${model.firstLine ? 'text-zinc-200' : 'italic text-zinc-700'}`}>
           {model.searchHeading ? highlight(model.searchHeading, searchQuery) : 'empty'}
         </div>
         {showMetadata && model.isE2EEncrypted && (
@@ -107,7 +107,7 @@ export default function NotePreviewBody({
         )}
       </div>
 
-      <div className={`note-content flex-1 leading-relaxed text-zinc-500 ${compact ? 'line-clamp-3 text-[11px]' : 'text-[12px] whitespace-pre-wrap overflow-hidden max-h-[16rem]'}`}>
+      <div className={`note-content flex-1 leading-relaxed text-zinc-500 ${compact ? 'line-clamp-3 text-[10px]' : 'text-[12px] whitespace-pre-wrap overflow-hidden max-h-[16rem]'}`}>
         {model.rest ? highlight(model.rest, searchQuery) : null}
       </div>
 

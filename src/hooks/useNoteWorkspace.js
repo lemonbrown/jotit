@@ -89,9 +89,13 @@ export function useNoteWorkspace() {
     commitLocationHistory(trimmed, trimmed.length - 1)
   }, [commitLocationHistory])
 
-  const openNoteInPane = useCallback((noteId, { newPane = false } = {}) => {
+  const openNoteInPane = useCallback((noteId, { newPane = false, matchOffset, matchLength = 0 } = {}) => {
     recordLocation({ noteId }, { replaceCurrent: false })
     setActiveNoteId(noteId)
+
+    if (matchOffset != null) {
+      setRestoreLocation({ noteId, cursorStart: matchOffset, cursorEnd: matchOffset + matchLength, scrollToOffset: matchOffset, token: Date.now() })
+    }
 
     setEditorPanes(prev => {
       if (newPane) {
@@ -128,6 +132,19 @@ export function useNoteWorkspace() {
       return prev.map(pane => pane.id === paneId ? { ...pane, type: 'note', noteId } : pane)
     })
   }, [activePaneId, recordLocation])
+
+  const openKanbanPane = useCallback(() => {
+    setEditorPanes(prev => {
+      const existing = prev.find(pane => pane.type === 'kanban')
+      if (existing) {
+        setActivePaneId(existing.id)
+        return prev
+      }
+      const paneId = generateId()
+      setActivePaneId(paneId)
+      return [...prev, { id: paneId, type: 'kanban' }]
+    })
+  }, [])
 
   const openNibPane = useCallback((payload = {}) => {
     const sourceNoteId = payload.noteId ?? activeNoteId
@@ -254,6 +271,7 @@ export function useNoteWorkspace() {
     locationHistory,
     locationHistoryIndex,
     navigateLocationHistory,
+    openKanbanPane,
     openNibPane,
     openNoteInPane,
     recordLocation,
