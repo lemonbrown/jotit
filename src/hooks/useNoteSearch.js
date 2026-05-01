@@ -108,6 +108,30 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
       return
     }
 
+    const normalized = query.toLowerCase()
+    if (normalized === 'is:git') {
+      const results = notesRef.current
+        .filter(n => n.git?.repoId)
+        .map(note => ({ note, noteId: note.id, score: 1 }))
+      startTransition(() => {
+        setTextSearchResults(results)
+        setIsSearching(false)
+      })
+      return
+    }
+
+    if (normalized.startsWith('git:')) {
+      const target = query.slice(4).trim().toLowerCase()
+      const results = notesRef.current
+        .filter(n => n.git?.repoId?.toLowerCase() === target)
+        .map(note => ({ note, noteId: note.id, score: 1 }))
+      startTransition(() => {
+        setTextSearchResults(results)
+        setIsSearching(false)
+      })
+      return
+    }
+
     if (effectiveMode === 'plain') {
       const results = searchNotesPlainText(notesRef.current, query)
       startTransition(() => {

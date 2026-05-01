@@ -23,9 +23,12 @@ Jotit supports a powerful split-pane interface:
 - **Toggle Note List:** Press `Ctrl + \` to hide the note list and focus entirely on your active panes.
 
 ### 3. Smart Search
-The search bar at the top supports two modes:
+The search bar at the top supports multiple modes and filters:
 - **Plain:** Standard text matching.
 - **Smart:** Intelligent ranking based on headings, keywords, and entities.
+- **Git Filters:** Quickly find linked notes:
+  - `is:git`: Shows all notes linked to any git repository.
+  - `git:<name>`: Shows notes linked to a specific repository.
 - **Improve with Nib:** If you have an AI provider connected, click the **Nib** button after searching to have AI rerank the results for better relevance.
 
 ## Note Commands (Slash Commands)

@@ -29,7 +29,7 @@ export function useGlobalKeyboardShortcuts({
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowDown' && !inInput) { e.preventDefault(); cycleNote(1) }
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navigateLocationHistory(-1) }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navigateLocationHistory(1) }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); searchRef.current?.focus() }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); searchRef.current?.focus() }
       if (isBackslashShortcut && e.shiftKey && e.altKey) { e.preventDefault(); toggleNoteListMetadata() }
       else if (isBackslashShortcut && e.shiftKey) { e.preventDefault(); toggleSimpleEditorMode() }
       else if (isBackslashShortcut && e.altKey) { e.preventDefault(); toggleCommandToolbars() }

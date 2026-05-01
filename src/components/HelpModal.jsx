@@ -61,7 +61,7 @@ export default function HelpModal({ onClose }) {
             [['Ctrl+Click'],         'Open note in another editor pane'],
             [['Alt+Hover'],          'Preview a note in a popout glance view'],
             [['Alt+N'],              'Create a new note'],
-            [['Ctrl+F'],             'Focus the search bar'],
+            [['Ctrl+F', 'Ctrl+Shift+F'], 'Focus the search bar'],
             [['Ctrl+\\'],            'Show or hide the notes pane'],
             [['Ctrl+Alt+\\'],        'Show or hide command toolbars'],
             [['Ctrl+Shift+\\'],      'Toggle simple editor mode'],
@@ -117,6 +117,8 @@ export default function HelpModal({ onClose }) {
 
           <Section title="Search" rows={[
             [['text'],               'Instant filter by content or category tags'],
+            [['is:git'],             'Show all notes linked to a git repository'],
+            [['git:<name>'],        'Show notes linked to a specific git repository'],
             [['AI semantic'],        'Smart search can use local Ollama embeddings without signing in'],
           ]} />
 

@@ -1919,6 +1919,117 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     return true
   }, [content, notes])
 
+  const resolveGitRepoId = useCallback(async (explicitRepoId = '') => {
+    if (explicitRepoId) return explicitRepoId
+    if (note.git?.repoId) return note.git.repoId
+    if (sessionGitRepoId) return sessionGitRepoId
+
+    const data = await listGitRepos(agentToken)
+    if (data.defaultRepoId) return data.defaultRepoId
+    throw new Error('No repo selected. Run /git connect "path" and then /git use <repo>.')
+  }, [agentToken, note.git?.repoId, sessionGitRepoId])
+
+  const replaceGitCommand = useCallback((range, output) => {
+    replaceRangeInEditor(range.start, range.end, output)
+  }, [replaceRangeInEditor])
+
+  const runNibGitSummaryCommand = useCallback(async (range, parsed) => {
+    if (!ollamaModel) {
+      setTxResult({ opName: '/nib git', text: '', error: 'No AI model configured. Enable a local AI model in Settings.' })
+      return
+    }
+    if (!agentToken?.trim()) {
+      setTxResult({ opName: '/nib git', text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
+      return
+    }
+
+    closeNibPicker()
+    closeSnippetPicker()
+    setTxResult(null)
+    setEnterCommandHint(null)
+
+    const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
+
+    try {
+      const repoId = await resolveGitRepoId(parsed.repoId)
+      const [statusData, diffData] = await Promise.all([
+        getGitStatus(repoId, agentToken),
+        getGitDiff(repoId, agentToken),
+      ])
+      const repoName = statusData.repo.displayName ?? statusData.repo.name ?? repoId
+      const isCommit = parsed.command === 'git-summary-commit'
+      const header = `${isCommit ? 'Commit message' : 'Git summary'}: ${repoName}\n\n`
+      const prefix = header
+
+      const initial = content.slice(0, range.start) + prefix + '…' + content.slice(commandEnd)
+      const insertStart = range.start + prefix.length
+      const streamState = { len: 1 } // for the '…' placeholder
+      pushHistoryNow(initial)
+      setContent(initial)
+      onUpdate({ content: initial })
+
+      const context = [
+        `Repository: ${repoName}`,
+        `Branch: ${statusData.repo.branch ?? 'unknown'}`,
+        statusData.repo.baseBranch ? `Base branch: ${statusData.repo.baseBranch}` : null,
+        '',
+        '=== Status ===',
+        statusData.status || '(clean)',
+        '',
+        '=== Diff stat ===',
+        diffData.stat || '(no changes)',
+        '',
+        '=== Diff ===',
+        (diffData.diff || '(no diff)').slice(0, 16000),
+      ].filter(s => s !== null).join('\n')
+
+      streamLLMChat(
+        {
+          token: agentToken,
+          model: ollamaModel,
+          messages: [{ role: 'user', content: isCommit ? 'Write a git commit message for these changes.' : 'Summarize these git changes.' }],
+          context,
+          contextMode: isCommit ? 'git-commit-msg' : 'git-summary',
+        },
+        chunk => {
+          let next
+          setContent(prev => {
+            const streamEnd = insertStart + streamState.len
+            // replace the initial '…' on first chunk
+            if (streamState.len === 1) {
+              next = prev.slice(0, insertStart) + chunk + prev.slice(streamEnd)
+              streamState.len = chunk.length
+            } else {
+              next = prev.slice(0, streamEnd) + chunk + prev.slice(streamEnd)
+              streamState.len += chunk.length
+            }
+            return next
+          })
+          if (next !== undefined) onUpdate({ content: next })
+        },
+        () => {
+          setContent(prev => { pushHistoryNow(prev); return prev })
+        },
+        err => {
+          const message = `_(Nib error: ${err})_`
+          let next
+          setContent(prev => {
+            const streamEnd = insertStart + streamState.len
+            next = prev.slice(0, insertStart) + message + prev.slice(streamEnd)
+            streamState.len = message.length
+            return next
+          })
+          if (next !== undefined) {
+            pushHistoryNow(next)
+            onUpdate({ content: next })
+          }
+        }
+      )
+    } catch (err) {
+      setTxResult({ opName: '/nib git', text: '', error: String(err?.message ?? err) })
+    }
+  }, [agentToken, closeNibPicker, closeSnippetPicker, content, ollamaModel, onUpdate, pushHistoryNow, resolveGitRepoId])
+
   const runNibUrlCommand = useCallback(async (range, parsed) => {
     if (!agentToken?.trim()) {
       setTxResult({ opName: '/nib url', text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
@@ -2106,6 +2217,11 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
     if (parsed.command === 'sql') {
       void runNibSqlCommand(range, parsed)
+      return true
+    }
+
+    if (parsed.command === 'git-summary' || parsed.command === 'git-summary-commit') {
+      void runNibGitSummaryCommand(range, parsed)
       return true
     }
 
@@ -2381,20 +2497,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     setStashActiveIndex(0)
   }
 
-  const resolveGitRepoId = async (explicitRepoId = '') => {
-    if (explicitRepoId) return explicitRepoId
-    if (note.git?.repoId) return note.git.repoId
-    if (sessionGitRepoId) return sessionGitRepoId
-
-    const data = await listGitRepos(agentToken)
-    if (data.defaultRepoId) return data.defaultRepoId
-    throw new Error('No repo selected. Run /git connect "path" and then /git use <repo>.')
-  }
-
-  const replaceGitCommand = (range, output) => {
-    replaceRangeInEditor(range.start, range.end, output)
-  }
-
   const closeGitPRView = () => {
     gitPRLoadRequestRef.current += 1
     setGitPRLoading(false)
@@ -2485,8 +2587,6 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
           '/git use <repo-id>',
           '/git status',
           '/git diff',
-          '/git summary',
-          '/git summary commit',
           '/git pr <number>',
         ].join('\n')))
         return true

@@ -32,18 +32,6 @@ export const GIT_COMMAND_SUGGESTIONS = [
     usage: '/git diff [repo-id]',
   },
   {
-    command: 'summary',
-    insertText: '/git summary',
-    detail: 'AI summary of current changes',
-    usage: '/git summary [repo-id]',
-  },
-  {
-    command: 'summary commit',
-    insertText: '/git summary commit',
-    detail: 'Generate a git commit message',
-    usage: '/git summary commit [repo-id]',
-  },
-  {
     command: 'pr',
     insertText: '/git pr ',
     detail: 'View a pull request by number',
@@ -146,7 +134,7 @@ export function getGitCommandSuggestions(query = '', repos = []) {
       .map(item => ({ kind: 'command', ...item }))
   }
 
-  if (!['use', 'status', 'diff', 'summary'].includes(command)) return []
+  if (!['use', 'status', 'diff'].includes(command)) return []
 
   const repoQuery = repoPart.toLowerCase()
   const repoSuggestions = repos
@@ -164,17 +152,6 @@ export function getGitCommandSuggestions(query = '', repos = []) {
       detail: repo.path ?? '',
       usage: `${repo.displayName ?? repo.name ?? repo.id} (${repo.branch ?? 'unknown branch'})`,
     }))
-
-  if (command === 'summary' && 'commit'.startsWith(repoQuery)) {
-    const commitOption = {
-      kind: 'command',
-      command: 'summary commit',
-      insertText: '/git summary commit',
-      detail: 'Generate a git commit message',
-      usage: '/git summary commit [repo-id]',
-    }
-    return [commitOption, ...repoSuggestions]
-  }
 
   return repoSuggestions
 }

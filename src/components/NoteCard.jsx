@@ -142,6 +142,11 @@ function NoteCard({
                 {model.documentBadge}
               </span>
             )}
+            {model.repoId && (showMetadata || searchQuery?.toLowerCase().startsWith('git:') || searchQuery?.toLowerCase() === 'is:git') && (
+              <span className="shrink-0 rounded border border-violet-900/60 bg-violet-950/40 px-1 py-px font-mono text-[9px] leading-none text-violet-300">
+                git:{model.repoId}
+              </span>
+            )}
             {showMetadata && model.badges.slice(0, 1).map(category => <CategoryBadge key={category} category={category} size="xs" />)}
             {!syncEnabled && (
               <button

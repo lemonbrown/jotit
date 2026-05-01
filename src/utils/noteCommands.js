@@ -95,6 +95,20 @@ const NIB_SUGGESTIONS = [
     usage: '/nib extract action items',
     insertText: '/nib extract action items',
   },
+  {
+    id: 'nib-git-summary',
+    label: '/nib git summary',
+    detail: 'AI summary of current git changes',
+    usage: '/nib git summary [repo-id]',
+    insertText: '/nib git summary',
+  },
+  {
+    id: 'nib-git-commit',
+    label: '/nib git summary commit',
+    detail: 'generate a git commit message',
+    usage: '/nib git summary commit [repo-id]',
+    insertText: '/nib git summary commit',
+  },
 ]
 
 const SLASH_COMMANDS = [
@@ -238,6 +252,15 @@ export function parseNibCommand(line) {
   if (commandText === 'sql' || commandText.startsWith('sql ')) {
     const { db, query } = parseSqlSubcommandRest(commandText.slice(3).trim())
     return { command: 'sql', db, prompt: query, templateCommand: '', templateArgs: '', output: flagOutput ?? 'panel' }
+  }
+
+  if (commandText === 'git summary' || commandText.startsWith('git summary ')) {
+    const gitRest = commandText.slice(11).trim()
+    if (gitRest === 'commit' || gitRest.startsWith('commit ')) {
+      const repoId = gitRest.slice(6).trim()
+      return { command: 'git-summary-commit', repoId, output: flagOutput ?? 'inline' }
+    }
+    return { command: 'git-summary', repoId: gitRest, output: flagOutput ?? 'inline' }
   }
 
   if (!commandText.startsWith('!')) {

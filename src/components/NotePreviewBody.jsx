@@ -39,6 +39,7 @@ export function buildNotePreviewModel(note, searchMatch = null, { expanded = fal
   const documentBadge = isOpenApiNote(note) ? 'openapi' : isSQLiteNote(note) ? 'sqlite' : null
   const cloned = isPublicClone(note)
   const isE2EEncrypted = Number(note.encryptionTier ?? 0) === 2
+  const repoId = note.git?.repoId ?? null
 
   return {
     badges,
@@ -51,6 +52,7 @@ export function buildNotePreviewModel(note, searchMatch = null, { expanded = fal
     isSemantic,
     matchCount,
     reasons,
+    repoId,
     rest,
     searchHeading,
     showMatchContext,
@@ -103,6 +105,14 @@ export default function NotePreviewBody({
         {showMetadata && model.documentBadge && (
           <span className="shrink-0 rounded border border-cyan-900/60 bg-cyan-950/40 px-1 py-px font-mono text-[9px] leading-none text-cyan-300">
             {model.documentBadge}
+          </span>
+        )}
+        {model.repoId && (showMetadata || searchQuery?.toLowerCase().startsWith('git:') || searchQuery?.toLowerCase() === 'is:git') && (
+          <span
+            className="shrink-0 rounded border border-violet-900/60 bg-violet-950/40 px-1 py-px font-mono text-[9px] leading-none text-violet-300"
+            title={`Linked to repository: ${model.repoId}`}
+          >
+            git:{model.repoId}
           </span>
         )}
       </div>
