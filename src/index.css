@@ -155,6 +155,8 @@ textarea, input { font-family: inherit; }
 .md-prose p { margin: 0.75em 0; }
 .md-prose a { color: #60a5fa; text-decoration: underline; }
 .md-prose a:hover { color: #93c5fd; }
+.md-prose a.note-link { color: #a78bfa; text-decoration: none; border-bottom: 1px dashed #a78bfa; cursor: pointer; }
+.md-prose a.note-link:hover { color: #c4b5fd; border-bottom-color: #c4b5fd; }
 .md-prose strong { color: rgb(var(--zinc-100)); font-weight: 600; }
 .md-prose em { color: rgb(var(--zinc-300)); }
 .md-prose ul, .md-prose ol { margin: 0.5em 0 0.75em 1.5em; padding: 0; }

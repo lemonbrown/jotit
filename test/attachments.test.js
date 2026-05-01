@@ -9,6 +9,8 @@ import {
   SUPPORTED_MIME_TYPES,
 } from '../src/utils/attachments.js'
 import { extractEntities } from '../src/utils/entities.js'
+import { buildRemoteMessages } from '../src/utils/llmClient.js'
+import { buildNoteLLMContext, collectImageAttachments } from '../src/utils/llmNoteContext.js'
 
 // ── Marker helpers ─────────────────────────────────────────────────────────────
 
@@ -109,6 +111,81 @@ async function testExtractEntitiesHandlesMultipleMarkersInContent() {
   assert.ok(!values.some(v => v.includes('id1') || v.includes('id2')))
 }
 
+// â”€â”€ Nib context â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+async function testNoteLLMContextIncludesReferencedImageData() {
+  const note = {
+    id: 'note-with-image',
+    content: `Review this screenshot\n${buildMarker('img1')}`,
+  }
+  const context = buildNoteLLMContext(note, {
+    attachments: [{
+      id: 'img1',
+      mimeType: 'image/png',
+      data: 'data:image/png;base64,abc123',
+    }],
+  })
+
+  assert.ok(context.includes('[Attached Images]'))
+  assert.ok(context.includes('MIME: image/png'))
+  assert.ok(context.includes('Data URL: data:image/png;base64,abc123'))
+}
+
+async function testNoteLLMContextReportsMissingReferencedImage() {
+  const note = {
+    id: 'note-with-missing-image',
+    content: `Review this screenshot\n${buildMarker('missing')}`,
+  }
+  const context = buildNoteLLMContext(note, { attachments: [] })
+
+  assert.ok(context.includes('missing image attachment'))
+}
+
+async function testNoteLLMContextCanOmitRawImageDataForVisionMode() {
+  const note = {
+    id: 'note-with-image',
+    content: `Review this screenshot\n${buildMarker('img1')}`,
+  }
+  const context = buildNoteLLMContext(note, {
+    attachments: [{
+      id: 'img1',
+      mimeType: 'image/png',
+      data: 'data:image/png;base64,abc123',
+    }],
+    includeImageData: false,
+  })
+
+  assert.ok(context.includes('sent as structured vision input'))
+  assert.ok(!context.includes('data:image/png;base64,abc123'))
+}
+
+async function testCollectImageAttachmentsAppliesLimits() {
+  const content = `${buildMarker('img1')}\n${buildMarker('img2')}`
+  const result = collectImageAttachments(content, [
+    { id: 'img1', mimeType: 'image/png', data: 'data:image/png;base64,abc123' },
+    { id: 'img2', mimeType: 'image/png', data: 'data:image/png;base64,def456' },
+  ], { maxImages: 1, maxBytes: 1024 })
+
+  assert.equal(result.images.length, 1)
+  assert.equal(result.images[0].id, 'img1')
+  assert.ok(result.notices.some(notice => notice.includes('image count exceeds 1')))
+}
+
+async function testOpenRouterVisionMessagesUseImageUrlParts() {
+  const messages = buildRemoteMessages(
+    [{ role: 'user', content: 'Describe the image' }],
+    'note context',
+    'note',
+    [{ id: 'img1', dataUrl: 'data:image/png;base64,abc123' }]
+  )
+  const userMessage = messages[messages.length - 1]
+
+  assert.equal(userMessage.role, 'user')
+  assert.deepEqual(userMessage.content[0], { type: 'text', text: 'Describe the image' })
+  assert.equal(userMessage.content[1].type, 'image_url')
+  assert.equal(userMessage.content[1].image_url.url, 'data:image/png;base64,abc123')
+}
+
 // ── Test registry ──────────────────────────────────────────────────────────────
 
 export default [
@@ -126,4 +203,9 @@ export default [
   ['attachments: validate accepts file at size limit',           testValidateImageFileAcceptsFileSizeAtLimit],
   ['attachments: extractEntities skips img markers',             testExtractEntitiesSkipsImgMarkers],
   ['attachments: extractEntities handles multiple markers',      testExtractEntitiesHandlesMultipleMarkersInContent],
+  ['attachments: note LLM context includes image data',           testNoteLLMContextIncludesReferencedImageData],
+  ['attachments: note LLM context reports missing image data',    testNoteLLMContextReportsMissingReferencedImage],
+  ['attachments: note LLM context can omit image data',           testNoteLLMContextCanOmitRawImageDataForVisionMode],
+  ['attachments: collect image attachments applies limits',       testCollectImageAttachmentsAppliesLimits],
+  ['attachments: OpenRouter vision uses image_url parts',         testOpenRouterVisionMessagesUseImageUrlParts],
 ]

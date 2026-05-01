@@ -1,3 +1,6 @@
+import { buildNibPrompt, getNibPromptOverrides } from './nibPrompts.js'
+import { loadSettings } from './storage.js'
+
 const AGENT_BASE = 'http://localhost:3210'
 const KEY_MODEL = 'jotit_llm_model'
 const KEY_PROVIDER = 'jotit_llm_provider'
@@ -132,27 +135,45 @@ export async function getOllamaEmbeddings({ token, model, input }) {
   return data.embeddings ?? []
 }
 
-function buildSystemContent(context = '', contextMode = '') {
+function buildSystemContent(context = '', contextMode = '', promptOverrides = {}) {
   const ctx = context?.trim() ?? ''
-  if (contextMode === 'regex') return `${REGEX_SYSTEM_PROMPT}\n\n${ctx ? `Current regex state:\n${ctx}` : ''}`
-  if (contextMode === 'sqlite') return `${SQLITE_SYSTEM_PROMPT}\n\n${ctx ? `Database context:\n${ctx}` : ''}`
-  if (contextMode === 'search') return `${SEARCH_PLAN_SYSTEM_PROMPT}\n\n${ctx ? `Search context:\n${ctx}` : ''}`
-  if (contextMode === 'search-rerank') return `${SEARCH_RERANK_SYSTEM_PROMPT}\n\n${ctx ? `Candidate context:\n${ctx}` : ''}`
+  if (contextMode === 'regex') return buildNibPrompt(promptOverrides, 'system.regex', { context: ctx })
+  if (contextMode === 'sqlite') return buildNibPrompt(promptOverrides, 'system.sqlite', { context: ctx })
+  if (contextMode === 'search') return buildNibPrompt(promptOverrides, 'system.search', { context: ctx })
+  if (contextMode === 'search-rerank') return buildNibPrompt(promptOverrides, 'system.searchRerank', { context: ctx })
   if (contextMode === 'all') return ctx
-    ? `You are a helpful assistant. The user has the following notes in their workspace:\n\n${ctx}\n\nAnswer questions about these notes concisely.`
-    : 'You are a helpful assistant.'
+    ? buildNibPrompt(promptOverrides, 'system.all', { context: ctx })
+    : buildNibPrompt(promptOverrides, 'system.empty')
   if (contextMode === 'selection') return ctx
-    ? `You are a helpful assistant. The user has selected the following text from a note:\n\n${ctx}\n\nAnswer questions about this selection concisely.`
-    : 'You are a helpful assistant.'
-  if (contextMode === 'git-summary') return ctx ? `${GIT_SUMMARY_SYSTEM_PROMPT}\n\nGit context:\n${ctx}` : GIT_SUMMARY_SYSTEM_PROMPT
-  if (contextMode === 'git-commit-msg') return ctx ? `${GIT_COMMIT_MSG_SYSTEM_PROMPT}\n\nGit context:\n${ctx}` : GIT_COMMIT_MSG_SYSTEM_PROMPT
-  if (contextMode === 'secret-scan') return ctx ? `${SECRET_SCAN_SYSTEM_PROMPT}\n\nNote content:\n${ctx}` : SECRET_SCAN_SYSTEM_PROMPT
+    ? buildNibPrompt(promptOverrides, 'system.selection', { context: ctx })
+    : buildNibPrompt(promptOverrides, 'system.empty')
+  if (contextMode === 'git-summary') return buildNibPrompt(promptOverrides, 'system.gitSummary', { context: ctx })
+  if (contextMode === 'git-commit-msg') return buildNibPrompt(promptOverrides, 'system.gitCommitMessage', { context: ctx })
+  if (contextMode === 'secret-scan') return buildNibPrompt(promptOverrides, 'system.secretScan', { context: ctx })
   return ctx
-    ? `You are a helpful assistant. The user is working on a note.\n\nNote:\n---\n${ctx}\n---\n\nAnswer questions about this note concisely. If the note doesn't contain relevant information, say so.`
-    : 'You are a helpful assistant.'
+    ? buildNibPrompt(promptOverrides, 'system.note', { context: ctx })
+    : buildNibPrompt(promptOverrides, 'system.empty')
 }
 
-async function streamRemoteChat({ messages, context, contextMode }, onChunk, onDone, onError) {
+export function buildRemoteMessages(messages, context, contextMode, images = [], promptOverrides = {}) {
+  const systemMessage = { role: 'system', content: buildSystemContent(context, contextMode, promptOverrides) }
+  const normalizedMessages = (messages ?? []).map((message, index, list) => {
+    if (!images.length || message.role !== 'user' || index !== list.length - 1) return message
+    return {
+      ...message,
+      content: [
+        { type: 'text', text: String(message.content ?? '') },
+        ...images.map(image => ({
+          type: 'image_url',
+          image_url: { url: image.dataUrl },
+        })),
+      ],
+    }
+  })
+  return [systemMessage, ...normalizedMessages]
+}
+
+async function streamRemoteChat({ messages, context, contextMode, images = [], promptOverrides = {} }, onChunk, onDone, onError) {
   const baseUrl = (localStorage.getItem(KEY_REMOTE_BASE_URL) || 'https://openrouter.ai/api/v1').replace(/\/$/, '')
   const apiKey = localStorage.getItem(KEY_REMOTE_API_KEY) || ''
   const activeModel = localStorage.getItem(KEY_REMOTE_MODEL) || ''
@@ -167,10 +188,12 @@ async function streamRemoteChat({ messages, context, contextMode }, onChunk, onD
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey.trim()}`,
+        'HTTP-Referer': 'https://jotit.local',
+        'X-Title': 'JotIt',
       },
       body: JSON.stringify({
         model: activeModel.trim(),
-        messages: [{ role: 'system', content: buildSystemContent(context, contextMode) }, ...messages],
+        messages: buildRemoteMessages(messages, context, contextMode, images, promptOverrides),
         stream: true,
       }),
     })
@@ -217,10 +240,11 @@ async function streamRemoteChat({ messages, context, contextMode }, onChunk, onD
   onDone()
 }
 
-export async function streamLLMChat({ token, model, messages, context, contextMode }, onChunk, onDone, onError) {
+export async function streamLLMChat({ token, model, messages, context, contextMode, images = [] }, onChunk, onDone, onError) {
   const provider = localStorage.getItem(KEY_PROVIDER) || 'ollama'
+  const promptOverrides = getNibPromptOverrides(loadSettings())
   if (provider !== 'ollama') {
-    return streamRemoteChat({ messages, context, contextMode }, onChunk, onDone, onError)
+    return streamRemoteChat({ messages, context, contextMode, images, promptOverrides }, onChunk, onDone, onError)
   }
 
   const activeModel = model || localStorage.getItem(KEY_MODEL)
@@ -229,7 +253,7 @@ export async function streamLLMChat({ token, model, messages, context, contextMo
     res = await fetch(`${AGENT_BASE}/ollama/chat`, {
       method: 'POST',
       headers: agentHeaders(token),
-      body: JSON.stringify({ model: activeModel, messages, context, contextMode }),
+      body: JSON.stringify({ model: activeModel, messages, context, contextMode, promptOverrides }),
     })
   } catch (err) {
     onError(err.message ?? 'Could not reach jotit-agent')

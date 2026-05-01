@@ -39,7 +39,7 @@ import SQLiteViewer from './SQLiteViewer'
 import OpenApiViewer from './OpenApiViewer'
 import NoteScrollMap from './NoteScrollMap'
 import { extractSQLiteAssetRef } from '../utils/sqliteNote'
-import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote } from '../utils/noteTypes'
+import { NOTE_TYPE_OPENAPI, getPublicCloneInfo, isOpenApiNote, getNoteTitle } from '../utils/noteTypes'
 import { getStoredKeyPair } from '../utils/e2eEncryption'
 import { useScrollMap } from '../hooks/useScrollMap'
 import { useNoteEditorHistory } from '../hooks/useNoteEditorHistory'
@@ -47,9 +47,9 @@ import { useNoteSelection } from '../hooks/useNoteSelection'
 import { useNoteMode } from '../hooks/useNoteMode'
 import SecretAlert from './SecretAlert'
 import { runJsInWorker } from '../utils/jsRunner'
-import { NOW_COMMAND, NIB_COMMAND, SQL_COMMAND, buildNibTemplatePrompt, formatCurrentDateTime, getInlineCommandRange, getNibCommandSuggestions, getNibCommandTrigger, parseNibCommand } from '../utils/noteCommands'
+import { NOW_COMMAND, NIB_COMMAND, SQL_COMMAND, URL_COMMAND, buildNibBatchTemplatePrompt, buildNibTemplatePrompt, formatCurrentDateTime, getInlineCommandRange, getNibCommandSuggestions, getNibCommandTrigger, parseNibCommand, parseUrlCommand } from '../utils/noteCommands'
 import { parseSqlCommand, getSqlDbAtTrigger, filterSqliteNotes, resolveSqliteNoteByRef, formatSqlResultText, extractSqlFromLLMResponse, buildNibSqlPrompt, formatSchemaForPrompt } from '../utils/sqlCommands'
-import { fetchPageContent, stripHtmlToText, buildUrlNibPrompt, buildUrlTersePrompt } from '../utils/webFetch'
+import { fetchPageContent, htmlToMarkdown, stripHtmlToText, buildUrlNibPrompt, buildUrlTersePrompt } from '../utils/webFetch'
 import { getSQLiteAsset } from '../utils/sqliteAssets'
 import { inspectSQLiteDatabase, executeSQLiteQuery } from '../utils/externalSqlite'
 import { getGitCommandSuggestions, getGitCommandTrigger, parseGitCommand, parsePrCommand, formatGitCommandResult } from '../utils/gitCommands'
@@ -86,6 +86,7 @@ Working with technical text
 - Write HTTP requests directly in a note, then use the HTTP tool to run them.
 - Import OpenAPI JSON to browse operations and generate requests.
 - Drop SQLite files into Jot.it to inspect tables and run read-only queries.
+- Use /url --markdown --note https://example.com to fetch a page as markdown without Nib.
 - Select JSON, Base64, URLs, JWTs, timestamps, or hex text and use the transform tools.
 
 Search and navigation
@@ -229,6 +230,21 @@ mdRenderer.code = ({ text, lang }) => {
   return `<pre><code class="${cls}">${highlighted}</code></pre>`
 }
 marked.use({ renderer: mdRenderer, gfm: true, breaks: true })
+marked.use({
+  extensions: [{
+    name: 'noteLink',
+    level: 'inline',
+    start(src) { return src.indexOf('[[') },
+    tokenizer(src) {
+      const match = /^\[\[([^\]]+)\]\]/.exec(src)
+      if (match) return { type: 'noteLink', raw: match[0], title: match[1].trim() }
+    },
+    renderer(token) {
+      const escaped = token.title.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      return `<a class="note-link" data-note-title="${escaped}" href="#">${token.title}</a>`
+    },
+  }],
+})
 
 function autoIndent(code) {
   const lines = code.split('\n')
@@ -297,6 +313,7 @@ function isNibCommandRange(range) {
 function isRunnableCommandLine(line) {
   const text = String(line ?? '').trim()
   if (parseNibCommand(text)) return true
+  if (parseUrlCommand(text)) return true
   if (parseSqlCommand(text)) return true
   const gitCommand = parseGitCommand(text)
   if (gitCommand) {
@@ -351,7 +368,7 @@ function ScratchOutput({ output }) {
   )
 }
 
-export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, secretScanNibEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', nibTemplates = {}, onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin }) {
+export default function NotePanel({ note, collection = null, bucketName = '', snippets = [], templates = [], aiEnabled, user, onRequireAuth, onUpdate, onDelete, onRemoveFromServer, onCreateSnippet, onSearchSnippets, onPublishNote, onToggleCollectionExcluded, onCreateNoteFromContent, onAddNotesSilently, onCreateOpenApiNote, onCreateTipsNote, tipsCreated = false, focusNonce, restoreLocation, onLocationChange, notes, searchQuery, simpleEditor = false, hideCommandToolbars = false, onDiffModeChange, onReplaceInNotes, secretScanEnabled = false, secretScanNibEnabled = false, llmEnabled = false, ollamaModel = '', agentToken = '', nibPrompts = {}, onOpenNibPane, onNibContextChange, isPinned = false, onTogglePin, onOpenNote }) {
   const [content, setContent] = useState(note.content)
   const [gitPRData, setGitPRData] = useState(null)
   const [gitPRViewRef, setGitPRViewRef] = useState(note.noteData?.gitPRView ?? null)
@@ -419,6 +436,12 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   const [shellRunTrigger, setShellRunTrigger] = useState(0)
   const [showLineNumbers, setShowLineNumbers] = useState(() => localStorage.getItem('jotit_lnums') !== 'false')
   const [showMinimap, setShowMinimap] = useState(() => localStorage.getItem('jotit_minimap') === 'true')
+
+  const resolveNoteLink = useCallback((title) => {
+    const lower = title.toLowerCase()
+    return notes.find(n => getNoteTitle(n).toLowerCase() === lower) ?? null
+  }, [notes])
+
   const handleAskNib = useCallback(({ request, pattern, flags, testStr, matchCount }) => {
     onOpenNibPane?.({
       noteId: note.id,
@@ -448,7 +471,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       diffText,
       '```',
     ].filter(Boolean).join('\n')
-    const initialMessage = buildNibMessage({ nibTemplates }, 'codeReview', {
+    const initialMessage = buildNibMessage({ nibPrompts }, 'codeReview', {
       label,
       path,
       diffText,
@@ -466,7 +489,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       selectionText: context,
       selectionRange: { start: 0, end: 0 },
     })
-  }, [nibTemplates, note.id, onOpenNibPane])
+  }, [nibPrompts, note.id, onOpenNibPane])
 
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -946,13 +969,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
   }, [codeContent, notes, note.id, note.content, stashItems])
 
   const handleMarkdownClick = useCallback((e) => {
+    const link = e.target.closest('a.note-link[data-note-title]')
+    if (link) {
+      e.preventDefault()
+      const found = resolveNoteLink(link.dataset.noteTitle)
+      if (found) onOpenNote?.(found.id, { newPane: e.ctrlKey })
+      return
+    }
     const btn = e.target.closest('.jotit-run-btn[data-scratch-id]')
     if (!btn) return
     const scratchId = btn.dataset.scratchId
     const codeEl = btn.closest('.jotit-scratch-block')?.querySelector('pre code')
     if (!codeEl) return
     runScratch(scratchId, codeEl.textContent ?? '')
-  }, [runScratch])
+  }, [runScratch, resolveNoteLink, onOpenNote])
 
   const jumpToPreviewSection = useCallback((section, sectionIndex) => {
     const preview = markdownPreviewRef.current
@@ -1590,6 +1620,20 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     })
   }, [content, onUpdate, reportCurrentLocation])
 
+  useEffect(() => {
+    const handleInsertLinks = (e) => {
+      if (e.detail?.noteId !== note.id) return
+      const ta = textareaRef.current
+      const pos = ta?.selectionStart ?? content.length
+      const needsBefore = pos > 0 && content[pos - 1] !== '\n'
+      const needsAfter = pos < content.length && content[pos] !== '\n'
+      const text = (needsBefore ? '\n' : '') + e.detail.text + (needsAfter ? '\n' : '')
+      replaceRangeInEditor(pos, pos, text)
+    }
+    window.addEventListener('jotit:nib-insert-links', handleInsertLinks)
+    return () => window.removeEventListener('jotit:nib-insert-links', handleInsertLinks)
+  }, [note.id, content, replaceRangeInEditor])
+
   const closeGitPicker = useCallback(() => {
     setGitPicker(null)
     setGitActiveIndex(0)
@@ -1621,10 +1665,43 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     updateEnterCommandHint(e.target, e.target.value)
   }, [updateEnterCommandHint, updateSel])
 
+  const handleNoteDragOver = useCallback((e) => {
+    if (!Array.from(e.dataTransfer.types).includes('application/x-jotit-note-id')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'link'
+  }, [])
+
+  const handleNoteDrop = useCallback((e) => {
+    const noteId = e.dataTransfer.getData('application/x-jotit-note-id')
+    if (!noteId) return
+    e.preventDefault()
+    const droppedNote = notes.find(n => n.id === noteId)
+    if (!droppedNote) return
+    const title = getNoteTitle(droppedNote)
+    const pos = e.target.selectionStart ?? content.length
+    replaceRangeInEditor(pos, pos, `[[${title}]]`)
+  }, [notes, content, replaceRangeInEditor])
+
   const handleEditorClick = useCallback((e) => {
     clearSelIfEmpty()
     updateEnterCommandHint(e.target, e.target.value)
-  }, [clearSelIfEmpty, updateEnterCommandHint])
+    if (e.ctrlKey && onOpenNote) {
+      const pos = e.target.selectionStart
+      const text = e.target.value
+      const linkRe = /\[\[([^\]]+)\]\]/g
+      let m
+      while ((m = linkRe.exec(text)) !== null) {
+        if (pos >= m.index && pos <= m.index + m[0].length) {
+          const found = resolveNoteLink(m[1].trim())
+          if (found) {
+            e.preventDefault()
+            onOpenNote(found.id, { newPane: true })
+          }
+          return
+        }
+      }
+    }
+  }, [clearSelIfEmpty, updateEnterCommandHint, resolveNoteLink, onOpenNote])
 
   const insertGitSuggestion = useCallback((suggestion) => {
     if (!gitPicker || !suggestion) return
@@ -1747,7 +1824,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     try {
       const schema = await inspectSQLiteDatabase(bytes)
       const schemaText = formatSchemaForPrompt(schema)
-      const prompt = buildNibSqlPrompt(schemaText, parsed.prompt)
+      const prompt = buildNibSqlPrompt(schemaText, parsed.prompt, nibPrompts)
 
       let sqlResponse = ''
       await new Promise((resolve, reject) => {
@@ -1786,7 +1863,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     } finally {
       setSqlLoading(false)
     }
-  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, closeSqlDbPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow, notes])
+  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, closeSqlDbPicker, content, nibPrompts, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow, notes])
 
   const runSqlCommand = useCallback(async (range) => {
     const parsed = parseSqlCommand(range.text)
@@ -1876,7 +1953,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         return
       }
 
-      if (!parsed.markdown && !parsed.terse) {
+      if (parsed.urlMode === 'structure' && !parsed.markdown && !parsed.terse) {
         const resultText = pageText.trim()
 
         if (parsed.output === 'note') {
@@ -1897,8 +1974,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       }
 
       const prompt = parsed.terse
-        ? buildUrlTersePrompt(pageText, url, parsed.hint, { markdown: parsed.markdown })
-        : buildUrlNibPrompt(pageText, url, parsed.hint)
+        ? buildUrlTersePrompt(pageText, url, parsed.hint, { markdown: parsed.markdown, promptOverrides: nibPrompts })
+        : buildUrlNibPrompt(pageText, url, { mode: parsed.urlMode, markdown: parsed.markdown, promptOverrides: nibPrompts })
       let responseText = ''
 
       if (parsed.output === 'note') {
@@ -1954,7 +2031,69 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     } finally {
       setUrlLoading(false)
     }
-  }, [agentToken, closeNibPicker, closeSnippetPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow])
+  }, [agentToken, closeNibPicker, closeSnippetPicker, content, nibPrompts, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow])
+
+  const runUrlCommand = useCallback(async (range) => {
+    const parsed = parseUrlCommand(range.text)
+    if (!parsed) return false
+
+    if (!agentToken?.trim()) {
+      setTxResult({ opName: URL_COMMAND, text: '', error: 'Local agent token is missing. Paste the token into Settings.' })
+      return true
+    }
+
+    const url = parsed.url?.trim()
+    if (!url) {
+      setTxResult({ opName: URL_COMMAND, text: '', error: `Enter a URL after ${URL_COMMAND}` })
+      return true
+    }
+
+    try { new URL(url) } catch {
+      setTxResult({ opName: URL_COMMAND, text: '', error: `Invalid URL: ${url}` })
+      return true
+    }
+
+    closeNibPicker()
+    closeSnippetPicker()
+    closeGitPicker()
+    closeStashPicker()
+    setTxResult(null)
+    setEnterCommandHint(null)
+    setUrlLoading(true)
+
+    const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
+
+    try {
+      const html = await fetchPageContent(url, { token: agentToken })
+      const resultText = (parsed.markdown ? htmlToMarkdown(html, url) : stripHtmlToText(html)).trim()
+
+      if (!resultText) {
+        setTxResult({ opName: URL_COMMAND, text: '', error: 'Page returned no readable content' })
+        return true
+      }
+
+      if (parsed.output === 'note') {
+        const next = content.slice(0, range.start) + content.slice(commandEnd)
+        pushHistoryNow(next)
+        setContent(next)
+        onUpdate({ content: next })
+        onCreateNoteFromContent?.(resultText)
+      } else if (parsed.output === 'inline') {
+        const next = content.slice(0, range.start) + resultText + '\n' + content.slice(commandEnd)
+        pushHistoryNow(next)
+        setContent(next)
+        onUpdate({ content: next })
+      } else {
+        setTxResult({ opName: URL_COMMAND, text: resultText, error: null })
+      }
+    } catch (err) {
+      setTxResult({ opName: URL_COMMAND, text: '', error: String(err?.message ?? err) })
+    } finally {
+      setUrlLoading(false)
+    }
+
+    return true
+  }, [agentToken, closeGitPicker, closeNibPicker, closeSnippetPicker, closeStashPicker, content, onCreateNoteFromContent, onUpdate, pushHistoryNow])
 
   const runNibCommand = useCallback((range) => {
     const parsed = parseNibCommand(range.text)
@@ -1977,15 +2116,16 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
 
     const noteContent = content.slice(0, range.start) + content.slice(range.end).replace(/^\n/, '')
     let prompt = parsed.prompt?.trim() || 'Use the note content to produce a concise, useful response.'
+    let matchedTemplate = null
 
     if (parsed.command === 'template') {
       const templateCommand = parsed.templateCommand.toLowerCase()
-      const template = templates.find(item => item.command.toLowerCase() === templateCommand)
-      if (!template) {
+      matchedTemplate = templates.find(item => item.command.toLowerCase() === templateCommand)
+      if (!matchedTemplate) {
         setTxResult({ opName: NIB_COMMAND, text: '', error: `Template !${parsed.templateCommand || ''} not found` })
         return true
       }
-      prompt = buildNibTemplatePrompt(template, { args: parsed.templateArgs })
+      prompt = buildNibTemplatePrompt(matchedTemplate, { args: parsed.templateArgs })
     }
 
     const commandEnd = range.end + (content[range.end] === '\n' ? 1 : 0)
@@ -1999,6 +2139,51 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
     closeNibPicker()
     setTxResult(null)
     setEnterCommandHint(null)
+
+    if (parsed.output === 'notes') {
+      const batchPrompt = buildNibBatchTemplatePrompt(matchedTemplate, resolvedContext, { args: parsed.templateArgs })
+      const next = content.slice(0, range.start) + content.slice(commandEnd)
+      pushHistoryNow(next)
+      setContent(next)
+      onUpdate({ content: next })
+      setTxResult({ opName: NIB_COMMAND, text: '', info: 'Creating notes...' })
+
+      streamLLMChat(
+        {
+          token: agentToken,
+          model: ollamaModel,
+          messages: [{ role: 'user', content: batchPrompt }],
+          context: resolvedContext,
+          contextMode: 'note',
+        },
+        chunk => { responseText += chunk },
+        () => {
+          const items = responseText.split(/\n?===\n?/).map(s => s.trim()).filter(Boolean)
+          onAddNotesSilently?.(items)
+          if (items.length > 0) {
+            const linkText = items.map(c => {
+              const title = c.split('\n').find(l => l.trim())?.trim().replace(/^#+\s*/, '') ?? 'Untitled'
+              return `[[${title}]]`
+            }).join('\n') + '\n'
+            setContent(prev => {
+              const next = prev.slice(0, range.start) + linkText + prev.slice(range.start)
+              pushHistoryNow(next)
+              onUpdate({ content: next })
+              return next
+            })
+          }
+          setTxResult({
+            opName: NIB_COMMAND,
+            text: '',
+            info: `Created ${items.length} note${items.length !== 1 ? 's' : ''}`,
+          })
+        },
+        err => {
+          setTxResult({ opName: NIB_COMMAND, text: '', error: err })
+        }
+      )
+      return true
+    }
 
     if (parsed.output === 'note') {
       const next = content.slice(0, range.start) + content.slice(commandEnd)
@@ -2078,7 +2263,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       }
     )
     return true
-  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, content, ollamaModel, onCreateNoteFromContent, onUpdate, pushHistoryNow, runNibSqlCommand, runNibUrlCommand, stashItems, templates])
+  }, [agentToken, closeGitPicker, closeSnippetPicker, closeStashPicker, closeNibPicker, content, ollamaModel, onAddNotesSilently, onCreateNoteFromContent, onUpdate, pushHistoryNow, runNibSqlCommand, runNibUrlCommand, stashItems, templates])
 
   const runCalculation = ({ complete = false } = {}) => {
     const range = getCalcRange()
@@ -2858,6 +3043,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
         e.preventDefault()
         runNibCommand(commandRange)
         return
+      } else if (parseUrlCommand(commandRange.text)) {
+        e.preventDefault()
+        void runUrlCommand(commandRange)
+        return
       } else if (parseSqlCommand(commandRange.text)) {
         e.preventDefault()
         void runSqlCommand(commandRange)
@@ -3014,6 +3203,10 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
       } else if (parseNibCommand(gitRange.text)) {
         e.preventDefault()
         runNibCommand(gitRange)
+        return
+      } else if (parseUrlCommand(gitRange.text)) {
+        e.preventDefault()
+        void runUrlCommand(gitRange)
         return
       } else if (parseSqlCommand(gitRange.text)) {
         e.preventDefault()
@@ -4757,6 +4950,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
                 onMouseUp={handleEditorSelect}
                 onKeyUp={handleEditorSelect}
                 onClick={handleEditorClick}
+                onDragOver={handleNoteDragOver}
+                onDrop={handleNoteDrop}
                 onScroll={e => {
                   setLineNumberViewportHeight(e.target.clientHeight)
                   setLineNumberScrollTop(e.target.scrollTop)
@@ -5389,6 +5584,8 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
             <span className="text-[11px] text-zinc-500 font-mono">{txResult.opName}</span>
             {txResult.error ? (
               <span className="text-[11px] text-red-400">{txResult.error}</span>
+            ) : txResult.info ? (
+              <span className="text-[11px] text-emerald-400">{txResult.info}</span>
             ) : (
               <div className="flex items-center gap-1.5">
                 <button
@@ -5412,7 +5609,7 @@ export default function NotePanel({ note, collection = null, bucketName = '', sn
               ✕
             </button>
           </div>
-          {!txResult.error && (
+          {!txResult.error && !txResult.info && (
             <pre className="note-content text-[12px] text-zinc-300 p-3 overflow-auto flex-1 leading-relaxed">
               {txResult.text}
             </pre>

@@ -3,6 +3,10 @@ import { schedulePersist } from '../utils/db'
 import { scheduleSyncPush } from '../utils/sync'
 import { importDroppedFiles } from '../utils/importNotes'
 
+function hasDraggedFiles(dataTransfer) {
+  return Array.from(dataTransfer?.types ?? []).includes('Files')
+}
+
 export function useNoteDropImport({
   activeCollectionId,
   clearSearch,
@@ -14,24 +18,27 @@ export function useNoteDropImport({
   const dragCounter = useRef(0)
 
   const handleDragEnter = useCallback((e) => {
+    if (!hasDraggedFiles(e.dataTransfer)) return
     e.preventDefault()
-    if (!e.dataTransfer.types.includes('Files')) return
     dragCounter.current += 1
     setIsDragging(true)
   }, [])
 
   const handleDragLeave = useCallback((e) => {
+    if (!hasDraggedFiles(e.dataTransfer)) return
     e.preventDefault()
     dragCounter.current -= 1
     if (dragCounter.current === 0) setIsDragging(false)
   }, [])
 
   const handleDragOver = useCallback((e) => {
+    if (!hasDraggedFiles(e.dataTransfer)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
   }, [])
 
   const handleDrop = useCallback(async (e) => {
+    if (!hasDraggedFiles(e.dataTransfer)) return
     e.preventDefault()
     dragCounter.current = 0
     setIsDragging(false)

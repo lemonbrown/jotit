@@ -1,4 +1,5 @@
 import { extractSQLiteAssetRef } from './sqliteNote.js'
+import { buildNibPrompt } from './nibPrompts.js'
 
 export function parseSqlCommand(line) {
   const text = String(line ?? '').trim()
@@ -81,16 +82,8 @@ export function extractSqlFromLLMResponse(text) {
   return s
 }
 
-export function buildNibSqlPrompt(schemaText, prompt) {
-  return [
-    'You are a SQLite expert. Given the following database schema, write a single SQL SELECT query to answer the request.',
-    'Return only the SQL query with no explanation, no markdown, and no code fences.',
-    '',
-    'Schema:',
-    schemaText,
-    '',
-    'Request: ' + String(prompt ?? ''),
-  ].join('\n')
+export function buildNibSqlPrompt(schemaText, prompt, promptOverrides = {}) {
+  return buildNibPrompt(promptOverrides, 'command.nibSql', { schemaText, request: String(prompt ?? '') })
 }
 
 export function formatSchemaForPrompt(schema) {

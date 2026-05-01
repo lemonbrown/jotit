@@ -758,6 +758,21 @@ export function registerPublicSharing(app, { bucketsFile, publicNotesFile, pgPoo
     return res.json({ links })
   })
 
+  app.delete('/api/bucket/me/direct-notes', requireAuth, async (req, res) => {
+    if (!pgPool) return sendJsonError(res, 503, 'Public buckets not configured')
+    try {
+      const result = await pgPool.query(
+        `UPDATE notes SET is_public = 0, updated_at = $2
+          WHERE user_id = $1 AND is_public = 1
+          RETURNING id`,
+        [req.user.userId, Date.now()]
+      )
+      res.json({ ok: true, count: result.rows.length })
+    } catch (e) {
+      sendJsonError(res, 500, `Failed to clear direct notes: ${e.message}`)
+    }
+  })
+
   app.delete('/api/public-note/:slug', async (req, res) => {
     if (pgPool) {
       try {

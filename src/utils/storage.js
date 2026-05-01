@@ -37,6 +37,7 @@ const SETTINGS_DEFAULTS = {
   secretScanBlockSync: false,
   secretScanNibEnabled: false,
   syncEnabled: true,
+  nibPrompts: {},
 }
 
 export function loadSettings() {

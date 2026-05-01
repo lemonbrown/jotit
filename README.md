@@ -4,6 +4,8 @@ JotIt is a local-first note app with a React/Vite frontend and a small Express s
 
 ## Start here
 
+For new users, check out the [Getting Started Guide](./docs/GETTING_STARTED.md).
+
 For future LLMs, code agents, or maintainers, the most useful docs are:
 
 - [LLM Guide](./docs/LLM_GUIDE.md)
@@ -48,4 +50,7 @@ For future LLMs, code agents, or maintainers, the most useful docs are:
 
 - Signed-in server-owned AI search with local guest fallback
 - Local `jotit-agent` support for note-authored HTTP execution against localhost/private targets
+- `/url` note command for fetching a web page into readable text or deterministic markdown without Nib (`--markdown`, `--note`, and `--inline`)
+- `/nib url` fetches a web page as readable text; add `--markdown` to ask Nib to reconstruct it as markdown, or use `--summary`, `--commands`, or `--routes` for those focused modes
+- Settings include an editable Nib prompts section for chat contexts, URL modes, SQL/regex/search/git helpers, secret scanning, and code review templates
 - OpenAPI 3.x JSON import as a dedicated document type with operation browsing, temporary runner execution, and basic response validation

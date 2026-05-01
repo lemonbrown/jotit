@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { NOW_COMMAND, buildNibTemplatePrompt, formatCurrentDateTime, getInlineCommandRange, getNibCommandSuggestions, getNibCommandTrigger, normalizeTemplateForNib, parseNibCommand } from '../src/utils/noteCommands.js'
+import { NOW_COMMAND, buildNibTemplatePrompt, formatCurrentDateTime, getInlineCommandRange, getNibCommandSuggestions, getNibCommandTrigger, normalizeTemplateForNib, parseNibCommand, parseUrlCommand } from '../src/utils/noteCommands.js'
 import { parseSqlCommand, getSqlDbAtTrigger, filterSqliteNotes, formatSqlResultText } from '../src/utils/sqlCommands.js'
-import { buildUrlNibPrompt, buildUrlTersePrompt, stripHtmlToText } from '../src/utils/webFetch.js'
+import { buildUrlNibPrompt, buildUrlTersePrompt, htmlToMarkdown, stripHtmlToText } from '../src/utils/webFetch.js'
 
 async function testFormatCurrentDateTimeUsesLocalOffset() {
   const date = new Date(2026, 3, 28, 9, 5, 7)
@@ -78,6 +78,11 @@ async function testSlashCommandSuggestionsIncludeSql() {
   assert.ok(labels.includes('/sql'))
 }
 
+async function testSlashCommandSuggestionsIncludeUrl() {
+  const labels = getNibCommandSuggestions('').map(item => item.label)
+  assert.ok(labels.includes('/url'))
+}
+
 async function testNibCommandParsesSqlSubcommand() {
   assert.deepEqual(
     parseNibCommand('/nib sql find all users'),
@@ -107,7 +112,7 @@ async function testNibCommandParsesSqlWithInlineFlag() {
 async function testNibCommandParsesUrlSubcommand() {
   assert.deepEqual(
     parseNibCommand('/nib url https://example.com'),
-    { command: 'url', url: 'https://example.com', hint: '', markdown: false, terse: false, templateCommand: '', templateArgs: '', output: 'panel' }
+    { command: 'url', url: 'https://example.com', hint: '', urlMode: 'structure', markdown: false, terse: false, templateCommand: '', templateArgs: '', output: 'panel' }
   )
 }
 
@@ -116,36 +121,51 @@ async function testNibCommandParsesUrlSubcommandHint() {
   assert.equal(result.command, 'url')
   assert.equal(result.url, 'https://example.com')
   assert.equal(result.hint, 'commands')
+  assert.equal(result.urlMode, 'structure')
   assert.equal(result.markdown, false)
   assert.equal(result.terse, false)
   assert.equal(result.output, 'panel')
 }
 
 async function testNibCommandParsesUrlWithMarkdownFlag() {
-  const result = parseNibCommand('/nib --markdown url https://example.com commands')
+  const result = parseNibCommand('/nib --markdown url https://example.com')
   assert.equal(result.command, 'url')
   assert.equal(result.url, 'https://example.com')
-  assert.equal(result.hint, 'commands')
+  assert.equal(result.hint, '')
+  assert.equal(result.urlMode, 'structure')
   assert.equal(result.markdown, true)
   assert.equal(result.terse, false)
   assert.equal(result.output, 'panel')
 }
 
-async function testNibCommandParsesUrlWithTerseFlag() {
-  const result = parseNibCommand('/nib --terse url https://example.com commands')
+async function testNibCommandParsesUrlWithSummaryFlag() {
+  const result = parseNibCommand('/nib --summary url https://example.com')
   assert.equal(result.command, 'url')
   assert.equal(result.url, 'https://example.com')
-  assert.equal(result.hint, 'commands')
+  assert.equal(result.hint, '')
+  assert.equal(result.urlMode, 'summary')
+  assert.equal(result.markdown, false)
+  assert.equal(result.terse, false)
+  assert.equal(result.output, 'panel')
+}
+
+async function testNibCommandParsesUrlWithTerseFlag() {
+  const result = parseNibCommand('/nib --commands --terse url https://example.com')
+  assert.equal(result.command, 'url')
+  assert.equal(result.url, 'https://example.com')
+  assert.equal(result.hint, '')
+  assert.equal(result.urlMode, 'commands')
   assert.equal(result.markdown, false)
   assert.equal(result.terse, true)
   assert.equal(result.output, 'panel')
 }
 
 async function testNibCommandParsesUrlWithTerseMarkdownFlags() {
-  const result = parseNibCommand('/nib --terse --markdown url https://example.com routes')
+  const result = parseNibCommand('/nib --routes --terse --markdown url https://example.com')
   assert.equal(result.command, 'url')
   assert.equal(result.url, 'https://example.com')
-  assert.equal(result.hint, 'routes')
+  assert.equal(result.hint, '')
+  assert.equal(result.urlMode, 'routes')
   assert.equal(result.markdown, true)
   assert.equal(result.terse, true)
 }
@@ -163,9 +183,22 @@ async function testNibCommandParsesUrlWithInlineFlag() {
   const result = parseNibCommand('/nib --inline url https://example.com routes')
   assert.equal(result.command, 'url')
   assert.equal(result.hint, 'routes')
+  assert.equal(result.urlMode, 'structure')
   assert.equal(result.markdown, false)
   assert.equal(result.terse, false)
   assert.equal(result.output, 'inline')
+}
+
+async function testNibCommandParsesUrlCommandsFlag() {
+  const result = parseNibCommand('/nib --commands url https://example.com')
+  assert.equal(result.command, 'url')
+  assert.equal(result.urlMode, 'commands')
+}
+
+async function testNibCommandParsesUrlRoutesFlag() {
+  const result = parseNibCommand('/nib --routes url https://example.com')
+  assert.equal(result.command, 'url')
+  assert.equal(result.urlMode, 'routes')
 }
 
 async function testNibCommandParsesInlineFlagForRegularPrompt() {
@@ -173,6 +206,34 @@ async function testNibCommandParsesInlineFlagForRegularPrompt() {
   assert.equal(result.command, 'ask')
   assert.equal(result.output, 'inline')
   assert.equal(result.prompt, 'summarize this')
+}
+
+async function testUrlCommandParsesBasicUrl() {
+  assert.deepEqual(
+    parseUrlCommand('/url https://example.com'),
+    { command: 'url', url: 'https://example.com', markdown: false, output: 'panel' }
+  )
+}
+
+async function testUrlCommandParsesNoteFlag() {
+  assert.deepEqual(
+    parseUrlCommand('/url --note https://example.com'),
+    { command: 'url', url: 'https://example.com', markdown: false, output: 'note' }
+  )
+}
+
+async function testUrlCommandParsesInlineFlag() {
+  assert.deepEqual(
+    parseUrlCommand('/url --inline https://example.com'),
+    { command: 'url', url: 'https://example.com', markdown: false, output: 'inline' }
+  )
+}
+
+async function testUrlCommandParsesMarkdownFlag() {
+  assert.deepEqual(
+    parseUrlCommand('/url --markdown --note https://example.com'),
+    { command: 'url', url: 'https://example.com', markdown: true, output: 'note' }
+  )
 }
 
 async function testStripHtmlToTextRemovesScriptAndTags() {
@@ -184,14 +245,61 @@ async function testStripHtmlToTextRemovesScriptAndTags() {
   assert.doesNotMatch(text, /<h1>/)
 }
 
+async function testHtmlToMarkdownConvertsReadableHtml() {
+  const markdown = htmlToMarkdown(
+    '<html><head><title>Example</title></head><body><nav>skip</nav><h1>Title</h1><p>Hello <a href="https://example.com/a">link</a></p><pre><code>npm test</code></pre></body></html>',
+    'https://example.com'
+  )
+
+  assert.match(markdown, /^# Example/)
+  assert.match(markdown, /Source: https:\/\/example.com/)
+  assert.match(markdown, /# Title/)
+  assert.match(markdown, /\[link\]\(https:\/\/example.com\/a\)/)
+  assert.match(markdown, /```/)
+  assert.match(markdown, /npm test/)
+  assert.doesNotMatch(markdown, /skip/)
+}
+
+async function testBuildUrlNibPromptDefaultsToPlainTextCleanup() {
+  const prompt = buildUrlNibPrompt('ollama run llama3\nGET /api/tags', 'https://example.com')
+  assert.match(prompt, /Clean up this extracted web page text without converting it to markdown/)
+  assert.match(prompt, /Do not summarize/)
+  assert.match(prompt, /Do not use markdown syntax/)
+  assert.match(prompt, /Do not try to exhaustively extract shell commands or API routes/)
+  assert.doesNotMatch(prompt, /Extract every shell command/)
+  assert.doesNotMatch(prompt, /Extract every HTTP API route/)
+}
+
+async function testBuildUrlNibPromptMarkdownStructureRequiresMarkdownFlag() {
+  const prompt = buildUrlNibPrompt('ollama run llama3\nGET /api/tags', 'https://example.com', { markdown: true })
+  assert.match(prompt, /Convert this web page content into a markdown note/)
+  assert.match(prompt, /Reconstruct the page content in markdown instead of summarizing it/)
+  assert.match(prompt, /Do not paraphrase whole sections/)
+  assert.match(prompt, /Do not compress the page into bullets/)
+}
+
+async function testBuildUrlNibPromptUsesPromptOverride() {
+  const prompt = buildUrlNibPrompt('page body', 'https://example.com', {
+    markdown: true,
+    promptOverrides: { 'url.markdown': 'Custom markdown {{url}}\n{{pageText}}' },
+  })
+  assert.equal(prompt, 'Custom markdown https://example.com\npage body')
+}
+
+async function testBuildUrlNibPromptSelectsSummaryPrompt() {
+  const prompt = buildUrlNibPrompt('Installation details', 'https://example.com', { mode: 'summary' })
+  assert.match(prompt, /Summarize this web page/)
+  assert.match(prompt, /brief overview/)
+}
+
 async function testBuildUrlNibPromptSelectsCommandPrompt() {
-  const prompt = buildUrlNibPrompt('ollama run llama3', 'https://example.com', 'commands')
+  const prompt = buildUrlNibPrompt('ollama run llama3', 'https://example.com', { mode: 'commands' })
   assert.match(prompt, /Extract every shell command/)
   assert.match(prompt, /ollama run llama3/)
 }
 
 async function testBuildUrlNibPromptSelectsRoutesPrompt() {
-  const prompt = buildUrlNibPrompt('GET /api/tags', 'https://example.com', 'api')
+  const prompt = buildUrlNibPrompt('GET /api/tags', 'https://example.com', { mode: 'routes' })
   assert.match(prompt, /Extract every HTTP API route/)
   assert.match(prompt, /GET \/api\/tags/)
 }
@@ -295,6 +403,7 @@ export default [
   ['nib command suggestions include note flag', testNibCommandSuggestionsIncludeNoteFlag],
   ['slash command suggestions include git and nib', testSlashCommandSuggestionsIncludeGitAndNib],
   ['slash command suggestions include sql', testSlashCommandSuggestionsIncludeSql],
+  ['slash command suggestions include url', testSlashCommandSuggestionsIncludeUrl],
   ['nib command parses sql subcommand', testNibCommandParsesSqlSubcommand],
   ['nib command parses sql subcommand with db ref', testNibCommandParsesSqlSubcommandWithDb],
   ['nib command parses sql --note flag', testNibCommandParsesSqlWithNoteFlag],
@@ -302,12 +411,24 @@ export default [
   ['nib command parses url subcommand', testNibCommandParsesUrlSubcommand],
   ['nib command parses url subcommand hint', testNibCommandParsesUrlSubcommandHint],
   ['nib command parses url --markdown flag', testNibCommandParsesUrlWithMarkdownFlag],
+  ['nib command parses url --summary flag', testNibCommandParsesUrlWithSummaryFlag],
   ['nib command parses url --terse flag', testNibCommandParsesUrlWithTerseFlag],
   ['nib command parses url --terse --markdown flags', testNibCommandParsesUrlWithTerseMarkdownFlags],
   ['nib command parses url --note flag', testNibCommandParsesUrlWithNoteFlag],
   ['nib command parses url --inline flag', testNibCommandParsesUrlWithInlineFlag],
+  ['nib command parses url --commands flag', testNibCommandParsesUrlCommandsFlag],
+  ['nib command parses url --routes flag', testNibCommandParsesUrlRoutesFlag],
   ['nib command parses --inline flag for regular prompt', testNibCommandParsesInlineFlagForRegularPrompt],
+  ['/url command parses basic url', testUrlCommandParsesBasicUrl],
+  ['/url command parses note flag', testUrlCommandParsesNoteFlag],
+  ['/url command parses inline flag', testUrlCommandParsesInlineFlag],
+  ['/url command parses markdown flag', testUrlCommandParsesMarkdownFlag],
   ['strip html to text removes scripts and tags', testStripHtmlToTextRemovesScriptAndTags],
+  ['html to markdown converts readable html', testHtmlToMarkdownConvertsReadableHtml],
+  ['url nib prompt defaults to plain text cleanup', testBuildUrlNibPromptDefaultsToPlainTextCleanup],
+  ['url nib prompt markdown structure requires markdown flag', testBuildUrlNibPromptMarkdownStructureRequiresMarkdownFlag],
+  ['url nib prompt uses prompt override', testBuildUrlNibPromptUsesPromptOverride],
+  ['url nib prompt selects summary mode', testBuildUrlNibPromptSelectsSummaryPrompt],
   ['url nib prompt selects command mode', testBuildUrlNibPromptSelectsCommandPrompt],
   ['url nib prompt selects routes mode', testBuildUrlNibPromptSelectsRoutesPrompt],
   ['url terse prompt selects plain command mode', testBuildUrlTersePromptSelectsPlainCommandPrompt],

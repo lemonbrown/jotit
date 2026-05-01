@@ -7,10 +7,11 @@ import { searchNotesWithLocalEmbeddings } from '../utils/localEmbeddings'
 const TOKEN_KEY = 'jotit_auth_token'
 const EXACT_PREFIX = 'em:'
 
-export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = {}) {
+export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = {}, idFilterNotesRef = notesRef) {
   const [searchInput, setSearchInput] = useState('')
   const deferredSearchInput = useDeferredValue(searchInput)
-  const [searchResults, setSearchResults] = useState(null)
+  const [textSearchResults, setTextSearchResults] = useState(null)
+  const [idFilter, setIdFilter] = useState(null)
   const [isSearching, setIsSearching] = useState(false)
   const [isNibSearching, setIsNibSearching] = useState(false)
   const [nibSearchApplied, setNibSearchApplied] = useState(false)
@@ -20,7 +21,24 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
   const clearSearch = useCallback(() => {
     searchSequenceRef.current += 1
     setSearchInput('')
-    setSearchResults(null)
+    setTextSearchResults(null)
+    setIdFilter(null)
+    setIsSearching(false)
+    setIsNibSearching(false)
+    setNibSearchApplied(false)
+  }, [])
+
+  const clearIdFilter = useCallback(() => {
+    searchSequenceRef.current += 1
+    setIdFilter(null)
+    setIsSearching(false)
+  }, [])
+
+  const filterByIds = useCallback((ids) => {
+    searchSequenceRef.current += 1
+    setSearchInput('')
+    setTextSearchResults(null)
+    setIdFilter(new Set(ids))
     setIsSearching(false)
     setIsNibSearching(false)
     setNibSearchApplied(false)
@@ -28,6 +46,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
 
   const handleSearch = useCallback((query) => {
     setNibSearchApplied(false)
+    setIdFilter(null)
     setSearchInput(query)
   }, [])
 
@@ -38,7 +57,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
 
   const improveWithNib = useCallback(async () => {
     const query = searchInput.trim()
-    if (!query || !searchResults?.length || isNibSearching) return
+    if (!query || !textSearchResults?.length || isNibSearching || idFilter) return
     if (!nibOptions.llmEnabled || !nibOptions.ollamaModel) return
     if ((nibOptions.llmProvider ?? 'ollama') === 'ollama' && !nibOptions.agentToken) return
 
@@ -49,11 +68,11 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
         token: nibOptions.agentToken,
         model: nibOptions.ollamaModel,
         query,
-        results: searchResults,
+        results: textSearchResults,
       })
       if (searchSequenceRef.current !== sequence) return
       startTransition(() => {
-        setSearchResults(reranked)
+        setTextSearchResults(reranked)
         setNibSearchApplied(true)
       })
     } catch {
@@ -61,7 +80,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
     } finally {
       if (searchSequenceRef.current === sequence) setIsNibSearching(false)
     }
-  }, [isNibSearching, nibOptions.agentToken, nibOptions.llmEnabled, nibOptions.llmProvider, nibOptions.ollamaModel, searchInput, searchResults])
+  }, [idFilter, isNibSearching, nibOptions.agentToken, nibOptions.llmEnabled, nibOptions.llmProvider, nibOptions.ollamaModel, searchInput, textSearchResults])
 
   useEffect(() => {
     const raw = deferredSearchInput.trim()
@@ -73,9 +92,17 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
     searchSequenceRef.current = sequence
     setNibSearchApplied(false)
 
+    if (idFilter) {
+      startTransition(() => {
+        setTextSearchResults(null)
+        setIsSearching(false)
+      })
+      return
+    }
+
     if (!query) {
       startTransition(() => {
-        setSearchResults(null)
+        setTextSearchResults(null)
         setIsSearching(false)
       })
       return
@@ -84,7 +111,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
     if (effectiveMode === 'plain') {
       const results = searchNotesPlainText(notesRef.current, query)
       startTransition(() => {
-        setSearchResults(results)
+        setTextSearchResults(results)
         setIsSearching(false)
       })
       return
@@ -95,7 +122,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
       const local = searchNotesLocallyDetailed(notesRef.current, query)
       startTransition(() => {
         if (searchSequenceRef.current !== sequence) return
-        setSearchResults(local)
+        setTextSearchResults(local)
       })
     }, 60)
 
@@ -109,7 +136,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
           if (cancelled || searchSequenceRef.current !== sequence) return
           startTransition(() => {
             if (cancelled || searchSequenceRef.current !== sequence) return
-            setSearchResults(results)
+            setTextSearchResults(results)
           })
         } finally {
           if (!cancelled && searchSequenceRef.current === sequence) setIsSearching(false)
@@ -141,7 +168,7 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
 
         startTransition(() => {
           if (cancelled || searchSequenceRef.current !== sequence) return
-          setSearchResults(Array.isArray(data.results) ? data.results : [])
+          setTextSearchResults(Array.isArray(data.results) ? data.results : [])
         })
       } finally {
         if (!cancelled && searchSequenceRef.current === sequence) {
@@ -154,16 +181,24 @@ export function useNoteSearch(notesRef, user, collectionId = null, nibOptions = 
       cancelled = true
       clearTimeout(localSearchTimer)
     }
-  }, [collectionId, deferredSearchInput, notesRef, searchMode, user])
+  }, [collectionId, deferredSearchInput, idFilter, notesRef, searchMode, user])
 
   const strippedInput = searchInput.trim()
   const effectiveSearchMode = strippedInput.startsWith(EXACT_PREFIX) ? 'plain' : searchMode
   const searchQuery = strippedInput.startsWith(EXACT_PREFIX)
     ? strippedInput.slice(EXACT_PREFIX.length).trim()
     : strippedInput
+  const searchResults = idFilter
+    ? idFilterNotesRef.current
+      .filter(note => idFilter.has(note.id))
+      .map(note => ({ note, noteId: note.id }))
+    : textSearchResults
 
   return {
     clearSearch,
+    clearIdFilter,
+    filterByIds,
+    idFilter,
     handleSearch,
     isSearching,
     isNibSearching,

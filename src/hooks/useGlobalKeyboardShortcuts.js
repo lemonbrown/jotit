@@ -22,7 +22,7 @@ export function useGlobalKeyboardShortcuts({
       const inInput = ['INPUT', 'TEXTAREA'].includes(e.target.tagName)
       const isBackslashShortcut = (e.ctrlKey || e.metaKey) && (e.code === 'Backslash' || e.key === '\\' || e.key === '|')
 
-      if (e.altKey && e.key === 'n') { e.preventDefault(); createNote() }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'n') { e.preventDefault(); createNote() }
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowUp') { e.preventDefault(); cycleCollection(-1) }
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowDown') { e.preventDefault(); cycleCollection(1) }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === 'ArrowUp' && !inInput) { e.preventDefault(); cycleNote(-1) }

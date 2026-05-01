@@ -1,14 +1,13 @@
+import { DEFAULT_NIB_PROMPTS, NIB_PROMPT_DEFINITIONS, buildNibPrompt } from './nibPrompts.js'
+
 export const DEFAULT_NIB_TEMPLATES = {
-  codeReview: 'Review this {{label}}. Focus on correctness bugs, regressions, edge cases, and missing tests.',
+  codeReview: DEFAULT_NIB_PROMPTS['template.codeReview'],
 }
 
 export const NIB_TEMPLATE_DEFINITIONS = [
-  {
-    id: 'codeReview',
-    label: 'Code review',
-    description: 'Used when sending a selected PR or git diff to Nib.',
-    variables: ['label', 'path', 'repoName', 'prNumber', 'base', 'viewType'],
-  },
+  ...NIB_PROMPT_DEFINITIONS
+    .filter(item => item.id === 'template.codeReview')
+    .map(item => ({ ...item, id: 'codeReview' })),
 ]
 
 export function getNibTemplates(settings = {}) {
@@ -30,5 +29,6 @@ export function renderNibTemplate(template, variables = {}) {
 }
 
 export function buildNibMessage(settings = {}, templateId, variables = {}) {
+  if (templateId === 'codeReview') return buildNibPrompt(settings, 'template.codeReview', variables)
   return renderNibTemplate(getNibTemplate(settings, templateId), variables).trim()
 }

@@ -23,6 +23,7 @@ export default function NoteGrid({
   onToggleOneLineMode,
   onNoteDragStart,
   onNoteDragEnd,
+  onKanbanDropToList,
   style,
   syncEnabled = true,
   onToggleNoteSync,
@@ -53,6 +54,25 @@ export default function NoteGrid({
   const draggingRef = useRef(false)
   const [hoverPreview, setHoverPreview] = useState(null)
   const [selectionMode, setSelectionMode] = useState(false)
+
+  const isKanbanCardDrag = useCallback((dataTransfer) => (
+    Array.from(dataTransfer?.types ?? []).includes('application/x-jotit-kanban-source-col')
+  ), [])
+
+  const handleKanbanDragOver = useCallback((e) => {
+    if (!isKanbanCardDrag(e.dataTransfer)) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+  }, [isKanbanCardDrag])
+
+  const handleKanbanDrop = useCallback((e) => {
+    if (!isKanbanCardDrag(e.dataTransfer)) return
+    e.preventDefault()
+    e.stopPropagation()
+    const noteId = e.dataTransfer.getData('application/x-jotit-note-id') || e.dataTransfer.getData('text/plain')
+    if (noteId) onKanbanDropToList?.(noteId)
+  }, [isKanbanCardDrag, onKanbanDropToList])
 
   useEffect(() => { notesRef.current = notes }, [notes])
   useEffect(() => { activeIdRef.current = activeNoteId }, [activeNoteId])
@@ -307,6 +327,8 @@ export default function NoteGrid({
     return (
       <div
         className="w-full h-[34vh] md:h-auto md:w-[420px] shrink-0 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 text-zinc-600 text-sm"
+        onDragOver={handleKanbanDragOver}
+        onDrop={handleKanbanDrop}
         style={{ ...style, maxWidth: '100%' }}
       >
         {searchQuery ? 'No results' : 'No notes yet'}
@@ -333,6 +355,8 @@ export default function NoteGrid({
         pointerRef.current = { x: null, y: null }
         clearHoverTimer()
       }}
+      onDragOver={handleKanbanDragOver}
+      onDrop={handleKanbanDrop}
       className={[
         'overflow-y-auto overflow-x-hidden border-b md:border-b-0 md:border-r border-zinc-800 p-2 bg-zinc-950',
         'transition-[width,box-shadow,border-color] duration-150 ease-out',

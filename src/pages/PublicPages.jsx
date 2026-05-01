@@ -197,7 +197,7 @@ function PublicBucketPage({ path }) {
             <h1 className="text-base font-semibold tracking-tight text-zinc-100">{bucketName}</h1>
             <span className="font-mono text-[11px] text-zinc-600">public bucket</span>
           </div>
-          <p className="mt-1 text-xs text-zinc-500">Public collections and shared notes from {data.bucket?.ownerLabel ?? bucketName}.</p>
+          <p className="mt-1 text-xs text-zinc-500">Public collections and shared notes.</p>
         </section>
 
         <section className="mb-6">
@@ -240,7 +240,7 @@ function PublicBucketPage({ path }) {
         <section>
           <div className="mb-2 flex items-end justify-between gap-4 px-1">
             <div>
-              <h2 className="text-sm font-semibold text-zinc-200">Direct Notes</h2>
+              <h2 className="text-sm font-semibold text-zinc-200">Notes</h2>
               <p className="text-xs text-zinc-600">Individually shared public notes.</p>
             </div>
             <span className="font-mono text-xs text-zinc-600">{directNotes.length}</span>
@@ -276,7 +276,7 @@ function PublicCollectionPage({ path }) {
             <h1 className="text-base font-semibold tracking-tight text-zinc-100">{data.collection?.name}</h1>
             <span className="font-mono text-[11px] text-zinc-600">public collection</span>
           </div>
-          <p className="mt-1 text-xs text-zinc-500">{data.collection?.description || `Public collection from ${data.bucket?.ownerLabel ?? bucketName}`}</p>
+          <p className="mt-1 text-xs text-zinc-500">{data.collection?.description || `Public collection from ${bucketName}`}</p>
         </section>
         {notes.length ? (
           <div className="grid gap-2">

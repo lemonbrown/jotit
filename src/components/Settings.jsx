@@ -6,7 +6,6 @@ import { getLLMStatus, getLLMModels } from '../utils/llmClient'
 import AppearanceSection from './settings/AppearanceSection'
 import ProfileSection, { SLUG_RE } from './settings/ProfileSection'
 import SyncSection from './settings/SyncSection'
-import NibTemplatesSection from './settings/NibTemplatesSection'
 import EncryptionSection from './settings/EncryptionSection'
 import DangerZoneSection from './settings/DangerZoneSection'
 
@@ -23,6 +22,7 @@ export default function Settings({
   onSeedNotes,
   onRegenerateKeys,
   onRemoveAllFromServer,
+  onClearAllBucketNotes,
   publicNoteCount,
   publicCollectionCount = 0,
   noteCount = 0,
@@ -34,13 +34,14 @@ export default function Settings({
   const [localAgentToken, setLocalAgentToken] = useState(settings.localAgentToken ?? '')
   const [bucketName, setBucketName] = useState(initialBucketName || settings.bucketName || '')
   const [theme, setTheme] = useState(settings.theme ?? 'dark')
+  const [newNoteKeepsPanes, setNewNoteKeepsPanes] = useState(settings.newNoteKeepsPanes ?? false)
   const [secretScanEnabled, setSecretScanEnabled] = useState(settings.secretScanEnabled ?? false)
   const [secretScanBlockSync, setSecretScanBlockSync] = useState(settings.secretScanBlockSync ?? false)
   const [secretScanNibEnabled, setSecretScanNibEnabled] = useState(settings.secretScanNibEnabled ?? false)
-  const [nibTemplates, setNibTemplates] = useState(settings.nibTemplates ?? {})
-  const [bucketSaving, setBucketSaving] = useState(false)
+const [bucketSaving, setBucketSaving] = useState(false)
   const [bucketStatus, setBucketStatus] = useState(null)
   const [removeAllServerState, setRemoveAllServerState] = useState(null)
+  const [clearBucketNoteState, setClearBucketNoteState] = useState(null)
   const [bucketCollections, setBucketCollections] = useState([])
   const [bucketNotes, setBucketNotes] = useState([])
   const localAgentStatus = useLocalAgentStatus()
@@ -177,11 +178,11 @@ export default function Settings({
       embeddingProvider: embedProvider,
       ollamaEmbedModel: embedModel.trim() || 'nomic-embed-text',
       theme,
+      newNoteKeepsPanes,
       secretScanEnabled,
       secretScanBlockSync,
       secretScanNibEnabled,
       syncEnabled,
-      nibTemplates,
     })
   }
 
@@ -223,7 +224,12 @@ export default function Settings({
         </div>
 
         <div className="space-y-4">
-          <AppearanceSection theme={theme} onThemeChange={handleThemeChange} />
+          <AppearanceSection
+            theme={theme}
+            onThemeChange={handleThemeChange}
+            newNoteKeepsPanes={newNoteKeepsPanes}
+            onNewNoteKeepsPanesChange={setNewNoteKeepsPanes}
+          />
 
           <SyncSection
             checkOllama={checkOllama}
@@ -260,11 +266,6 @@ export default function Settings({
             user={user}
           />
 
-          <NibTemplatesSection
-            templates={nibTemplates}
-            onChange={setNibTemplates}
-          />
-
           <ProfileSection
             bucketCollections={bucketCollections}
             bucketName={bucketName}
@@ -275,6 +276,14 @@ export default function Settings({
             onSaveBucketName={handleSaveBucketName}
             publicCollectionCount={publicCollectionCount}
             publicNoteCount={publicNoteCount}
+            clearBucketNoteState={clearBucketNoteState}
+            onClearAllBucketNotes={onClearAllBucketNotes ? async () => {
+              if (clearBucketNoteState !== 'confirm') { setClearBucketNoteState('confirm'); return }
+              setClearBucketNoteState('loading')
+              const result = await onClearAllBucketNotes()
+              setClearBucketNoteState(result?.ok ? 'ok' : { error: result?.error ?? 'Failed' })
+              if (result?.ok) setBucketNotes([])
+            } : undefined}
           />
 
           <EncryptionSection

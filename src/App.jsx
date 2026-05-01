@@ -23,7 +23,9 @@ import KanbanBoard from './components/KanbanBoard'
 import NotePanel from './components/NotePanel'
 import LLMChat from './components/LLMChat'
 import SearchBar from './components/SearchBar'
+import GlobalSecretAlert from './components/GlobalSecretAlert'
 import Settings from './components/Settings'
+import NibPromptsModal from './components/NibPromptsModal'
 import SharedLinksModal from './components/SharedLinksModal'
 import HelpModal from './components/HelpModal'
 import AuthScreen from './components/AuthScreen'
@@ -34,6 +36,7 @@ import { useAuth } from './contexts/AuthContext'
 import { usePaneResize } from './hooks/usePaneResize'
 import { useMultiPaneResize } from './hooks/useMultiPaneResize'
 import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts'
+import { useSecretScan } from './hooks/useSecretScan'
 import PaneResizer from './components/PaneResizer'
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5 MB
@@ -91,6 +94,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [showSnippets, setShowSnippets] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
   const [showSharedLinks, setShowSharedLinks] = useState(false)
+  const [showNibPrompts, setShowNibPrompts] = useState(false)
   const searchRef = useRef(null)
   const diffLoaderRef = useRef(null)
   const [diffActive, setDiffActive] = useState(false)
@@ -121,7 +125,6 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
   const [selectedShareNoteIds, setSelectedShareNoteIds] = useState(() => new Set())
   const [shareSelectedState, setShareSelectedState] = useState(null)
   const [sharingSelected, setSharingSelected] = useState(false)
-  const [dragOverCollectionId, setDragOverCollectionId] = useState(null)
   const [nibLiveContext, setNibLiveContext] = useState({
     noteId: null,
     selectionText: '',
@@ -239,6 +242,9 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     nibSearchApplied,
     handleSearch,
     clearSearch,
+    filterByIds,
+    clearIdFilter,
+    idFilter,
     searchMode,
     toggleSearchMode,
     searchQuery,
@@ -247,7 +253,17 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     llmProvider,
     agentToken: settings.localAgentToken ?? '',
     ollamaModel: llmProvider === 'ollama' ? ollamaModel : remoteModel,
+  }, notesRef)
+  const { flaggedNoteIds, flaggedCount } = useSecretScan(notes, {
+    secretScanEnabled: settings.secretScanEnabled ?? false,
   })
+  useEffect(() => {
+    if (!idFilter) return
+    const nextIds = [...idFilter].filter(id => flaggedNoteIds.has(id))
+    if (nextIds.length === idFilter.size) return
+    if (nextIds.length) filterByIds(nextIds)
+    else clearIdFilter()
+  }, [clearIdFilter, filterByIds, flaggedNoteIds, idFilter])
   const { isDragging, handleDragEnter, handleDragLeave, handleDragOver, handleDrop } = useNoteDropImport({
     activeCollectionId: writableCollectionId,
     clearSearch,
@@ -284,11 +300,15 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
 
   const createNote = useCallback(() => {
     const note = addNote(createEmptyNote({ collectionId: writableCollectionId }))
-    showSinglePaneForNote(note.id)
+    if (settings.newNoteKeepsPanes) {
+      openNoteInPane(note.id, { newPane: true })
+    } else {
+      showSinglePaneForNote(note.id)
+    }
     recordLocation({ noteId: note.id }, { replaceCurrent: false })
     setEditorFocusNonce(n => n + 1)
     clearSearch()
-  }, [addNote, clearSearch, recordLocation, showSinglePaneForNote, writableCollectionId])
+  }, [addNote, clearSearch, openNoteInPane, recordLocation, settings.newNoteKeepsPanes, showSinglePaneForNote, writableCollectionId])
 
   const createNoteFromContent = useCallback((content) => {
     const note = createEmptyNote({ collectionId: writableCollectionId })
@@ -300,6 +320,15 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     setEditorFocusNonce(n => n + 1)
     clearSearch()
   }, [addNote, clearSearch, recordLocation, showSinglePaneForNote, writableCollectionId])
+
+  const createNotesSilently = useCallback((contentArray) => {
+    for (const noteContent of contentArray) {
+      const note = createEmptyNote({ collectionId: writableCollectionId })
+      note.content = noteContent
+      note.updatedAt = Date.now()
+      addNote(note)
+    }
+  }, [addNote, writableCollectionId])
 
   const createNoteFromContentInNewPane = useCallback((content) => {
     const note = createEmptyNote({ collectionId: writableCollectionId })
@@ -440,34 +469,6 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     clearSearch()
   }, [activeCollectionId, activeNoteId, clearSearch, moveNoteToCollection, notesRef, showSinglePaneForNote])
 
-  const handleDropNoteOnCollection = useCallback((e, collectionId) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const noteId = e.dataTransfer.getData('application/x-jotit-note-id') || draggedNoteId
-    setDraggedNoteId(null)
-    setDragOverCollectionId(null)
-    if (!noteId || !collectionId) return
-
-    moveNoteToCollection(noteId, collectionId)
-    if (activeCollectionId !== ALL_COLLECTION_ID && collectionId !== activeCollectionId) {
-      const nextNote = notesRef.current.find(note => note.id !== noteId && note.collectionId === activeCollectionId)
-      showSinglePaneForNote(nextNote?.id ?? null)
-    }
-    clearSearch()
-  }, [activeCollectionId, clearSearch, draggedNoteId, moveNoteToCollection, notesRef, showSinglePaneForNote])
-
-  const handleCollectionDragOver = useCallback((e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    e.dataTransfer.dropEffect = 'move'
-  }, [])
-
-  const handleCollectionDragLeave = useCallback((e, collectionId) => {
-    const nextTarget = e.relatedTarget
-    if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return
-    setDragOverCollectionId(current => current === collectionId ? null : current)
-  }, [])
-
   const searchSnippets = useCallback(async (query) => {
     const raw = query.trim()
     if (!raw) return []
@@ -479,6 +480,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
     saveSettings(nextSettings)
     setShowSettings(false)
   }, [])
+
+  const handleSaveNibPrompts = useCallback((nibPrompts) => {
+    const nextSettings = { ...settings, nibPrompts }
+    setSettings(nextSettings)
+    saveSettings(nextSettings)
+    setShowNibPrompts(false)
+  }, [settings])
 
   const saveLocalAiConfig = useCallback((config) => {
     const nextSettings = {
@@ -794,6 +802,22 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
       return { error: e.message ?? 'Network error' }
     }
   }, [])
+
+  const handleClearAllBucketNotes = useCallback(async () => {
+    const token = localStorage.getItem('jotit_auth_token')
+    try {
+      const res = await fetch('/api/bucket/me/direct-notes', {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) return { error: data.error ?? 'Failed to clear bucket notes' }
+      setNotes(prev => prev.map(n => n.isPublic ? { ...n, isPublic: false } : n))
+      return { ok: true, count: data.count ?? 0 }
+    } catch (e) {
+      return { error: e.message ?? 'Network error' }
+    }
+  }, [setNotes])
 
   const toggleNotesPane = useCallback(() => {
     setNotesPaneHidden(hidden => {
@@ -1115,6 +1139,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
         </div>
 
         <div className="flex items-center gap-1.5 md:gap-2 ml-auto shrink-0 min-w-0">
+          <GlobalSecretAlert
+            flaggedCount={flaggedCount}
+            flaggedNoteIds={flaggedNoteIds}
+            idFilter={idFilter}
+            onFilterByIds={filterByIds}
+            onClearFilter={clearIdFilter}
+          />
           {searchResults !== null && (
             <span className="text-[11px] text-zinc-500">
               {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
@@ -1234,6 +1265,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             Links
           </button>
           <button
+            onClick={() => setShowNibPrompts(true)}
+            title="Edit Nib prompts"
+            className="hidden sm:inline-flex px-2.5 py-1 text-xs font-medium text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-500 rounded-md transition-colors"
+          >
+            Prompts
+          </button>
+          <button
             onClick={() => setShowHelp(true)}
             title="Hotkeys & commands (?)"
             className="p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors font-mono text-sm leading-none"
@@ -1277,72 +1315,6 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
       </header>
       )}
 
-      {draggedNoteId && collections.length > 1 && (
-        <div
-          className="fixed left-3 right-3 top-24 md:top-16 md:right-auto md:w-[360px] z-[100] rounded-md border border-blue-800/70 bg-zinc-950 shadow-2xl shadow-black/70 p-2"
-          style={{ left: shouldShowNotesPane ? `clamp(12px, ${noteGridWidth + 12}px, calc(100vw - 372px))` : 16 }}
-          onDragEnter={handleCollectionDragOver}
-          onDragOver={handleCollectionDragOver}
-          onDrop={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-          }}
-        >
-          <div className="px-2 pb-2 text-[10px] uppercase tracking-wide text-blue-300">Drop note into collection</div>
-          <div className="space-y-2">
-            {collections.map(collection => {
-              const isCurrent = collection.id === notes.find(note => note.id === draggedNoteId)?.collectionId
-              const noteCount = notes.filter(note => note.collectionId === collection.id).length
-              return (
-                <div
-                  key={collection.id}
-                  role="button"
-                  tabIndex={0}
-                  data-collection-drop-target={collection.id}
-                  onDragEnter={(e) => {
-                    handleCollectionDragOver(e)
-                    if (!isCurrent) setDragOverCollectionId(collection.id)
-                  }}
-                  onDragOver={(e) => {
-                    handleCollectionDragOver(e)
-                    if (!isCurrent) setDragOverCollectionId(collection.id)
-                  }}
-                  onDragLeave={e => handleCollectionDragLeave(e, collection.id)}
-                  onDrop={e => {
-                    if (!isCurrent) handleDropNoteOnCollection(e, collection.id)
-                    else {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      setDraggedNoteId(null)
-                      setDragOverCollectionId(null)
-                    }
-                  }}
-                  className={[
-                    'w-full min-h-[96px] flex flex-col justify-between gap-3 rounded-md px-3.5 py-3 text-left border transition-colors',
-                    isCurrent
-                      ? 'border-zinc-800 text-zinc-600 bg-zinc-950 cursor-default'
-                      : dragOverCollectionId === collection.id
-                        ? 'border-blue-400 text-white bg-blue-900/70 ring-1 ring-blue-300/50'
-                      : 'border-zinc-700 text-zinc-200 bg-zinc-900 hover:border-blue-500 hover:bg-blue-950/50',
-                  ].join(' ')}
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{collection.name}</div>
-                    <div className="mt-1 text-[11px] text-zinc-500 line-clamp-2">
-                      {collection.description || (isCurrent ? 'This note is already here' : 'Move the dragged note here')}
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-[10px] text-zinc-600">
-                    <span>{noteCount} note{noteCount === 1 ? '' : 's'}</span>
-                    <span>{isCurrent ? 'current' : collection.isDefault ? 'default' : 'drop target'}</span>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
       <div className="flex flex-col md:flex-row flex-1 overflow-hidden relative">
         {shouldShowNotesPane && (
           <NoteGrid
@@ -1379,12 +1351,11 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
             onToggleOneLineMode={toggleNoteListOneLine}
             onNoteDragStart={(noteId) => {
               setDraggedNoteId(noteId)
-              setDragOverCollectionId(null)
             }}
             onNoteDragEnd={() => {
               setDraggedNoteId(null)
-              setDragOverCollectionId(null)
             }}
+            onKanbanDropToList={(noteId) => handleKanbanStatusChange(noteId, null)}
             boardView={boardView}
             onToggleBoardView={() => {
               const kanbanPane = openPanes.find(p => p.type === 'kanban')
@@ -1459,7 +1430,8 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                 {isKanbanPane ? (
                   <KanbanBoard
                     key={`${paneId}:kanban`}
-                    notes={displayedNotes}
+                    notes={notes}
+                    prefillCollections={collections}
                     activeNoteId={activeNoteId}
                     onSelectNote={(id, options = {}) => {
                       ensureSelectableNoteIsLocal(id)
@@ -1512,6 +1484,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     onPublishNote={(mode) => handlePublishNote(note, mode)}
                     onToggleCollectionExcluded={(collectionExcluded) => handleSetNoteCollectionVisibility(note, collectionExcluded)}
                     onCreateNoteFromContent={createNoteFromContent}
+                    onAddNotesSilently={createNotesSilently}
                     onCreateOpenApiNote={createOpenApiNote}
                     onCreateTipsNote={createTipsNote}
                     tipsCreated={tipsCreated}
@@ -1527,12 +1500,19 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
                     llmEnabled={nibConnected}
                     ollamaModel={llmProvider === 'ollama' ? ollamaModel : remoteModel}
                     agentToken={settings.localAgentToken ?? ''}
-                    nibTemplates={settings.nibTemplates ?? {}}
+                    nibPrompts={{
+                      ...(settings.nibTemplates?.codeReview ? { 'template.codeReview': settings.nibTemplates.codeReview } : {}),
+                      ...(settings.nibPrompts ?? {}),
+                    }}
                     onOpenNibPane={openNibPane}
                     onNibContextChange={activePaneId === paneId ? handleNibContextChange : undefined}
                     onDiffModeChange={(loader) => {
                       diffLoaderRef.current = loader
                       setDiffActive(!!loader)
+                    }}
+                    onOpenNote={(noteId, options = {}) => {
+                      ensureSelectableNoteIsLocal(noteId)
+                      openNoteInPane(noteId, options)
                     }}
                   />
                 )}
@@ -1570,6 +1550,7 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           onSeedNotes={handleSeedDeveloperNotes}
           onRegenerateKeys={handleRegenerateKeys}
           onRemoveAllFromServer={user ? handleRemoveAllNotesFromServer : undefined}
+          onClearAllBucketNotes={user ? handleClearAllBucketNotes : undefined}
           publicNoteCount={publicNoteCount}
           publicCollectionCount={publicCollectionCount}
           noteCount={collectionNotes.length}
@@ -1598,6 +1579,13 @@ function AppShell({ user, logout, refreshUser, bucketName }) {
           onListSharedLinks={handleListSharedLinks}
           onDeleteSharedLink={handleDeleteSharedLink}
           onClose={() => setShowSharedLinks(false)}
+        />
+      )}
+      {showNibPrompts && (
+        <NibPromptsModal
+          settings={settings}
+          onSave={handleSaveNibPrompts}
+          onClose={() => setShowNibPrompts(false)}
         />
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}

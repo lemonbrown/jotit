@@ -1,19 +1,27 @@
 export const NOW_COMMAND = '/now'
 export const NIB_COMMAND = '/nib'
 export const SQL_COMMAND = '/sql'
+export const URL_COMMAND = '/url'
 
 const NIB_SUGGESTIONS = [
   {
     id: 'nib-url',
     label: '/nib url',
-    detail: 'fetch a URL as raw readable text',
+    detail: 'fetch a URL as readable page text',
     usage: '/nib url https://docs.example.com',
     insertText: '/nib url ',
   },
   {
+    id: 'nib-url-summary',
+    label: '/nib --summary url',
+    detail: 'fetch a URL and summarize it',
+    usage: '/nib --summary url https://docs.example.com',
+    insertText: '/nib --summary url ',
+  },
+  {
     id: 'nib-url-markdown',
     label: '/nib --markdown url',
-    detail: 'fetch a URL and format it with markdown',
+    detail: 'fetch a URL and have Nib convert it to markdown',
     usage: '/nib --markdown url https://docs.example.com',
     insertText: '/nib --markdown url ',
   },
@@ -21,22 +29,22 @@ const NIB_SUGGESTIONS = [
     id: 'nib-url-terse',
     label: '/nib --terse url',
     detail: 'extract only the requested URL items',
-    usage: '/nib --terse url https://docs.example.com commands',
+    usage: '/nib --commands --terse url https://docs.example.com',
     insertText: '/nib --terse url ',
   },
   {
     id: 'nib-url-commands',
-    label: '/nib url ... commands',
+    label: '/nib --commands url',
     detail: 'extract CLI commands from a URL',
-    usage: '/nib --terse url https://docs.example.com commands',
-    insertText: '/nib --terse url ',
+    usage: '/nib --commands url https://docs.example.com',
+    insertText: '/nib --commands url ',
   },
   {
     id: 'nib-url-routes',
-    label: '/nib url ... routes',
+    label: '/nib --routes url',
     detail: 'extract API routes from a URL',
-    usage: '/nib --terse url https://docs.example.com routes',
-    insertText: '/nib --terse url ',
+    usage: '/nib --routes url https://docs.example.com',
+    insertText: '/nib --routes url ',
   },
   {
     id: 'nib-sql',
@@ -105,6 +113,13 @@ const SLASH_COMMANDS = [
     insertText: '/sql ',
   },
   {
+    id: 'slash-url',
+    label: '/url',
+    detail: 'fetch a URL as readable text without Nib',
+    usage: '/url --markdown --note https://docs.example.com',
+    insertText: '/url ',
+  },
+  {
     id: 'slash-git',
     label: '/git',
     detail: 'run git workspace commands',
@@ -164,6 +179,37 @@ export function getInlineCommandRange(text, cursor, command) {
   return { start, end }
 }
 
+function parseUrlFlags(text) {
+  const parts = String(text ?? '').trim().split(/\s+/).filter(Boolean)
+  const body = []
+  let output = null
+  let markdown = false
+
+  for (const part of parts) {
+    if (part === '--note' || part === '--new-note' || part === '-n') {
+      output = 'note'
+    } else if (part === '--inline' || part === '-i') {
+      output = 'inline'
+    } else if (part === '--markdown' || part === '--md' || part === '-m') {
+      markdown = true
+    } else {
+      body.push(part)
+    }
+  }
+
+  return { text: body.join(' '), output, markdown }
+}
+
+export function parseUrlCommand(line) {
+  const text = String(line ?? '').trim()
+  if (text !== URL_COMMAND && !text.startsWith(`${URL_COMMAND} `)) return null
+  const rest = text.slice(URL_COMMAND.length).trim()
+  const { text: commandText, output, markdown } = parseUrlFlags(rest)
+  const spaceIdx = commandText.indexOf(' ')
+  const url = spaceIdx === -1 ? commandText : commandText.slice(0, spaceIdx)
+  return { command: 'url', url, markdown, output: output ?? 'panel' }
+}
+
 function parseSqlSubcommandRest(rest) {
   const s = String(rest ?? '').trim()
   if (s.startsWith('@')) {
@@ -178,7 +224,7 @@ export function parseNibCommand(line) {
   const text = String(line ?? '').trim()
   if (text !== NIB_COMMAND && !text.startsWith(`${NIB_COMMAND} `)) return null
   const rest = text.slice(NIB_COMMAND.length).trim()
-  const { text: commandText, output: flagOutput, markdown, terse } = parseNibFlags(rest)
+  const { text: commandText, output: flagOutput, markdown, terse, urlMode } = parseNibFlags(rest)
   if (!commandText) return { command: 'ask', prompt: '', templateCommand: '', templateArgs: '', output: flagOutput ?? 'inline' }
 
   if (commandText === 'url' || commandText.startsWith('url ')) {
@@ -186,7 +232,7 @@ export function parseNibCommand(line) {
     const spaceIdx = rest.indexOf(' ')
     const url = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)
     const hint = spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1).trim()
-    return { command: 'url', url, hint, markdown, terse, templateCommand: '', templateArgs: '', output: flagOutput ?? 'panel' }
+    return { command: 'url', url, hint, urlMode, markdown, terse, templateCommand: '', templateArgs: '', output: flagOutput ?? 'panel' }
   }
 
   if (commandText === 'sql' || commandText.startsWith('sql ')) {
@@ -205,7 +251,7 @@ export function parseNibCommand(line) {
     prompt: '',
     templateCommand: space === -1 ? templateQuery : templateQuery.slice(0, space),
     templateArgs: space === -1 ? '' : templateQuery.slice(space + 1).trim(),
-    output: flagOutput ?? 'inline',
+    output: flagOutput ?? 'notes',
   }
 }
 
@@ -215,6 +261,7 @@ function parseNibFlags(text) {
   let output = null
   let markdown = false
   let terse = false
+  let urlMode = 'structure'
 
   for (const part of parts) {
     if (part === '--note' || part === '--new-note' || part === '-n') {
@@ -225,12 +272,40 @@ function parseNibFlags(text) {
       markdown = true
     } else if (part === '--terse' || part === '-t') {
       terse = true
+    } else if (part === '--summary' || part === '--summarize') {
+      urlMode = 'summary'
+    } else if (part === '--commands' || part === '--command') {
+      urlMode = 'commands'
+    } else if (part === '--routes' || part === '--api' || part === '--endpoints') {
+      urlMode = 'routes'
     } else {
       body.push(part)
     }
   }
 
-  return { text: body.join(' '), output, markdown, terse }
+  return { text: body.join(' '), output, markdown, terse, urlMode }
+}
+
+export function buildNibBatchTemplatePrompt(template, noteContent, { args = '' } = {}) {
+  const body = normalizeTemplateForNib(template?.body)
+  const extra = String(args ?? '').trim()
+  const rawItems = String(noteContent ?? '').trim().split(/\n{2,}/).map(s => s.trim()).filter(Boolean)
+  const count = rawItems.length
+  const numberedItems = rawItems.map((item, i) => `${i + 1}. ${item}`).join('\n')
+  return [
+    `The text below contains exactly ${count} item${count !== 1 ? 's' : ''}. Produce exactly ${count} filled-out version${count !== 1 ? 's' : ''} of the template, one per item.`,
+    `Separate each result with a line containing only: ===`,
+    `Output only the filled templates — no preamble, no labels, no explanation, no extra commentary.`,
+    `Each result must start directly with the first field of the template — do not add a heading or label above it.`,
+    extra ? `Additional direction: ${extra}` : null,
+    `Replace every placeholder with relevant content from each item. Do not output tab-stop syntax, dollar-brace placeholders, or placeholder braces. Leave unknown details as concise TODOs.`,
+    '',
+    'Template:',
+    body,
+    '',
+    `Items (${count} total):`,
+    numberedItems,
+  ].filter(v => v !== null).join('\n')
 }
 
 export function buildNibTemplatePrompt(template, { args = '' } = {}) {
@@ -272,8 +347,9 @@ export function getSlashCommandTrigger(text, cursor) {
   if (!lineToCursor.startsWith('/')) return null
   if (lineToCursor.includes('!')) return null
   if (lineToCursor.includes('://')) return null
-  if (/\s/.test(lineToCursor) && !lineToCursor.startsWith(`${NIB_COMMAND} `)) return null
+  if (/\s/.test(lineToCursor) && !lineToCursor.startsWith(`${NIB_COMMAND} `) && !lineToCursor.startsWith(`${URL_COMMAND} `)) return null
   if (parseNibCommand(fullLine) && lineToCursor.trim() !== NIB_COMMAND && !lineToCursor.startsWith(`${NIB_COMMAND} `)) return null
+  if (parseUrlCommand(fullLine) && lineToCursor.trim() !== URL_COMMAND && !lineToCursor.startsWith(`${URL_COMMAND} `)) return null
 
   return {
     start: lineStart,

@@ -1,3 +1,6 @@
+import TurndownService from 'turndown'
+import { buildNibPrompt } from './nibPrompts.js'
+
 const AGENT_BASE = 'http://localhost:3210'
 const MAX_PAGE_CHARS = 25_000
 
@@ -40,7 +43,7 @@ export function stripHtmlToText(html) {
 
   try {
     const doc = new DOMParser().parseFromString(s, 'text/html')
-    for (const tag of ['script', 'style', 'nav', 'footer', 'aside', 'head']) {
+    for (const tag of ['script', 'style', 'nav', 'footer', 'aside', 'head', 'img', 'picture', 'svg']) {
       doc.querySelectorAll(tag).forEach(el => el.remove())
     }
     const text = (doc.body?.innerText ?? doc.body?.textContent ?? '')
@@ -58,102 +61,86 @@ export function stripHtmlToText(html) {
   }
 }
 
-export function buildUrlCommandsPrompt(pageText, url) {
-  return [
-    `Extract every shell command, CLI invocation, and runnable code example from this web page. Source: ${url}`,
-    'Format as a markdown note:',
-    '- Heading with the page title or URL',
-    '- Each command in a fenced code block with the correct language tag (bash, shell, python, etc.)',
-    '- A one-line description above each code block',
-    'Only include commands a user would actually run. If none are found, say so.',
-    '',
-    '---',
-    pageText,
-  ].join('\n')
+export function htmlToMarkdown(html, url = '') {
+  const raw = String(html ?? '')
+  if (!raw.trim()) return ''
+
+  const turndown = new TurndownService({
+    bulletListMarker: '-',
+    codeBlockStyle: 'fenced',
+    headingStyle: 'atx',
+  })
+
+  turndown.remove(['script', 'style', 'nav', 'footer', 'aside', 'head', 'img', 'picture', 'svg'])
+
+  const fallbackTitle = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+    ?.replace(/\s+/g, ' ')
+    .trim()
+  const fallbackBody = raw.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? raw
+
+  try {
+    const doc = typeof DOMParser !== 'undefined'
+      ? new DOMParser().parseFromString(raw, 'text/html')
+      : null
+    const title = doc?.querySelector('title')?.textContent?.trim() || fallbackTitle
+    const source = doc?.body ?? fallbackBody
+    const markdown = turndown.turndown(source)
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim()
+      .slice(0, MAX_PAGE_CHARS)
+
+    return [
+      title || url ? `# ${title || url}` : '',
+      url ? `Source: ${url}` : '',
+      markdown,
+    ].filter(Boolean).join('\n\n')
+  } catch {
+    const markdown = turndown.turndown(fallbackBody)
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim()
+      .slice(0, MAX_PAGE_CHARS)
+
+    return [
+      fallbackTitle || url ? `# ${fallbackTitle || url}` : '',
+      url ? `Source: ${url}` : '',
+      markdown,
+    ].filter(Boolean).join('\n\n')
+  }
 }
 
-export function buildUrlRoutesPrompt(pageText, url) {
-  return [
-    `Extract every HTTP API route, endpoint, and URL pattern from this web page. Source: ${url}`,
-    'Format as a markdown note:',
-    '- Heading with the page title or URL',
-    '- A markdown table: Method | Path | Description',
-    '- If request/response body examples are shown, include them as code blocks below the table',
-    'Only include actual API routes. If none are found, say so.',
-    '',
-    '---',
-    pageText,
-  ].join('\n')
+export function buildUrlCommandsPrompt(pageText, url, promptOverrides = {}) {
+  return buildNibPrompt(promptOverrides, 'url.commands', { pageText, url })
 }
 
-export function buildUrlSummaryPrompt(pageText, url) {
-  return [
-    `Summarize this web page as a concise, structured markdown reference note. Source: ${url}`,
-    'Include:',
-    '- A clear heading (use the page title if available)',
-    '- A brief overview (2-3 sentences)',
-    '- CLI commands (if any) in fenced code blocks',
-    '- API routes (if any) as a markdown table: Method | Path | Description',
-    '- Key configuration options or important values (if any)',
-    'Keep it focused - this is a reference note, not a transcript.',
-    '',
-    '---',
-    pageText,
-  ].join('\n')
+export function buildUrlRoutesPrompt(pageText, url, promptOverrides = {}) {
+  return buildNibPrompt(promptOverrides, 'url.routes', { pageText, url })
 }
 
-export function buildUrlTersePrompt(pageText, url, hint = '', { markdown = false } = {}) {
+export function buildUrlSummaryPrompt(pageText, url, promptOverrides = {}) {
+  return buildNibPrompt(promptOverrides, 'url.summary', { pageText, url })
+}
+
+export function buildUrlStructurePrompt(pageText, url, { markdown = false, promptOverrides = {} } = {}) {
+  return buildNibPrompt(promptOverrides, markdown ? 'url.markdown' : 'url.plain', { pageText, url })
+}
+
+export function buildUrlTersePrompt(pageText, url, hint = '', { markdown = false, promptOverrides = {} } = {}) {
   const h = String(hint ?? '').trim().toLowerCase()
-  const format = markdown
-    ? [
-        'Use minimal markdown only:',
-        '- No summary, no page title, no explanations.',
-        '- For commands, use one fenced code block per command.',
-        '- For routes, use a compact table with Method and Path only.',
-      ]
-    : [
-        'Use plain text only:',
-        '- No markdown.',
-        '- No summary, no page title, no explanations.',
-        '- Put each result on its own line.',
-      ]
-
-  const target = (h === 'commands' || h === 'command')
-    ? [
-        `Extract only runnable shell commands, CLI invocations, and code examples from this web page. Source: ${url}`,
-        'Include standalone CLI lines even when they are not in code fences, such as `ollama`, `ollama launch codex`, `npm install`, or `docker compose up`.',
-        'Include multi-line commands such as curl requests with JSON bodies.',
-        'Return commands exactly as shown, without descriptions.',
-        'Do not drop short commands just because a longer curl example is present.',
-        'Do not include navigation text, prose, headings, or duplicate commands.',
-        'If none are found, return: No commands found.',
-      ]
+  const formatInstructions = markdown
+    ? 'Use minimal markdown only:\n- No summary, no page title, no explanations.\n- For commands, use one fenced code block per command.\n- For routes, use a compact table with Method and Path only.'
+    : 'Use plain text only:\n- No markdown.\n- No summary, no page title, no explanations.\n- Put each result on its own line.'
+  const promptId = (h === 'commands' || h === 'command')
+    ? 'url.terseCommands'
     : (h === 'routes' || h === 'api' || h === 'endpoints')
-      ? [
-          `Extract only HTTP API routes, endpoints, and URL patterns from this web page. Source: ${url}`,
-          'Return only actual routes or endpoint URLs, preferably as METHOD path when a method is shown.',
-          'Do not include navigation text, prose, headings, or duplicate routes.',
-          'If none are found, return: No routes found.',
-        ]
-      : [
-          `Extract only concrete technical items from this web page. Source: ${url}`,
-          'Prioritize runnable commands, HTTP API routes, endpoint URLs, config keys, and exact values.',
-          'Do not summarize and do not include surrounding prose.',
-          'If no concrete technical items are found, return: No items found.',
-        ]
+      ? 'url.terseRoutes'
+      : 'url.terseItems'
 
-  return [
-    ...target,
-    ...format,
-    '',
-    '---',
-    pageText,
-  ].join('\n')
+  return buildNibPrompt(promptOverrides, promptId, { pageText, url, formatInstructions })
 }
 
-export function buildUrlNibPrompt(pageText, url, hint = '') {
-  const h = String(hint ?? '').trim().toLowerCase()
-  if (h === 'commands' || h === 'command') return buildUrlCommandsPrompt(pageText, url)
-  if (h === 'routes' || h === 'api' || h === 'endpoints') return buildUrlRoutesPrompt(pageText, url)
-  return buildUrlSummaryPrompt(pageText, url)
+export function buildUrlNibPrompt(pageText, url, { mode = 'structure', markdown = false, promptOverrides = {} } = {}) {
+  if (mode === 'commands') return buildUrlCommandsPrompt(pageText, url, promptOverrides)
+  if (mode === 'routes') return buildUrlRoutesPrompt(pageText, url, promptOverrides)
+  if (mode === 'summary') return buildUrlSummaryPrompt(pageText, url, promptOverrides)
+  return buildUrlStructurePrompt(pageText, url, { markdown, promptOverrides })
 }

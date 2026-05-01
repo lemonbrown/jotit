@@ -7,7 +7,7 @@ export function useLLMChat({ token, model }) {
   const [error, setError] = useState(null)
   const abortRef = useRef(false)
 
-  const sendMessage = useCallback(async (text, context, contextMode) => {
+  const sendMessage = useCallback(async (text, context, contextMode, options = {}) => {
     if (!text.trim() || isStreaming) return
 
     const userMessage = { role: 'user', content: text.trim() }
@@ -21,7 +21,7 @@ export function useLLMChat({ token, model }) {
     const historyForApi = nextMessages.map(({ role, content }) => ({ role, content }))
 
     streamLLMChat(
-      { token, model, messages: historyForApi, context, contextMode },
+      { token, model, messages: historyForApi, context, contextMode, images: options.images ?? [] },
       (chunk) => {
         if (abortRef.current) return
         setMessages(prev => {

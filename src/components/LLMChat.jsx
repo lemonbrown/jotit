@@ -2,17 +2,32 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { marked } from 'marked'
 import { useLLMChat } from '../hooks/useLLMChat'
 import { useLLMSettings } from '../hooks/useLLMSettings'
+import { getAttachmentsForNote } from '../utils/db'
 import { getLLMModels } from '../utils/llmClient'
-import { buildAllNotesLLMContext, buildNoteLLMContext, buildReferencedNotesContext } from '../utils/llmNoteContext'
+import {
+  MAX_IMAGE_CONTEXT_BYTES,
+  MAX_VISION_IMAGES,
+  appendImageAttachmentContext,
+  buildAllNotesLLMContext,
+  buildNoteLLMContext,
+  buildReferencedNotesContext,
+  collectImageAttachments,
+} from '../utils/llmNoteContext'
 import { loadStashItems, resolveStashRefs } from '../utils/stash'
 
 const NIB_MARKDOWN_RESPONSES_KEY = 'jotit_nib_markdown_responses'
+const NIB_VISION_MODE_KEY = 'jotit_nib_vision_mode'
 
 const BASE_MODES = [
   { id: 'note', label: 'Note' },
   { id: 'all', label: 'All notes' },
   { id: 'selection', label: 'Selection' },
 ]
+
+function extractNoteLinks(text) {
+  const matches = [...text.matchAll(/\[\[([^\]]+)\]\]/g)]
+  return [...new Set(matches.map(m => m[0]))]
+}
 
 function buildRegexContext({ pattern, flags, testStr, matchCount }) {
   const parts = [`Pattern: /${pattern}/${flags}`]
@@ -23,6 +38,26 @@ function buildRegexContext({ pattern, flags, testStr, matchCount }) {
 
 function noteTitle(note) {
   return String(note?.content ?? '').split('\n')[0].slice(0, 80) || 'Untitled'
+}
+
+function addVisionImagesFromContent(images, content, attachments) {
+  const usedBytes = images.reduce((sum, image) => sum + (image.bytes ?? 0), 0)
+  const remainingImages = Math.max(0, MAX_VISION_IMAGES - images.length)
+  const remainingBytes = Math.max(0, MAX_IMAGE_CONTEXT_BYTES - usedBytes)
+  if (!remainingImages || !remainingBytes) return images
+
+  const collected = collectImageAttachments(content, attachments, {
+    maxImages: remainingImages,
+    maxBytes: remainingBytes,
+  })
+
+  const seen = new Set(images.map(image => image.id))
+  for (const image of collected.images) {
+    if (seen.has(image.id)) continue
+    images.push(image)
+    seen.add(image.id)
+  }
+  return images
 }
 
 // ── Note reference picker ─────────────────────────────────────────────────────
@@ -94,7 +129,9 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
   const [atPicker, setAtPicker] = useState(null) // null | { start: number, query: string }
   const [pickerIndex, setPickerIndex] = useState(0)
   const [renderMarkdown, setRenderMarkdown] = useState(() => localStorage.getItem(NIB_MARKDOWN_RESPONSES_KEY) === 'true')
+  const [visionMode, setVisionMode] = useState(() => localStorage.getItem(NIB_VISION_MODE_KEY) === 'true')
   const [savedMessageIndex, setSavedMessageIndex] = useState(null)
+  const [insertedLinksIndex, setInsertedLinksIndex] = useState(null)
   const [stashItems, setStashItems] = useState(() => loadStashItems())
   const [ollamaModels, setOllamaModels] = useState([])
   const [ollamaModelLoading, setOllamaModelLoading] = useState(false)
@@ -116,6 +153,11 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
   } = useLLMSettings()
   const activeSettingsModel = llmProvider === 'ollama' ? ollamaModel : remoteModel
   const chatModel = activeSettingsModel || model
+  const structuredVisionEnabled = visionMode && llmProvider !== 'ollama'
+  const noteAttachments = useMemo(() => note?.id ? getAttachmentsForNote(note.id) : [], [note?.content, note?.id])
+  const getNoteAttachments = useCallback((targetNote) => (
+    targetNote?.id ? (targetNote.id === note?.id ? noteAttachments : getAttachmentsForNote(targetNote.id)) : []
+  ), [note?.id, noteAttachments])
 
   const MODES = [
     ...BASE_MODES,
@@ -170,6 +212,14 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
     })
   }
 
+  const toggleVisionMode = () => {
+    setVisionMode(prev => {
+      const next = !prev
+      localStorage.setItem(NIB_VISION_MODE_KEY, String(next))
+      return next
+    })
+  }
+
   // ── Picker results ──────────────────────────────────────────────────────────
 
   const pickerResults = useMemo(() => {
@@ -209,17 +259,6 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
 
   // ── Auto-send initial message ───────────────────────────────────────────────
 
-  useEffect(() => {
-    if (!autoSendInitialMessage) return
-    const nonce = initialMessageNonce || 'initial'
-    if (!initialMessage.trim() || autoSentRef.current === nonce) return
-    autoSentRef.current = nonce
-    const ctx = resolveStashRefs(regexContext ? buildRegexContext(regexContext) : buildNoteLLMContext(note), stashItems)
-    const mode = regexContext ? 'regex' : contextMode
-    sendMessage(resolveStashRefs(initialMessage.trim(), stashItems), ctx, mode)
-    setInput('')
-  }, [autoSendInitialMessage, contextMode, initialMessage, initialMessageNonce, note, regexContext, sendMessage, stashItems])
-
   // ── Escape closes nib (not picker) ─────────────────────────────────────────
 
   useEffect(() => {
@@ -243,23 +282,66 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
 
   const buildContext = useCallback(() => {
     let ctx = ''
+    const includeImageData = !structuredVisionEnabled
     if (contextMode === 'regex') ctx = regexContext ? buildRegexContext(regexContext) : ''
-    else if (contextMode === 'all') ctx = buildAllNotesLLMContext(notes)
-    else if (contextMode === 'selection') ctx = selectionText
-    else ctx = buildNoteLLMContext(note)
+    else if (contextMode === 'all') ctx = buildAllNotesLLMContext(notes, { getAttachmentsForNote: getNoteAttachments, includeImageData })
+    else if (contextMode === 'selection') ctx = appendImageAttachmentContext(selectionText, selectionText, noteAttachments, { includeImageData })
+    else ctx = buildNoteLLMContext(note, { attachments: noteAttachments, includeImageData })
 
     if (referencedNotes.length > 0) {
-      const refCtx = buildReferencedNotesContext(referencedNotes)
+      const refCtx = buildReferencedNotesContext(referencedNotes, { getAttachmentsForNote: getNoteAttachments, includeImageData })
       ctx = ctx ? `${ctx}\n\n${refCtx}` : refCtx
     }
     return resolveStashRefs(ctx, stashItems)
-  }, [contextMode, regexContext, notes, selectionText, note, referencedNotes, stashItems])
+  }, [contextMode, getNoteAttachments, note, noteAttachments, notes, referencedNotes, regexContext, selectionText, stashItems, structuredVisionEnabled])
+
+  const buildVisionImages = useCallback(() => {
+    if (!structuredVisionEnabled || contextMode === 'regex') return []
+    const images = []
+
+    if (contextMode === 'all') {
+      for (const item of (notes ?? [])) {
+        addVisionImagesFromContent(images, item.content, getNoteAttachments(item))
+        if (images.length >= MAX_VISION_IMAGES) break
+      }
+    } else if (contextMode === 'selection') {
+      addVisionImagesFromContent(images, selectionText, noteAttachments)
+    } else {
+      addVisionImagesFromContent(images, note?.content, noteAttachments)
+    }
+
+    for (const refNote of referencedNotes) {
+      addVisionImagesFromContent(images, refNote.content, getNoteAttachments(refNote))
+      if (images.length >= MAX_VISION_IMAGES) break
+    }
+
+    return images
+  }, [contextMode, getNoteAttachments, note?.content, noteAttachments, notes, referencedNotes, selectionText, structuredVisionEnabled])
+
+  useEffect(() => {
+    if (!autoSendInitialMessage) return
+    const nonce = initialMessageNonce || 'initial'
+    if (!initialMessage.trim() || autoSentRef.current === nonce) return
+    autoSentRef.current = nonce
+    const images = structuredVisionEnabled ? buildVisionImages() : []
+    const ctx = resolveStashRefs(
+      regexContext
+        ? buildRegexContext(regexContext)
+        : buildNoteLLMContext(note, { attachments: noteAttachments, includeImageData: !structuredVisionEnabled }),
+      stashItems
+    )
+    const mode = regexContext ? 'regex' : contextMode
+    sendMessage(resolveStashRefs(initialMessage.trim(), stashItems), ctx, mode, { images })
+    setInput('')
+  }, [autoSendInitialMessage, buildVisionImages, contextMode, initialMessage, initialMessageNonce, note, noteAttachments, regexContext, sendMessage, stashItems, structuredVisionEnabled])
 
   // ── Send ────────────────────────────────────────────────────────────────────
 
   const handleSend = () => {
     if (!input.trim() || isStreaming) return
-    sendMessage(resolveStashRefs(input.trim(), stashItems), buildContext(), contextMode)
+    sendMessage(resolveStashRefs(input.trim(), stashItems), buildContext(), contextMode, {
+      images: structuredVisionEnabled ? buildVisionImages() : [],
+    })
     setInput('')
   }
 
@@ -436,6 +518,19 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
             MD
           </button>
           <button
+            onClick={toggleVisionMode}
+            disabled={llmProvider === 'ollama'}
+            title={llmProvider === 'ollama' ? 'Vision mode uses OpenRouter models' : 'Send note images as structured vision inputs'}
+            aria-pressed={structuredVisionEnabled}
+            className={`text-[11px] transition-colors disabled:cursor-not-allowed disabled:text-zinc-700 ${
+              structuredVisionEnabled
+                ? 'text-violet-300 hover:text-violet-100'
+                : 'text-zinc-600 hover:text-zinc-400'
+            }`}
+          >
+            Vision
+          </button>
+          <button
             onClick={onClose}
             title="Close (Esc)"
             className="text-zinc-600 hover:text-zinc-300 transition-colors"
@@ -556,6 +651,24 @@ export default function LLMChat({ note, notes = [], selectionText = '', onJumpTo
                   <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-zinc-400 align-middle animate-pulse rounded-sm" />
                 )}
               </div>
+              {msg.role === 'assistant' && !(isStreaming && i === messages.length - 1) && (() => {
+                const links = extractNoteLinks(msg.content)
+                if (!links.length || !note?.id) return null
+                return (
+                  <button
+                    onClick={() => {
+                      window.dispatchEvent(new CustomEvent('jotit:nib-insert-links', {
+                        detail: { noteId: note.id, text: links.join('\n') },
+                      }))
+                      setInsertedLinksIndex(i)
+                    }}
+                    title="Insert note links into the editor"
+                    className="mt-1 text-[10px] text-violet-500 hover:text-violet-300 transition-colors"
+                  >
+                    {insertedLinksIndex === i ? 'Links inserted' : `Insert ${links.length > 1 ? `${links.length} ` : ''}link${links.length > 1 ? 's' : ''} into note`}
+                  </button>
+                )
+              })()}
               {msg.role === 'assistant' && onCreateNoteFromContent && !(isStreaming && i === messages.length - 1) && (
                 <button
                   onClick={() => sendResponseToNote(msg, i)}

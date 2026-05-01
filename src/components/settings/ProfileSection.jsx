@@ -10,6 +10,8 @@ export default function ProfileSection({
   onSaveBucketName,
   publicCollectionCount,
   publicNoteCount,
+  clearBucketNoteState,
+  onClearAllBucketNotes,
 }) {
   const trimmedBucketName = bucketName.trim()
 
@@ -58,9 +60,29 @@ export default function ProfileSection({
         </p>
       )}
       {bucketNotes.length > 0 && (
-        <p className="text-[11px] text-zinc-600">
-          Direct notes: {bucketNotes.slice(0, 4).map(note => note.title ?? 'untitled').join(', ')}{bucketNotes.length > 4 ? ` +${bucketNotes.length - 4} more` : ''}
-        </p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] text-zinc-600 min-w-0 truncate">
+            Direct: {bucketNotes.slice(0, 4).map(note => note.title ?? 'untitled').join(', ')}{bucketNotes.length > 4 ? ` +${bucketNotes.length - 4} more` : ''}
+          </p>
+          {onClearAllBucketNotes && (
+            <button
+              onClick={onClearAllBucketNotes}
+              disabled={clearBucketNoteState === 'loading' || clearBucketNoteState === 'ok'}
+              className={`shrink-0 px-2 py-0.5 text-[11px] rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                clearBucketNoteState === 'confirm'
+                  ? 'bg-amber-950 hover:bg-amber-900 border-amber-800 text-amber-200'
+                  : clearBucketNoteState === 'ok'
+                    ? 'border-zinc-700 text-zinc-500 cursor-default'
+                    : clearBucketNoteState?.error
+                      ? 'border-red-900 text-red-400 cursor-default'
+                      : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-400'
+              }`}
+              title="Make all directly-shared notes private"
+            >
+              {clearBucketNoteState === 'confirm' ? 'Confirm?' : clearBucketNoteState === 'loading' ? 'Clearing...' : clearBucketNoteState === 'ok' ? 'Cleared' : clearBucketNoteState?.error ? 'Failed' : 'Clear all'}
+            </button>
+          )}
+        </div>
       )}
       {bucketStatus?.ok && (
         <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">

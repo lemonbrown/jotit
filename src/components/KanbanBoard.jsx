@@ -74,11 +74,13 @@ function KanbanColumn({
 
     const onDragEnter = (e) => {
       e.preventDefault()
+      e.stopPropagation()
       dragCounterRef.current++
       setDragOver(true)
     }
     const onDragOver = (e) => {
       e.preventDefault()
+      e.stopPropagation()
       e.dataTransfer.dropEffect = 'move'
     }
     const onDragLeave = () => {
@@ -90,6 +92,7 @@ function KanbanColumn({
     }
     const handleDrop = (e) => {
       e.preventDefault()
+      e.stopPropagation()
       dragCounterRef.current = 0
       setDragOver(false)
       const noteId = e.dataTransfer.getData('application/x-jotit-note-id') || e.dataTransfer.getData('text/plain')
@@ -186,6 +189,7 @@ function KanbanColumn({
 
 export default function KanbanBoard({
   notes,
+  prefillCollections = [],
   activeNoteId,
   onSelectNote,
   columns = DEFAULT_COLUMNS,
@@ -193,13 +197,25 @@ export default function KanbanBoard({
   onKanbanStatusChange,
 }) {
   const [draggingId, setDraggingId] = useState(null)
+  const [prefillCollectionId, setPrefillCollectionId] = useState('')
 
   const getColumnNotes = useCallback((colName) => {
-    if (colName === columns[0]) {
-      return notes.filter(n => !n.kanbanStatus || !columns.includes(n.kanbanStatus) || n.kanbanStatus === colName)
-    }
     return notes.filter(n => n.kanbanStatus === colName)
-  }, [notes, columns])
+  }, [notes])
+
+  const prefillCandidates = useCallback((collectionId) => (
+    notes.filter(note => (
+      note.collectionId === collectionId &&
+      (!note.kanbanStatus || !columns.includes(note.kanbanStatus))
+    ))
+  ), [columns, notes])
+
+  const handlePrefillBacklog = useCallback(() => {
+    if (!prefillCollectionId || !columns[0]) return
+    prefillCandidates(prefillCollectionId).forEach(note => {
+      onKanbanStatusChange(note.id, columns[0])
+    })
+  }, [columns, onKanbanStatusChange, prefillCandidates, prefillCollectionId])
 
   const handleDrop = useCallback((noteId, targetColumn) => {
     onKanbanStatusChange(noteId, targetColumn)
@@ -231,12 +247,38 @@ export default function KanbanBoard({
     onUpdateColumns([...columns, name])
   }, [columns, onUpdateColumns])
 
+  const selectedPrefillCount = prefillCollectionId ? prefillCandidates(prefillCollectionId).length : 0
+
   return (
     <div className="flex flex-col h-full" onDragOver={e => e.preventDefault()}>
       {/* Board toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 shrink-0">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-zinc-800 shrink-0">
         <span className="text-[10px] text-zinc-600 select-none">double-click column header to rename · drag cards between columns</span>
         <div className="flex-1" />
+        {prefillCollections.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <select
+              value={prefillCollectionId}
+              onChange={e => setPrefillCollectionId(e.target.value)}
+              title="Choose a collection to add unassigned notes to Backlog"
+              className="max-w-40 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400 outline-none hover:border-zinc-600 focus:border-zinc-500"
+            >
+              <option value="">Prefill from...</option>
+              {prefillCollections.map(collection => (
+                <option key={collection.id} value={collection.id}>{collection.name}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handlePrefillBacklog}
+              disabled={!selectedPrefillCount}
+              title={selectedPrefillCount ? `Add ${selectedPrefillCount} unassigned notes to ${columns[0]}` : 'No unassigned notes in selected collection'}
+              className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              fill {columns[0]}
+            </button>
+          </div>
+        )}
         <button
           type="button"
           onClick={handleAddColumn}

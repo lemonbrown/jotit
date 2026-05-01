@@ -90,6 +90,27 @@ HTTP execution:
 4. Browser-direct execution remains available for CORS-friendly requests.
 5. Binary responses from the local agent can be downloaded locally.
 
+URL fetch notes:
+
+1. `/url <url>` fetches a page and converts HTML to readable text without Nib.
+2. `/url --note <url>` creates a new note from the readable text.
+3. `/url --inline <url>` inserts the readable text into the current note.
+4. `/url --markdown <url>` uses deterministic Turndown HTML-to-markdown conversion, still without Nib.
+5. `/nib url <url>` fetches the page as readable text; it should not summarize or convert to markdown by default.
+6. `/nib --markdown url <url>` sends readable page text to Nib and asks it to reconstruct the page as markdown without summarizing.
+7. `/nib --summary url <url>` requests a concise structured summary.
+8. `/nib --commands url <url>` and `/nib --routes url <url>` are the only Nib URL modes that should intentionally extract commands or API endpoints.
+9. Fetching reuses `src/utils/webFetch.js`; keep URL retrieval, HTML-to-text, HTML-to-markdown, and Nib URL prompt behavior there rather than duplicating it in components.
+
+Nib prompt editing:
+
+1. Editable Nib prompts live in Settings under `Nib prompts` and are stored in `settings.nibPrompts`.
+2. Default prompt text and prompt metadata live in `src/utils/nibPrompts.js`.
+3. Prompt templates use `{{variable}}` placeholders; preserve documented variables when editing defaults.
+4. The browser client sends prompt overrides to `jotit-agent` for Ollama calls, so local and remote Nib providers use the same edited prompts.
+5. New Nib functions should define their default prompt in `src/utils/nibPrompts.js` and accept overrides rather than hardcoding prompt text in components.
+6. CORS-blocked pages require `jotit-agent`, using the same local agent token path as HTTP execution.
+
 OpenAPI:
 
 1. OpenAPI 3.x JSON imports are normalized on import.

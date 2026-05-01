@@ -11,7 +11,7 @@ const HOST = '127.0.0.1'
 const PORT = 3210
 const TOKEN_ENV = 'JOTIT_AGENT_TOKEN'
 const CONFIG_PATH = path.join(os.homedir(), '.jotit-agent.json')
-const MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 const MAX_RESPONSE_BODY_BYTES = 25 * 1024 * 1024
 const MAX_SHELL_OUTPUT_BYTES = 512 * 1024
 const MAX_TIMEOUT_MS = 30000
@@ -325,6 +325,38 @@ Rules:
 - If the changes warrant it, add a blank line then a short body (bullet points or prose, ≤5 lines).
 - Do not mention file names unless essential for clarity.
 - If the diff is empty or the working tree is clean, say so in one sentence instead.`
+const SECRET_SCAN_SYSTEM_PROMPT = `You review notes for likely secrets and credentials.
+
+Rules:
+- Return compact JSON only.
+- Do not repeat complete secret values.
+- Prefer provider-specific credentials, API keys, tokens, private keys, passwords, database URLs, and cloud credentials.
+- Ignore obvious placeholders, examples, and public identifiers.
+- If uncertain, include the finding with severity "low".
+
+Return:
+{
+  "matches": [
+    {
+      "label": "short credential type",
+      "severity": "high|medium|low",
+      "redacted": "first4***last2",
+      "reason": "short reason"
+    }
+  ]
+}`
+
+function renderPromptTemplate(template, variables = {}) {
+  return String(template ?? '').replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, key) => {
+    const value = variables[key]
+    return value == null ? '' : String(value)
+  }).trim()
+}
+
+function promptOverride(promptOverrides, id, variables = {}) {
+  const template = promptOverrides && typeof promptOverrides === 'object' ? promptOverrides[id] : ''
+  return typeof template === 'string' && template.trim() ? renderPromptTemplate(template, variables) : ''
+}
 
 const token = loadOrCreateToken()
 const app = express()
@@ -612,7 +644,7 @@ app.post('/ollama/embed', requireToken(token), async (req, res) => {
 })
 
 app.post('/ollama/chat', requireToken(token), async (req, res) => {
-  const { model, messages, context, contextMode } = req.body ?? {}
+  const { model, messages, context, contextMode, promptOverrides } = req.body ?? {}
 
   if (!model || typeof model !== 'string') {
     return res.status(400).json({ error: 'model is required' })
@@ -624,33 +656,37 @@ app.post('/ollama/chat', requireToken(token), async (req, res) => {
   const ctx = context?.trim() ?? ''
   let systemContent
   if (contextMode === 'regex') {
-    systemContent = `${REGEX_SYSTEM_PROMPT}\n\n${ctx ? `Current regex state:\n${ctx}` : ''}`
+    systemContent = promptOverride(promptOverrides, 'system.regex', { context: ctx }) || `${REGEX_SYSTEM_PROMPT}\n\n${ctx ? `Current regex state:\n${ctx}` : ''}`
   } else if (contextMode === 'sqlite') {
-    systemContent = `${SQLITE_SYSTEM_PROMPT}\n\n${ctx ? `Database context:\n${ctx}` : ''}`
+    systemContent = promptOverride(promptOverrides, 'system.sqlite', { context: ctx }) || `${SQLITE_SYSTEM_PROMPT}\n\n${ctx ? `Database context:\n${ctx}` : ''}`
   } else if (contextMode === 'search') {
-    systemContent = `${SEARCH_PLAN_SYSTEM_PROMPT}\n\n${ctx ? `Search context:\n${ctx}` : ''}`
+    systemContent = promptOverride(promptOverrides, 'system.search', { context: ctx }) || `${SEARCH_PLAN_SYSTEM_PROMPT}\n\n${ctx ? `Search context:\n${ctx}` : ''}`
   } else if (contextMode === 'search-rerank') {
-    systemContent = `${SEARCH_RERANK_SYSTEM_PROMPT}\n\n${ctx ? `Candidate context:\n${ctx}` : ''}`
+    systemContent = promptOverride(promptOverrides, 'system.searchRerank', { context: ctx }) || `${SEARCH_RERANK_SYSTEM_PROMPT}\n\n${ctx ? `Candidate context:\n${ctx}` : ''}`
   } else if (contextMode === 'all') {
     systemContent = ctx
-      ? `You are a helpful assistant. The user has the following notes in their workspace:\n\n${ctx}\n\nAnswer questions about these notes concisely.`
-      : 'You are a helpful assistant.'
+      ? promptOverride(promptOverrides, 'system.all', { context: ctx }) || `You are a helpful assistant. The user has the following notes in their workspace:\n\n${ctx}\n\nAnswer questions about these notes concisely.`
+      : promptOverride(promptOverrides, 'system.empty') || 'You are a helpful assistant.'
   } else if (contextMode === 'selection') {
     systemContent = ctx
-      ? `You are a helpful assistant. The user has selected the following text from a note:\n\n${ctx}\n\nAnswer questions about this selection concisely.`
-      : 'You are a helpful assistant.'
+      ? promptOverride(promptOverrides, 'system.selection', { context: ctx }) || `You are a helpful assistant. The user has selected the following text from a note:\n\n${ctx}\n\nAnswer questions about this selection concisely.`
+      : promptOverride(promptOverrides, 'system.empty') || 'You are a helpful assistant.'
   } else if (contextMode === 'git-summary') {
     systemContent = ctx
-      ? `${GIT_SUMMARY_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
-      : GIT_SUMMARY_SYSTEM_PROMPT
+      ? promptOverride(promptOverrides, 'system.gitSummary', { context: ctx }) || `${GIT_SUMMARY_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
+      : promptOverride(promptOverrides, 'system.gitSummary', { context: '' }) || GIT_SUMMARY_SYSTEM_PROMPT
   } else if (contextMode === 'git-commit-msg') {
     systemContent = ctx
-      ? `${GIT_COMMIT_MSG_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
-      : GIT_COMMIT_MSG_SYSTEM_PROMPT
+      ? promptOverride(promptOverrides, 'system.gitCommitMessage', { context: ctx }) || `${GIT_COMMIT_MSG_SYSTEM_PROMPT}\n\nGit context:\n${ctx}`
+      : promptOverride(promptOverrides, 'system.gitCommitMessage', { context: '' }) || GIT_COMMIT_MSG_SYSTEM_PROMPT
+  } else if (contextMode === 'secret-scan') {
+    systemContent = ctx
+      ? promptOverride(promptOverrides, 'system.secretScan', { context: ctx }) || `${SECRET_SCAN_SYSTEM_PROMPT}\n\nNote content:\n${ctx}`
+      : promptOverride(promptOverrides, 'system.secretScan', { context: '' }) || SECRET_SCAN_SYSTEM_PROMPT
   } else {
     systemContent = ctx
-      ? `You are a helpful assistant. The user is working on a note.\n\nNote:\n---\n${ctx}\n---\n\nAnswer questions about this note concisely. If the note doesn't contain relevant information, say so.`
-      : 'You are a helpful assistant.'
+      ? promptOverride(promptOverrides, 'system.note', { context: ctx }) || `You are a helpful assistant. The user is working on a note.\n\nNote:\n---\n${ctx}\n---\n\nAnswer questions about this note concisely. If the note doesn't contain relevant information, say so.`
+      : promptOverride(promptOverrides, 'system.empty') || 'You are a helpful assistant.'
   }
 
   const systemMessage = { role: 'system', content: systemContent }
